@@ -311,7 +311,7 @@ gsheets export <YOUR_SPREADSHEET_ID> --format csv --sheet Sheet1 --path sheet1.c
 
 | Flag | Effect |
 |---|---|
-| `--format pdf` (default) `/ xlsx / ods` | Whole-workbook render via Drive `files.export`. `--sheet` is **ignored**. Needs a **Drive scope** (`--scopes broad`), else `drive_unavailable`. |
+| `--format pdf` (default) `/ xlsx / ods` | Whole-workbook render via Drive `files.export`. `--sheet` is **ignored**. Needs a Drive scope; the default `drive.file` covers files this tool created or opened — only a sheet you merely have a link to needs `--scopes broad`. No Drive service at all → `drive_unavailable`. |
 | `--format csv / tsv` | One named `--sheet`, read via the Sheets API and serialized locally (Drive's csv export only emits the first sheet, so this avoids Drive). `--sheet` is **Required** (omit ⇒ `missing_sheet`). Sheets scope only. |
 | `--path P` | Output path. Defaults to `<spreadsheetId>.<format>` in the cwd. |
 | `--sheet S` | Required for csv/tsv; ignored for pdf/xlsx/ods. |

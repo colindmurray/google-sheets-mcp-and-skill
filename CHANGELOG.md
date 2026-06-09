@@ -97,6 +97,11 @@ present, complex reads are serialized into terse round-trippable lines, and writ
   subcommand (`gsheets --json read-many …`).
 
 ### Changed
+- Re-tiered the bundled skill's reference docs into `skill/references/basic.md` (~80% of tasks),
+  `intermediate.md` (~15%), and `advanced.md` (~5%) for progressive disclosure; `SKILL.md` now
+  routes to the right tier on demand. Replaces the former `commands.md` / `reading.md` /
+  `writing.md`.
+- The CLI gained a top-level `--version` flag (`gsheets --version`).
 - `structure(action="read")` now requests `sheets.rowGroups` + `sheets.columnGroups` for the
   dimension-groups read (there is no single `dimensionGroups` field on a `Sheet`); the
   flattened `dimensionGroups` output key is unchanged.
@@ -182,7 +187,7 @@ shared code, with read-side richness as the thesis.
 - **Pydantic mirror models** (`models.py`, adapter-side only) for MCP structured output,
   mirroring each core return dict field-for-field with a terse text rendering.
 - **Bundled skill** — `skill/SKILL.md` wrapping the `gsheets` CLI, with reference docs
-  under `skill/references/` (commands, reading, writing).
+  under `skill/references/`.
 - **Tests** — unit suite against a mocked Sheets service with golden-master fixtures for
   the serializers, plus a subprocess **boundary-guard** test enforcing the pure-core
   invariant, and opt-in live integration tests gated on `GSHEETS_LIVE` /

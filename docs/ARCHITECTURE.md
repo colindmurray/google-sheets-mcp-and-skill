@@ -228,8 +228,8 @@ hatch is presented last.
 | `set_validation` | Set / clear data validation on a range (structured rule, round-trips from `inspect`). | write |
 | `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — plus the v0.2 reads (native tables, basic filter, filter views, banding, slicers) and writes (table / banding / filter / slicer CRUD, spreadsheet `title`/`locale`/`timeZone`). One structural interface. | read/write |
 | `manage_sheets` | Add / delete / duplicate / rename / reorder tabs; returns new ids. | write |
-| `metadata` | Read / write developer metadata for durable row/column/sheet anchors. | write |
-| `charts` | Create / update / delete / read embedded charts (read returns metadata only in v1). | write |
+| `metadata` | Read / write developer metadata for durable row/column/sheet anchors. | read/write |
+| `charts` | Create / update / delete / read embedded charts (read returns metadata only in v1). | read/write |
 | `data_ops` | Single-request data verbs: `find_replace`, `delete_duplicates`, `trim_whitespace`, `sort_range`, `text_to_columns`, `auto_fill`, `copy_paste`, `cut_paste`. | write |
 | `dimensions` | Row/column ops: `insert` / `delete` / `move` / `append`, `auto_resize`, `set_props` (height/width/hide), and `read` (which rows/cols are hidden). | read/write |
 | `comments` | Drive threaded comments on the spreadsheet file (author, content, replies, resolved state). Full CRUD via an `action` dispatch (`read` / `create` / `reply` / `resolve` / `delete`); uses the Drive API, not the Sheets API. | read/write |
@@ -390,7 +390,7 @@ columns. A `DROPDOWN` column's data-validation rule renders with the **same**
 table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)
 ```
 
-`columnType` is one of `TEXT | DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATETIME |
+A column's flattened `type` key (Google's API field is `columnType`) is one of `TEXT | DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATETIME |
 DROPDOWN | CHECKBOX | SMART_CHIP | RATING`. Tables are full-CRUD via the `structure`
 actions `add_table` / `update_table` / `delete_table`.
 

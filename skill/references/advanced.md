@@ -258,7 +258,8 @@ gsheets batch <YOUR_SPREADSHEET_ID> --requests-json @requests.json
   preserved exactly — core never sorts or rewrites. An empty list raises `empty_payload`.
 - Returns `{"ok": true, "replies": [...], "newIds": {...}}`. `newIds` buckets the ids the API only
   surfaces in `replies[]` (`sheetIds` / `chartIds` / `namedRangeIds` / `protectedRangeIds` /
-  `metadataIds`, each a list) — capture them so a create-then-populate flow stays one batch.
+  `metadataIds` / `tableIds` / `bandedRangeIds` / `filterViewIds` / `slicerIds`, each a list) —
+  capture them so a create-then-populate flow stays one batch.
 - **Unguarded and powerful** — confirm before running, and prefer a typed command when one exists
   (the typed paths auto-build masks, capture ids, and resolve A1 for you).
 

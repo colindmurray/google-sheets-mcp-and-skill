@@ -12,8 +12,16 @@ import json
 
 import pytest
 
-from gsheets import cli
+from gsheets import __version__, cli
 from gsheets.core.errors import SheetsError
+
+
+def test_version_flag_prints_and_exits_zero(capsys):
+    """``gsheets --version`` prints ``gsheets <version>`` and exits 0 (argparse version action)."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"gsheets {__version__}"
 
 
 @pytest.fixture

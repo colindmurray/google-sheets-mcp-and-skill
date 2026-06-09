@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "google-sheets-mcp-and-skill"
 version = "0.2.0"
-description = "Best-in-class Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness (values + formulas, cell formatting, conditional-format rules) as the thesis."
+description = "Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness — values + formulas, cell formatting, and conditional-format rules — as the thesis."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

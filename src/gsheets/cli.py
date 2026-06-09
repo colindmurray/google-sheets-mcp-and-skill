@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 
-from . import auth, core
+from . import __version__, auth, core
 from .core.errors import SheetsError
 
 # Render modes / input modes / action enums mirrored from core so argparse can validate up
@@ -135,6 +135,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Read and write Google Sheets — values + formulas, cell formatting/colors, "
             "conditional-format rules, validation, structure — from the command line."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"gsheets {__version__}",
+        help="print the gsheets version and exit",
     )
     parser.add_argument(
         "--json",

@@ -163,7 +163,7 @@ $ gsheets structure <YOUR_SPREADSHEET_ID> --action read --sheet Sales
 # Read the in-cell rich text and links most tools can't see (per-run; multi-link cells recoverable).
 $ gsheets inspect <YOUR_SPREADSHEET_ID> 'Dash!A1' --rich-text
 # Dash!A1
-  runs A1: "Docs"[0:4 bold fg #1155CC link https://docs.example.com] + " / Sheet"[5:12 link https://sheet.example.com]
+  runs A1: "Docs"[0:4 bold fg #1155CC link https://docs.example.com] + " / Sheet"[4:12 link https://sheet.example.com]
 
 # Read what the humans asked for.
 $ gsheets comments <YOUR_SPREADSHEET_ID>
