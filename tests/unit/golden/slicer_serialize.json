@@ -20,14 +20,14 @@
             {"userEnteredValue": "East"}
           ]
         }
-      },
-      "position": {
-        "overlayPosition": {
-          "anchorCell": {
-            "sheetId": 1,
-            "rowIndex": 0,
-            "columnIndex": 8
-          }
+      }
+    },
+    "position": {
+      "overlayPosition": {
+        "anchorCell": {
+          "sheetId": 1,
+          "rowIndex": 0,
+          "columnIndex": 8
         }
       }
     }

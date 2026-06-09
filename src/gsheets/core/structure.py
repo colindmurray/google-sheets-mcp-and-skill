@@ -42,6 +42,8 @@ _REPLY_ID_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("addTable", "tableIds", ("table", "tableId")),
     ("addBanding", "bandedRangeIds", ("bandedRange", "bandedRangeId")),
     ("addFilterView", "filterViewIds", ("filter", "filterViewId")),
+    # v0.2 §X.16 — slicer adds surface their new id in ``replies[].addSlicer.slicer.slicerId``.
+    ("addSlicer", "slicerIds", ("slicer", "slicerId")),
 )
 
 
@@ -60,7 +62,8 @@ def capture_new_ids(replies: list[dict]) -> dict:
         A dict of captured id lists, always carrying every bucket key (empty lists when the
         corresponding reply kind is absent), e.g.
         ``{"sheetIds": [7], "chartIds": [], "namedRangeIds": [], "protectedRangeIds": [],
-        "metadataIds": [], "tableIds": [], "bandedRangeIds": [], "filterViewIds": []}``.
+        "metadataIds": [], "tableIds": [], "bandedRangeIds": [], "filterViewIds": [],
+        "slicerIds": []}``.
     """
     out: dict[str, list] = {
         "sheetIds": [],
@@ -71,6 +74,7 @@ def capture_new_ids(replies: list[dict]) -> dict:
         "tableIds": [],
         "bandedRangeIds": [],
         "filterViewIds": [],
+        "slicerIds": [],
     }
     for reply in replies or []:
         if not isinstance(reply, dict):
@@ -190,6 +194,10 @@ _STRUCTURE_ACTIONS = frozenset(
         "add_filter_view",
         "update_filter_view",
         "delete_filter_view",
+        # v0.2 §X.16 — slicer write CRUD.
+        "add_slicer",
+        "update_slicer",
+        "delete_slicer",
         # v0.2 §X.12 — spreadsheet-scoped properties (title/locale/timeZone); no sheet required.
         "spreadsheet_props",
     }
@@ -223,6 +231,10 @@ _STRUCTURE_PARAMS: dict[str, set[str]] = {
     "add_filter_view": {"title", "sorted", "criteria"},
     "update_filter_view": {"filterViewId", "title", "range", "sorted", "criteria"},
     "delete_filter_view": {"filterViewId"},
+    # slicers (#16)
+    "add_slicer": {"title", "dataRange", "columnIndex", "anchor", "criteria"},
+    "update_slicer": {"slicerId", "title", "dataRange", "columnIndex", "criteria"},
+    "delete_slicer": {"slicerId"},
     # spreadsheet properties (#12)
     "spreadsheet_props": {"title", "locale", "timeZone"},
 }
@@ -253,7 +265,10 @@ def structure(
     applicable. v0.2 adds tables/banding/filter write CRUD
     (``add_table``/``update_table``/``delete_table``, ``add_banding``/``update_banding``/
     ``delete_banding``, ``set_basic_filter``/``clear_basic_filter``,
-    ``add_filter_view``/``update_filter_view``/``delete_filter_view``) plus
+    ``add_filter_view``/``update_filter_view``/``delete_filter_view``) plus slicer write CRUD
+    (``add_slicer``/``update_slicer``/``delete_slicer`` — ``add_slicer`` takes the data range via
+    ``range`` or ``params={'dataRange'}`` plus an ``anchor`` cell; ``delete_slicer`` maps to
+    ``deleteEmbeddedObject`` since slicers share the embedded-object id space) plus
     ``spreadsheet_props`` (``updateSpreadsheetProperties`` for title/locale/timeZone — the one
     mutating action that needs NEITHER ``sheet`` nor ``range``). Each action consumes only its
     documented ``params`` keys; unknown keys raise ``SheetsError("unknown_param")``.
@@ -932,6 +947,91 @@ def _structure_delete_filter_view(services, spreadsheet_id, sheet, range, params
     }
 
 
+def _structure_add_slicer(services, spreadsheet_id, sheet, range, params) -> dict:
+    """Add a slicer; capture the new ``slicerId`` from ``replies[]`` (DESIGN §X.16).
+
+    The slicer's data range may be supplied as the top-level A1 ``range`` OR as
+    ``params["dataRange"]`` (the top-level ``range`` wins when both are present, mirroring how the
+    other range-scoped adds accept a range); the resolved value flows into the flat spec the
+    ``slicers`` builder consumes. ``anchor`` (the single A1 cell the slicer is positioned at) is
+    required in ``params``. The builder resolves both A1 references and reuses the shared
+    condition builder for any ``criteria`` condition.
+    """
+    data_range = range or params.get("dataRange")
+    if not data_range:
+        raise SheetsError(
+            "bad_range",
+            "add_slicer requires a data range — pass range=<A1> or "
+            "params={'dataRange': <A1>}",
+        )
+    spec: dict = {"dataRange": data_range}
+    for key in ("title", "columnIndex", "anchor", "criteria"):
+        if params.get(key) is not None:
+            spec[key] = params[key]
+    request = _slicers.build_add_slicer_request(services, spreadsheet_id, spec)
+    resp = _batch_update(services, spreadsheet_id, [request])
+    new_ids = capture_new_ids(resp.get("replies", []))
+    slicer_id = new_ids["slicerIds"][0] if new_ids["slicerIds"] else None
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "add_slicer",
+        "slicerId": slicer_id,
+    }
+
+
+def _structure_update_slicer(services, spreadsheet_id, sheet, range, params) -> dict:
+    """Update a slicer's spec by id with an auto fields mask (DESIGN §X.16).
+
+    A new data range may travel as the top-level A1 ``range`` OR as ``params["dataRange"]`` (the
+    top-level ``range`` wins); the builder resolves it and masks ``dataRange`` atomically. The
+    settable spec keys are ``title``/``dataRange``/``columnIndex``/``criteria``.
+    """
+    slicer_id = params.get("slicerId")
+    if slicer_id is None:
+        raise SheetsError(
+            "missing_param", "update_slicer requires params={'slicerId': <int>}"
+        )
+    spec: dict = {}
+    for key in ("title", "columnIndex", "criteria"):
+        if params.get(key) is not None:
+            spec[key] = params[key]
+    data_range = range or params.get("dataRange")
+    if data_range is not None:
+        spec["dataRange"] = data_range
+    request = _slicers.build_update_slicer_request(
+        services, spreadsheet_id, slicer_id, spec
+    )
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "update_slicer",
+        "slicerId": slicer_id,
+    }
+
+
+def _structure_delete_slicer(services, spreadsheet_id, sheet, range, params) -> dict:
+    """Delete a slicer by id via ``deleteEmbeddedObject`` (DESIGN §X.16).
+
+    Slicers share the embedded-object id space, so a slicer is deleted by its ``slicerId`` (==
+    embedded object id). Mirrors ``delete_table``'s id-only delete + return shape.
+    """
+    slicer_id = params.get("slicerId")
+    if slicer_id is None:
+        raise SheetsError(
+            "missing_param", "delete_slicer requires params={'slicerId': <int>}"
+        )
+    request = _slicers.build_delete_slicer_request(slicer_id)
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "delete_slicer",
+        "slicerId": slicer_id,
+    }
+
+
 def _structure_spreadsheet_props(services, spreadsheet_id, sheet, range, params) -> dict:
     """Set spreadsheet-scoped properties (title/locale/timeZone); no sheet required (§X.12).
 
@@ -988,6 +1088,10 @@ _STRUCTURE_HANDLERS = {
     "add_filter_view": _structure_add_filter_view,
     "update_filter_view": _structure_update_filter_view,
     "delete_filter_view": _structure_delete_filter_view,
+    # v0.2 §X.16 — slicer write CRUD.
+    "add_slicer": _structure_add_slicer,
+    "update_slicer": _structure_update_slicer,
+    "delete_slicer": _structure_delete_slicer,
     "spreadsheet_props": _structure_spreadsheet_props,
 }
 

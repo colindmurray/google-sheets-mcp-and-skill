@@ -1,0 +1,51 @@
+{
+  "_doc": "Golden-master fixture for build_add_slicer_request (DESIGN §X.3/§X.16; analysis #16). Flat public slicer spec in -> exact Google addSlicer batchUpdate request dict out. The slicer points at a data range on 'Data' (sheetId 0) and is anchored on a different tab 'Dash' (sheetId 1); its filterCriteria condition reuses the shared condformat condition builder. The two A1 references (dataRange 'Data!A1:F500', single-cell anchor 'Dash!I1') resolve through the real addressing layer driven by the two-sheet index. No real IDs/creds.",
+  "spec": {
+    "title": "Region",
+    "dataRange": "Data!A1:F500",
+    "columnIndex": 0,
+    "anchor": "Dash!I1",
+    "criteria": {
+      "condition": "ONE_OF_LIST(West,East)"
+    }
+  },
+  "sheets_index": [
+    {"properties": {"sheetId": 0, "title": "Data", "index": 0}},
+    {"properties": {"sheetId": 1, "title": "Dash", "index": 1}}
+  ],
+  "expected": {
+    "addSlicer": {
+      "slicer": {
+        "spec": {
+          "dataRange": {
+            "sheetId": 0,
+            "startRowIndex": 0,
+            "endRowIndex": 500,
+            "startColumnIndex": 0,
+            "endColumnIndex": 6
+          },
+          "title": "Region",
+          "columnIndex": 0,
+          "filterCriteria": {
+            "condition": {
+              "type": "ONE_OF_LIST",
+              "values": [
+                {"userEnteredValue": "West"},
+                {"userEnteredValue": "East"}
+              ]
+            }
+          }
+        },
+        "position": {
+          "overlayPosition": {
+            "anchorCell": {
+              "sheetId": 1,
+              "rowIndex": 0,
+              "columnIndex": 8
+            }
+          }
+        }
+      }
+    }
+  }
+}

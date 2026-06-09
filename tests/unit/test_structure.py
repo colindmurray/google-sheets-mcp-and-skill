@@ -123,10 +123,11 @@ class TestCaptureNewIds:
             "namedRangeIds": [],
             "protectedRangeIds": [],
             "metadataIds": [],
-            # v0.2 §X.3/§X.4/§X.9 — new add-id buckets.
+            # v0.2 §X.3/§X.4/§X.9/§X.16 — new add-id buckets.
             "tableIds": [],
             "bandedRangeIds": [],
             "filterViewIds": [],
+            "slicerIds": [],
         }
 
     def test_add_sheet_nested_under_properties(self):
@@ -173,6 +174,7 @@ class TestCaptureNewIds:
             "tableIds": [],
             "bandedRangeIds": [],
             "filterViewIds": [],
+            "slicerIds": [],
         }
 
 
@@ -1183,8 +1185,10 @@ def _patch_addressing_everywhere(monkeypatch, *, sheet_id: int = 0, title: str =
     monkeypatch.setattr(tables_mod, "gridrange_to_a1", fake_gridrange_to_a1)
     # banding: imports a1_to_gridrange.
     monkeypatch.setattr(banding_mod, "a1_to_gridrange", fake_a1_to_gridrange)
-    # slicers: imports gridrange_to_a1 directly AND uses addressing.* for anchor resolution.
+    # slicers: imports gridrange_to_a1 (read serializer) AND a1_to_gridrange (write builders:
+    # dataRange + anchor resolution).
     monkeypatch.setattr(slicers_mod, "gridrange_to_a1", fake_gridrange_to_a1)
+    monkeypatch.setattr(slicers_mod, "a1_to_gridrange", fake_a1_to_gridrange)
     # filters builders resolve via the structure handler (already patched); its serializers take
     # a pre-resolved A1 string, so no addressing import to patch there.
     _ = filters_mod  # imported for symmetry/clarity; nothing to patch.
@@ -1552,6 +1556,154 @@ class TestStructureFilters:
         assert exc.value.code == "missing_param"
 
 
+# =========================================================================== v0.2 slicers write
+
+
+# A two-sheet index so the REAL addressing layer resolves both the slicer's data range and its
+# single-cell anchor (on a different tab) without network. ``Data`` (sheetId 0) is the data tab;
+# ``Dash`` (sheetId 1) is the anchor tab.
+_SLICER_SHEET_INDEX = {
+    "sheets": [
+        {"properties": {"sheetId": 0, "title": "Data", "index": 0}},
+        {"properties": {"sheetId": 1, "title": "Dash", "index": 1}},
+    ]
+}
+
+
+def _wire_slicer_services(batch_responses: list[dict]) -> tuple[SheetsServices, _Recorder]:
+    """Wire a service whose ``get`` answers a two-sheet index (for real addressing) and whose
+    ``batchUpdate`` records calls / returns ``batch_responses``. Returns ``(services, bu_rec)``."""
+    services = _make_service()
+    # The addressing cache may call get() more than once; answer every call with the index.
+    _wire_spreadsheets_method(services, "get", [_SLICER_SHEET_INDEX] * 16)
+    bu_rec = _wire_spreadsheets_method(services, "batchUpdate", batch_responses)
+    return services, bu_rec
+
+
+class TestStructureSlicers:
+    def test_add_slicer_captures_id_and_builds_body(self):
+        services, bu_rec = _wire_slicer_services(
+            [{"replies": [{"addSlicer": {"slicer": {"slicerId": 4}}}]}]
+        )
+        out = structure(
+            services,
+            SHEET_ID,
+            action="add_slicer",
+            range="Data!A1:F500",
+            params={"title": "Region", "columnIndex": 0, "anchor": "Dash!I1"},
+        )
+        request = bu_rec.calls[0]["body"]["requests"][0]
+        assert "addSlicer" in request
+        slicer = request["addSlicer"]["slicer"]
+        # The top-level range became the data range; the anchor resolved to a GridCoordinate on
+        # the OTHER tab (sheetId 1).
+        assert slicer["spec"]["dataRange"]["sheetId"] == 0
+        assert slicer["position"]["overlayPosition"]["anchorCell"] == {
+            "sheetId": 1,
+            "rowIndex": 0,
+            "columnIndex": 8,
+        }
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "add_slicer",
+            "slicerId": 4,
+        }
+
+    def test_add_slicer_data_range_may_come_from_params(self):
+        services, bu_rec = _wire_slicer_services(
+            [{"replies": [{"addSlicer": {"slicer": {"slicerId": 9}}}]}]
+        )
+        out = structure(
+            services,
+            SHEET_ID,
+            action="add_slicer",
+            params={"dataRange": "Data!A1:C10", "anchor": "Dash!A1"},
+        )
+        slicer = bu_rec.calls[0]["body"]["requests"][0]["addSlicer"]["slicer"]
+        assert slicer["spec"]["dataRange"]["sheetId"] == 0
+        assert out["slicerId"] == 9
+
+    def test_add_slicer_requires_a_data_range(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(
+                services, SHEET_ID, action="add_slicer", params={"anchor": "Dash!A1"}
+            )
+        assert exc.value.code == "bad_range"
+
+    def test_update_slicer_builds_auto_mask(self):
+        services, bu_rec = _wire_slicer_services([{}])
+        out = structure(
+            services,
+            SHEET_ID,
+            action="update_slicer",
+            params={"slicerId": 4, "title": "Renamed"},
+        )
+        req = bu_rec.calls[0]["body"]["requests"][0]["updateSlicerSpec"]
+        assert req["slicerId"] == 4
+        assert req["spec"] == {"title": "Renamed"}
+        assert req["fields"] == "title"
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "update_slicer",
+            "slicerId": 4,
+        }
+
+    def test_update_slicer_range_from_top_level_resolves(self):
+        services, bu_rec = _wire_slicer_services([{}])
+        structure(
+            services,
+            SHEET_ID,
+            action="update_slicer",
+            range="Data!A1:C10",
+            params={"slicerId": 4},
+        )
+        req = bu_rec.calls[0]["body"]["requests"][0]["updateSlicerSpec"]
+        assert req["spec"]["dataRange"]["sheetId"] == 0
+        assert req["fields"] == "dataRange"
+
+    def test_update_slicer_requires_id(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="update_slicer", params={"title": "X"})
+        assert exc.value.code == "missing_param"
+
+    def test_delete_slicer_uses_delete_embedded_object(self):
+        services, bu_rec = _wire_slicer_services([{}])
+        out = structure(
+            services, SHEET_ID, action="delete_slicer", params={"slicerId": 4}
+        )
+        assert bu_rec.calls[0]["body"]["requests"][0] == {
+            "deleteEmbeddedObject": {"objectId": 4}
+        }
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "delete_slicer",
+            "slicerId": 4,
+        }
+
+    def test_delete_slicer_requires_id(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="delete_slicer", params={})
+        assert exc.value.code == "missing_param"
+
+    def test_add_slicer_rejects_unknown_param(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(
+                services,
+                SHEET_ID,
+                action="add_slicer",
+                range="Data!A1:F500",
+                params={"anchor": "Dash!A1", "bogus": 1},
+            )
+        assert exc.value.code == "unknown_param"
+
+
 # =========================================================================== v0.2 spreadsheet_props
 
 
@@ -1631,6 +1783,10 @@ class TestCaptureNewIdsV02:
         assert out["tableIds"] == ["tABC"]
         assert out["bandedRangeIds"] == [7]
         assert out["filterViewIds"] == [55]
+
+    def test_slicer_id_captured(self):
+        replies = [{"addSlicer": {"slicer": {"slicerId": 4}}}]
+        assert capture_new_ids(replies)["slicerIds"] == [4]
 
 
 # =========================================================================== boundary

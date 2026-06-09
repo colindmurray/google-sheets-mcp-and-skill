@@ -4,8 +4,8 @@ The adapter is intentionally thin: validate args, pull the shared ``services`` h
 the lifespan context, call the matching PURE core fn, and shape the result. These tests pin the
 adapter contract WITHOUT touching Google or the core's Sheets logic:
 
-- all tools register (15 base + the 3 v0.2 extension tools), with the §7.1 annotation table
-  (read-only/destructive hints, tags);
+- all tools register (15 base + the 5 v0.2 extension tools: data_ops/dimensions/comments/
+  read_many/export), with the §7.1 annotation table (read-only/destructive hints, tags);
 - ``Context`` is excluded from every tool's input schema;
 - read tools advertise a structured ``output_schema``;
 - ``ENABLED_TOOLS`` restricts which tools register (checked in a subprocess so the env var is
@@ -40,7 +40,9 @@ EXPECTED = {
     "sheets_inspect": (True, None, "read"),
     "sheets_read_values": (True, None, "read"),
     "sheets_read_conditional_formats": (True, None, "read"),
-    "sheets_comments": (True, None, "read"),
+    "sheets_read_many": (True, None, "read"),
+    "sheets_export": (True, None, "read"),
+    "sheets_comments": (False, True, "write"),
     "sheets_write_values": (False, False, "write"),
     "sheets_append_rows": (False, False, "write"),
     "sheets_clear": (False, True, "write"),
@@ -64,7 +66,7 @@ def _tools() -> dict:
 def test_all_tools_register():
     tools = _tools()
     assert set(tools) == set(EXPECTED)
-    assert len(tools) == 18
+    assert len(tools) == 20
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -205,11 +207,26 @@ def test_new_extension_tools_have_expected_inputs():
     dims_required = dims.parameters.get("required", [])
     assert "action" in dims_required
     assert "sheet" in dims_required
-    # comments: read-only, optional resolved/deleted filters.
+    # comments: full CRUD — action + write args, plus the read-only resolved/deleted filters.
     comments = tools["sheets_comments"]
     comments_props = comments.parameters.get("properties", {})
+    assert "action" in comments_props
+    assert comments_props["action"].get("default") == "read"
+    assert "comment_id" in comments_props
+    assert "content" in comments_props
+    assert "anchor" in comments_props
     assert "include_resolved" in comments_props
     assert "include_deleted" in comments_props
+    # read_many: requests required, mode optional (defaults to values).
+    read_many = tools["sheets_read_many"]
+    assert "requests" in read_many.parameters.get("required", [])
+    assert read_many.parameters.get("properties", {}).get("mode", {}).get("default") == "values"
+    # export: format defaults to pdf; path/sheet optional.
+    export = tools["sheets_export"]
+    export_props = export.parameters.get("properties", {})
+    assert export_props.get("format", {}).get("default") == "pdf"
+    assert "path" in export_props
+    assert "sheet" in export_props
 
 
 def test_comments_tool_wraps_core_via_call():
@@ -218,6 +235,55 @@ def test_comments_tool_wraps_core_via_call():
     out = srv._call(srv.models.CommentsResult, lambda s, sid, **kw: payload, object(), "<ID>")
     assert isinstance(out, srv.models.CommentsResult)
     assert out.comments == []
+
+
+def test_comments_create_wraps_write_return():
+    # The full-CRUD return shapes (create -> comment) round-trip through the mirror model.
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "comment": {"id": "C1", "author": "Jane", "content": "hi", "resolved": False},
+    }
+    out = srv._call(srv.models.CommentsResult, lambda s, sid, **kw: payload, object(), "<ID>")
+    assert isinstance(out, srv.models.CommentsResult)
+    assert out.comment is not None
+    assert out.comment.id == "C1"
+
+
+def test_export_call_maps_core_dict():
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "format": "csv",
+        "mimeType": "text/csv",
+        "path": "<ID>.csv",
+        "bytes": 42,
+    }
+    out = srv._call(
+        srv.models.ExportResult, lambda s, sid, **kw: payload, object(), "<ID>", format="csv"
+    )
+    assert isinstance(out, srv.models.ExportResult)
+    assert out.format == "csv"
+    assert out.bytes == 42
+    assert out.path == "<ID>.csv"
+
+
+def test_read_many_call_maps_core_dict_with_mixed_results():
+    # A top-level ok:True envelope can carry per-file failures inside results[].
+    payload = {
+        "ok": True,
+        "mode": "summary",
+        "count": 2,
+        "results": [
+            {"ok": True, "spreadsheetId": "A", "title": "Alpha", "sheets": []},
+            {"ok": False, "spreadsheetId": "B", "error": {"code": "google_api_error"}},
+        ],
+    }
+    out = srv._call(srv.models.ReadManyResult, lambda s, reqs, **kw: payload, object(), [], mode="summary")
+    assert isinstance(out, srv.models.ReadManyResult)
+    assert out.mode == "summary"
+    assert out.count == 2
+    assert out.results[1]["ok"] is False
 
 
 def test_data_ops_call_maps_unknown_action_error():

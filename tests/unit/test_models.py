@@ -705,6 +705,9 @@ def test_to_model_and_registry_cover_every_core_fn():
         "data_ops",
         "dimensions",
         "comments",
+        # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3)
+        "export",
+        "read_many",
     }
     assert set(models.RESULT_MODELS) == expected
 

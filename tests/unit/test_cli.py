@@ -120,6 +120,42 @@ def patched(monkeypatch):
             },
         ),
     )
+    # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two NEW core fns the CLI dispatches.
+    monkeypatch.setattr(
+        cli.core,
+        "export",
+        _make(
+            "export",
+            {
+                "ok": True,
+                "spreadsheetId": "X",
+                "format": "csv",
+                "mimeType": "text/csv",
+                "path": "X.csv",
+                "bytes": 128,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        cli.core,
+        "read_many",
+        _make(
+            "read_many",
+            {
+                "ok": True,
+                "mode": "values",
+                "count": 1,
+                "results": [
+                    {
+                        "ok": True,
+                        "spreadsheetId": "A",
+                        "render": "plain",
+                        "ranges": [{"range": "A!A1:B2", "values": [[1, 2], [3, 4]]}],
+                    }
+                ],
+            },
+        ),
+    )
     return calls
 
 
@@ -276,8 +312,24 @@ def test_build_parser_registers_every_subcommand():
         "batch", "auth",
         # v0.2 extensions (DESIGN §Extensions): three NEW subcommands.
         "data-ops", "dimensions", "comments",
+        # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two MORE NEW subcommands.
+        "export", "read-many",
     }
     assert expected <= set(choices)
+
+
+def test_structure_action_choices_include_slicer_writes():
+    # The CLI action enum must surface the v0.2 §X.16 slicer write actions.
+    parser = cli.build_parser()
+    structure_choices: set = set()
+    for action in parser._actions:
+        if isinstance(action, cli.argparse._SubParsersAction):
+            structure_parser = action.choices["structure"]
+            for sub_action in structure_parser._actions:
+                if getattr(sub_action, "dest", None) == "action":
+                    structure_choices = set(sub_action.choices or ())
+            break
+    assert {"add_slicer", "update_slicer", "delete_slicer"} <= structure_choices
 
 
 # ===========================================================================================
@@ -393,8 +445,56 @@ def test_comments_flags_map_one_to_one(patched):
 def test_comments_defaults(patched):
     _run(["comments", "ID"])
     kw = patched["kwargs"]
+    assert kw["action"] == "read"
+    assert kw["comment_id"] is None
+    assert kw["content"] is None
+    assert kw["anchor"] is None
     assert kw["include_resolved"] is True
     assert kw["include_deleted"] is False
+
+
+def test_comments_create_maps_action_and_content(patched):
+    _run(["comments", "ID", "--action", "create", "--content", "please verify Q3"])
+    assert patched["name"] == "comments"
+    kw = patched["kwargs"]
+    assert kw["action"] == "create"
+    assert kw["content"] == "please verify Q3"
+
+
+def test_comments_reply_maps_action_comment_id_content(patched):
+    _run(
+        [
+            "comments",
+            "ID",
+            "--action",
+            "reply",
+            "--comment-id",
+            "C1",
+            "--content",
+            "ack",
+        ]
+    )
+    kw = patched["kwargs"]
+    assert kw["action"] == "reply"
+    assert kw["comment_id"] == "C1"
+    assert kw["content"] == "ack"
+
+
+def test_comments_delete_requires_confirm(patched, capsys):
+    rc = _run(["comments", "ID", "--action", "delete", "--comment-id", "C1"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "confirmation_required" in err
+    # The destructive core fn must NOT have been reached.
+    assert patched.get("name") != "comments"
+
+
+def test_comments_delete_with_confirm_dispatches(patched):
+    _run(["comments", "ID", "--action", "delete", "--comment-id", "C1", "--confirm"])
+    assert patched["name"] == "comments"
+    kw = patched["kwargs"]
+    assert kw["action"] == "delete"
+    assert kw["comment_id"] == "C1"
 
 
 def test_comments_terse_render_uses_line(patched, capsys):
@@ -408,7 +508,8 @@ def test_comments_empty_render(patched, monkeypatch, capsys):
     monkeypatch.setattr(
         cli.core,
         "comments",
-        lambda services, sid, *, include_resolved=True, include_deleted=False: {
+        lambda services, sid, *, action="read", comment_id=None, content=None, anchor=None,
+        include_resolved=True, include_deleted=False: {
             "ok": True,
             "spreadsheetId": sid,
             "comments": [],
@@ -450,3 +551,93 @@ def test_inspect_runs_hyperlink_pivot_render(patched, monkeypatch, capsys):
     assert "runs:" in out and "link https://x" in out
     assert "link=https://x" in out
     assert "pivot A1 <- Data!A1:F500" in out
+
+
+# ===========================================================================================
+# v0.2 cross-file + export subcommands (DESIGN §3.x / §3.3): export / read-many. Each asserts
+# the THIN 1:1 mapping into core plus the terse rendering.
+# ===========================================================================================
+
+
+def test_export_dispatches_with_format_path_sheet(patched):
+    _run(["export", "ID", "--format", "csv", "--path", "out.csv", "--sheet", "S"])
+    assert patched["name"] == "export"
+    assert patched["spreadsheet_id"] == "ID"
+    kw = patched["kwargs"]
+    assert kw["format"] == "csv"
+    assert kw["path"] == "out.csv"
+    assert kw["sheet"] == "S"
+
+
+def test_export_defaults_to_pdf(patched):
+    _run(["export", "ID"])
+    kw = patched["kwargs"]
+    assert kw["format"] == "pdf"
+    assert kw["path"] is None
+    assert kw["sheet"] is None
+
+
+def test_export_terse_render(patched, capsys):
+    rc = _run(["export", "ID", "--format", "csv", "--sheet", "S"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "exported csv -> X.csv" in out
+    assert "128 bytes" in out
+
+
+def test_read_many_dispatches_requests_and_mode(patched):
+    _run(
+        [
+            "read-many",
+            "--requests-json",
+            '[{"spreadsheetId":"A","ranges":["A!A1:B2"]}]',
+            "--mode",
+            "values",
+        ]
+    )
+    assert patched["name"] == "read_many"
+    # core.read_many(services, requests, *, mode): requests is the 2nd positional (recorded by the
+    # generic stub as spreadsheet_id); mode is a kwarg.
+    assert patched["spreadsheet_id"] == [{"spreadsheetId": "A", "ranges": ["A!A1:B2"]}]
+    assert patched["kwargs"]["mode"] == "values"
+
+
+def test_read_many_requires_requests_json(patched, capsys):
+    with pytest.raises(SystemExit):
+        _run(["read-many", "--mode", "summary"])
+    assert "--requests-json" in capsys.readouterr().err
+
+
+def test_read_many_terse_render(patched, capsys):
+    rc = _run(
+        ["read-many", "--requests-json", '[{"spreadsheetId":"A","ranges":["A!A1:B2"]}]']
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "read-many mode=values: 1 result(s)" in out
+    assert "A: 2 row(s) across 1 range(s)" in out
+
+
+def test_read_many_render_surfaces_captured_failures(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "read_many",
+        lambda services, requests, *, mode="values": {
+            "ok": True,
+            "mode": "summary",
+            "count": 2,
+            "results": [
+                {"ok": True, "spreadsheetId": "A", "title": "Alpha", "sheets": [{}, {}]},
+                {
+                    "ok": False,
+                    "spreadsheetId": "B",
+                    "error": {"code": "google_api_error", "message": "denied"},
+                },
+            ],
+        },
+    )
+    rc = _run(["read-many", "--requests-json", '[{"spreadsheetId":"A"}]', "--mode", "summary"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "A: Alpha (2 sheet(s))" in out
+    assert "B: ERROR google_api_error: denied" in out

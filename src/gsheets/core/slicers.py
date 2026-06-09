@@ -1,25 +1,39 @@
-"""Slicer read serialization — flatten a Google ``Slicer`` to a terse, flat dict (DESIGN §X.0f).
+"""Slicer read serialization + add/update/delete write builders (DESIGN §X.0f, §X.3/§X.16).
 
 Feature #16 (feature-gap-analysis). A *slicer* is an on-grid filter control: it points at a
 data range, filters one column of it, and is anchored at a cell on a (usually different) sheet.
 The owning read fn (``structure(action="read")``, structure-ext) attaches the serialized dict to
 the host sheet's ``slicers`` list, emitting per-sheet rich data only when present (token-safe).
 
-This is **read-only v1**: writing a slicer (``addSlicer`` / ``updateSlicerSpec``) stays in the
-``batch`` escape hatch (DESIGN §X.0f / §X.3 note). The serializer flattens Google's nested
-``Slicer`` (``slicerId`` + ``SlicerSpec`` + ``EmbeddedObjectPosition``) into::
+This module owns two halves, both PURE core:
 
-    { "slicerId": 4, "title": "Region", "range": "Data!A1:F500", "columnIndex": 0,
-      "anchor": { "sheet": "Dash", "row": 0, "col": 8 }, "criteria": "ONE_OF_LIST(...)",
-      "line": 'slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1' }
+- :func:`serialize_slicer` — flatten a Google ``Slicer`` (``slicerId`` + ``SlicerSpec`` +
+  ``EmbeddedObjectPosition``) into the terse, flattened read shape::
 
-Range handling (DESIGN §X.0 / §4 boundary): this serializer holds a ``services`` handle ONLY to
+      { "slicerId": 4, "title": "Region", "range": "Data!A1:F500", "columnIndex": 0,
+        "anchor": { "sheet": "Dash", "row": 0, "col": 8 }, "criteria": "ONE_OF_LIST(...)",
+        "line": 'slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1' }
+
+- :func:`build_add_slicer_request` / :func:`build_update_slicer_request` /
+  :func:`build_delete_slicer_request` — return ready-to-send ``batchUpdate`` request dicts
+  (``addSlicer`` / ``updateSlicerSpec`` / ``deleteEmbeddedObject``). ``update`` auto-builds its
+  ``fields`` mask from the payload via :func:`gsheets.core.fieldsmask.build_fields_mask`. These
+  mirror the tables/banding/filter write builders and are consumed by ``core/structure.py``'s
+  new ``add_slicer`` / ``update_slicer`` / ``delete_slicer`` actions (which own the
+  action->handler dispatch); the ``addSlicer`` reply's ``slicerId`` is captured by
+  ``structure.capture_new_ids`` (its ``_REPLY_ID_SPECS`` is extended there). Slicers share the
+  *embedded-object* id space, so delete maps to ``deleteEmbeddedObject`` (not a slicer-specific
+  delete request).
+
+Range handling (DESIGN §X.0 / §4 boundary): the serializer holds a ``services`` handle ONLY to
 resolve the two ``GridRange`` / ``GridCoordinate`` references — the slicer's ``dataRange`` -> A1
 (``gridrange_to_a1``) and the anchor cell's ``sheetId`` -> sheet name (the slicer's anchor sheet
-differs from its data sheet, so both must resolve). Every other field is serviceless and
-flattened in place. The ``filterCriteria`` condition reuses the SAME condformat condition
-serializer so a slicer criterion reads exactly like a CF / filter condition
-(``NUMBER_GREATER(0)``). Keys are omitted when absent (token efficiency).
+differs from its data sheet, so both must resolve). The write builders do the inverse: a flat
+``dataRange`` A1 -> ``GridRange`` (``addressing.a1_to_gridrange``, the SAME fn tables/filters
+use) and a single-cell ``anchor`` A1 -> ``GridCoordinate`` ``{sheetId,rowIndex,columnIndex}``.
+The ``filterCriteria`` condition reuses the SAME condformat condition (de)serializer so a slicer
+criterion reads/writes exactly like a CF / filter condition (``NUMBER_GREATER(0)``). Keys are
+omitted when absent (token efficiency).
 
 This module is PURE core: stdlib + sibling core modules only. It must NEVER import ``fastmcp``,
 ``mcp``, ``argparse``, ``pydantic``, or ``gsheets.models`` (DESIGN §1 boundary).
@@ -28,8 +42,9 @@ This module is PURE core: stdlib + sibling core modules only. It must NEVER impo
 from __future__ import annotations
 
 from . import addressing, condformat
-from .addressing import gridrange_to_a1
+from .addressing import a1_to_gridrange, gridrange_to_a1
 from .errors import SheetsError
+from .fieldsmask import build_fields_mask
 from .service import SheetsServices
 
 
@@ -99,7 +114,7 @@ def serialize_slicer(
     if column_index is not None:
         out["columnIndex"] = column_index
 
-    anchor = _serialize_anchor(spec, services, spreadsheet_id)
+    anchor = _serialize_anchor(slicer, services, spreadsheet_id)
     if anchor is not None:
         out["anchor"] = anchor
 
@@ -117,18 +132,20 @@ def serialize_slicer(
 
 
 def _serialize_anchor(
-    spec: dict, services: SheetsServices, spreadsheet_id: str
+    slicer: dict, services: SheetsServices, spreadsheet_id: str
 ) -> dict | None:
     """Flatten the slicer's anchor ``GridCoordinate`` to ``{sheet, row, col}``.
 
-    The anchor lives at ``spec.position.overlayPosition.anchorCell`` (an
-    ``EmbeddedObjectPosition`` -> ``OverlayPosition`` -> ``GridCoordinate``). The
-    ``GridCoordinate``'s ``sheetId`` is resolved to a sheet NAME (a slicer is typically anchored
-    on a dashboard tab distinct from its data tab); ``rowIndex``/``columnIndex`` are 0-based and
-    surfaced verbatim as ``row``/``col`` (omitted when absent — a top-left anchor is row 0/col 0,
-    both meaningful). Returns ``None`` when no anchor cell is present.
+    The anchor lives at the slicer's TOP-LEVEL ``position.overlayPosition.anchorCell`` (an
+    ``EmbeddedObjectPosition`` -> ``OverlayPosition`` -> ``GridCoordinate``) — ``position`` is a
+    SIBLING of ``spec`` on the ``Slicer`` resource, NOT nested inside ``spec`` (verified against
+    the live ``spreadsheets.get`` shape). The ``GridCoordinate``'s ``sheetId`` is resolved to a
+    sheet NAME (a slicer is typically anchored on a dashboard tab distinct from its data tab);
+    ``rowIndex``/``columnIndex`` are 0-based and surfaced verbatim as ``row``/``col`` (omitted when
+    absent — a top-left anchor is row 0/col 0, both meaningful). Returns ``None`` when no anchor
+    cell is present.
     """
-    position = spec.get("position")
+    position = slicer.get("position")
     if not isinstance(position, dict):
         return None
     overlay = position.get("overlayPosition")
@@ -143,14 +160,15 @@ def _serialize_anchor(
     if sheet_id is not None:
         out["sheet"] = _resolve_sheet_name(services, spreadsheet_id, sheet_id)
 
-    row = cell.get("rowIndex")
-    if row is not None:
-        out["row"] = row
-    col = cell.get("columnIndex")
-    if col is not None:
-        out["col"] = col
+    # ``rowIndex``/``columnIndex`` are 0-based, and a ``GridCoordinate`` OMITS them when 0 — so an
+    # absent index means 0. An anchorCell always has a definite position and 0 (top row / first
+    # column) is meaningful, so surface both explicitly (defaulting absent to 0). This keeps the
+    # anchor dict complete and the terse line always renderable (e.g. ``@ Sheet!E1`` for an anchor
+    # the API returned as ``{columnIndex: 4}`` with ``rowIndex`` omitted).
+    out["row"] = int(cell.get("rowIndex") or 0)
+    out["col"] = int(cell.get("columnIndex") or 0)
 
-    return out or None
+    return out
 
 
 def _resolve_sheet_name(
@@ -270,3 +288,285 @@ def _anchor_a1(
     if sheet is None:
         return cell
     return f"{addressing._quote_sheet(str(sheet))}!{cell}"
+
+
+# ===========================================================================
+# build: flat slicer spec -> Google batchUpdate request dicts
+# ===========================================================================
+
+
+def build_add_slicer_request(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    spec: dict,
+) -> dict:
+    """Build an ``addSlicer`` ``batchUpdate`` request (DESIGN §X.3 add_slicer).
+
+    ``spec`` is the FLAT public slicer shape::
+
+        { "title"?: str, "dataRange": <A1>, "columnIndex"?: int,
+          "anchor": <A1 single cell>, "criteria"?: {"hidden"?, "visible"?, "condition"?} }
+
+    ``dataRange`` (REQUIRED) is an A1 range resolved to a Google ``GridRange`` via
+    ``addressing.a1_to_gridrange`` (the SAME fn tables/filters use). ``anchor`` (REQUIRED) is a
+    single A1 cell resolved to a ``GridCoordinate`` ``{sheetId,rowIndex,columnIndex}`` — the
+    slicer is positioned via ``position.overlayPosition.anchorCell`` (its anchor tab is usually a
+    different sheet from the data tab). ``criteria`` builds a Google ``FilterCriteria``
+    (``hiddenValues``/``visibleValues`` and/or a ``BooleanCondition``) reusing the SAME condformat
+    condition builder when a ``condition`` is given — mirroring ``filters._build_filter_specs``.
+    The caller (``structure.add_slicer``) captures the new ``slicerId`` from the reply.
+
+    Args:
+        services: The authed handle (resolves ``dataRange`` -> ``GridRange`` and the ``anchor``
+            cell's ``sheetId``).
+        spreadsheet_id: Target spreadsheet id.
+        spec: The flat slicer spec (see above).
+
+    Returns:
+        ``{"addSlicer": {"slicer": {"spec": {SlicerSpec}, "position": {...anchorCell...}}}}`` —
+        ready for ``spreadsheets.batchUpdate``.
+
+    Raises:
+        SheetsError: ``missing_param`` when ``dataRange`` or ``anchor`` is absent;
+            ``bad_slicer`` when ``spec`` is not a dict.
+    """
+    if not isinstance(spec, dict):
+        raise SheetsError(
+            "bad_slicer", f"slicer spec must be a dict, got {type(spec).__name__}"
+        )
+
+    data_range = spec.get("dataRange")
+    if not data_range:
+        raise SheetsError(
+            "missing_param", "add_slicer requires params={'dataRange': <A1 range>}"
+        )
+    anchor = spec.get("anchor")
+    if not anchor:
+        raise SheetsError(
+            "missing_param", "add_slicer requires params={'anchor': <A1 single cell>}"
+        )
+
+    grid_range = a1_to_gridrange(services, spreadsheet_id, data_range)
+    anchor_cell = _anchor_to_grid_coordinate(services, spreadsheet_id, anchor)
+
+    slicer_spec: dict = {"dataRange": grid_range}
+
+    title = spec.get("title")
+    if title is not None:
+        slicer_spec["title"] = title
+
+    # ``columnIndex`` is the 0-based offset (into the data range) of the filtered column. 0 is a
+    # meaningful value, so test presence rather than truthiness.
+    column_index = spec.get("columnIndex")
+    if column_index is not None:
+        slicer_spec["columnIndex"] = int(column_index)
+
+    criteria = spec.get("criteria")
+    if criteria is not None:
+        slicer_spec["filterCriteria"] = _build_filter_criteria(criteria)
+
+    return {
+        "addSlicer": {
+            "slicer": {
+                "spec": slicer_spec,
+                "position": {"overlayPosition": {"anchorCell": anchor_cell}},
+            }
+        }
+    }
+
+
+def build_update_slicer_request(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    slicer_id: int,
+    spec: dict,
+) -> dict:
+    """Build an ``updateSlicerSpec`` request with an AUTO fields mask (DESIGN §X.3 update_slicer).
+
+    Only the keys present in ``spec`` are written; the ``fields`` mask is derived from the built
+    ``SlicerSpec`` payload via :func:`gsheets.core.fieldsmask.build_fields_mask`, so unspecified
+    spec subfields are never wiped and an empty change is refused (``empty_payload``). The
+    settable keys mirror the flat add shape (minus the immutable anchor):
+    ``title`` / ``dataRange`` (A1 -> ``GridRange``) / ``columnIndex`` / ``criteria`` (->
+    ``FilterCriteria``). ``dataRange`` and ``filterCriteria`` mask atomically (each is one logical
+    field that Google replaces whole).
+
+    Args:
+        services: The authed handle (resolves ``dataRange`` -> ``GridRange`` when present).
+        spreadsheet_id: Target spreadsheet id.
+        slicer_id: The ``slicerId`` to update.
+        spec: ``{"title"?, "dataRange"?, "columnIndex"?, "criteria"?}`` (at least one).
+
+    Returns:
+        ``{"updateSlicerSpec": {"slicerId": <id>, "spec": {SlicerSpec}, "fields": "<mask>"}}``.
+
+    Raises:
+        SheetsError: ``missing_param`` when ``slicer_id`` is ``None``; ``bad_slicer`` when
+            ``spec`` is not a dict; ``empty_payload`` when no settable key is present.
+    """
+    if slicer_id is None:
+        raise SheetsError(
+            "missing_param", "update_slicer requires params={'slicerId': <int>}"
+        )
+    if not isinstance(spec, dict):
+        raise SheetsError(
+            "bad_slicer", f"slicer spec must be a dict, got {type(spec).__name__}"
+        )
+
+    slicer_spec: dict = {}
+    # The masked payload mirrors ``slicer_spec`` so the auto mask covers only the changed fields.
+    masked: dict = {}
+
+    if spec.get("title") is not None:
+        slicer_spec["title"] = spec["title"]
+        masked["title"] = spec["title"]
+
+    if spec.get("dataRange") is not None:
+        grid_range = a1_to_gridrange(services, spreadsheet_id, spec["dataRange"])
+        slicer_spec["dataRange"] = grid_range
+        # ``dataRange`` is one logical field on ``SlicerSpec`` — the whole GridRange is replaced
+        # atomically, so mask it via a scalar sentinel (a leaf) rather than recursing its
+        # ``sheetId,...`` subfields (which Google would reject / partially apply).
+        masked["dataRange"] = True
+
+    if spec.get("columnIndex") is not None:
+        slicer_spec["columnIndex"] = int(spec["columnIndex"])
+        masked["columnIndex"] = slicer_spec["columnIndex"]
+
+    if spec.get("criteria") is not None:
+        filter_criteria = _build_filter_criteria(spec["criteria"])
+        slicer_spec["filterCriteria"] = filter_criteria
+        # ``filterCriteria`` masks atomically (the whole criteria object is one field).
+        masked["filterCriteria"] = True
+
+    fields = build_fields_mask(masked)  # raises empty_payload when nothing to change
+    return {
+        "updateSlicerSpec": {
+            "slicerId": slicer_id,
+            "spec": slicer_spec,
+            "fields": fields,
+        }
+    }
+
+
+def build_delete_slicer_request(slicer_id: int) -> dict:
+    """Build a ``deleteEmbeddedObject`` request for a slicer (DESIGN §X.3 delete_slicer).
+
+    Slicers share the *embedded-object* id space (charts/slicers), so a slicer is deleted by its
+    ``slicerId`` via ``deleteEmbeddedObject`` (there is no slicer-specific delete request).
+
+    Args:
+        slicer_id: The ``slicerId`` (== embedded object id) to delete.
+
+    Returns:
+        ``{"deleteEmbeddedObject": {"objectId": <slicer_id>}}``.
+
+    Raises:
+        SheetsError: ``missing_param`` when ``slicer_id`` is ``None``.
+    """
+    if slicer_id is None:
+        raise SheetsError(
+            "missing_param", "delete_slicer requires params={'slicerId': <int>}"
+        )
+    return {"deleteEmbeddedObject": {"objectId": slicer_id}}
+
+
+# --------------------------------------------------------------------------------------
+# build helpers (flat spec -> Google sub-objects)
+# --------------------------------------------------------------------------------------
+
+
+def _anchor_to_grid_coordinate(
+    services: SheetsServices, spreadsheet_id: str, anchor: str
+) -> dict:
+    """Resolve a single-cell A1 ``anchor`` to a Google ``GridCoordinate``.
+
+    A slicer is positioned at ``position.overlayPosition.anchorCell``, a ``GridCoordinate``
+    ``{sheetId, rowIndex, columnIndex}`` (0-based). The A1 cell is resolved through the SAME
+    ``a1_to_gridrange`` path used everywhere else (a single cell ``Dash!I1`` resolves to a
+    GridRange with ``sheetId``/``startRowIndex``/``startColumnIndex``), then collapsed to the
+    range's top-left corner. A range (rather than a single cell) is rejected so the anchor stays
+    an unambiguous cell.
+    """
+    if not isinstance(anchor, str) or not anchor.strip():
+        raise SheetsError(
+            "bad_slicer", f"anchor must be a single A1 cell string, got {anchor!r}"
+        )
+    gr = a1_to_gridrange(services, spreadsheet_id, anchor)
+    row = gr.get("startRowIndex")
+    col = gr.get("startColumnIndex")
+    if row is None or col is None:
+        raise SheetsError(
+            "bad_slicer",
+            f"anchor must be a single bounded A1 cell (e.g. 'Dash!I1'), got {anchor!r}",
+        )
+    # Guard against a multi-cell range masquerading as an anchor (anchor must be ONE cell).
+    end_row = gr.get("endRowIndex")
+    end_col = gr.get("endColumnIndex")
+    if (end_row is not None and end_row - row != 1) or (
+        end_col is not None and end_col - col != 1
+    ):
+        raise SheetsError(
+            "bad_slicer",
+            f"anchor must be a single cell, not a multi-cell range: {anchor!r}",
+        )
+    return {
+        "sheetId": gr["sheetId"],
+        "rowIndex": row,
+        "columnIndex": col,
+    }
+
+
+def _build_filter_criteria(criteria: object) -> dict:
+    """Build a Google ``FilterCriteria`` from the flat ``criteria`` dict.
+
+    Mirrors ``filters._build_filter_specs`` (one column's ``filterCriteria``):
+    ``{"hidden"?, "visible"?, "condition"?}`` -> ``hiddenValues`` / ``visibleValues`` /
+    ``condition`` (a ``BooleanCondition``). ``condition`` may be a terse string
+    (``"NUMBER_GREATER(0)"``) — parsed by the SAME condformat condition parser — or an
+    already-structured ``{type, values}`` dict. At least one facet is required so a slicer is
+    never given an empty criterion.
+    """
+    if not isinstance(criteria, dict):
+        raise SheetsError(
+            "bad_slicer",
+            "slicer 'criteria' must be a {hidden?, visible?, condition?} dict",
+        )
+
+    filter_criteria: dict = {}
+    hidden = criteria.get("hidden")
+    if hidden:
+        filter_criteria["hiddenValues"] = list(hidden)
+    visible = criteria.get("visible")
+    if visible:
+        filter_criteria["visibleValues"] = list(visible)
+    condition = criteria.get("condition")
+    if condition is not None:
+        filter_criteria["condition"] = _build_condition(condition)
+
+    if not filter_criteria:
+        raise SheetsError(
+            "bad_slicer",
+            "slicer 'criteria' has no hidden/visible/condition to apply",
+        )
+    return filter_criteria
+
+
+def _build_condition(condition: object) -> dict:
+    """Build a Google ``BooleanCondition`` from a terse string OR a structured dict.
+
+    Reuses the SAME condformat condition (de)serializer so slicer conditions accept exactly the
+    CF / filter condition grammar (``NUMBER_GREATER(0)``, ``TEXT_CONTAINS(done)``, ``BLANK``).
+    Mirrors ``filters._build_condition``.
+    """
+    if isinstance(condition, str):
+        structured = condformat._parse_condition(condition.strip())
+    elif isinstance(condition, dict):
+        structured = condition
+    else:
+        raise SheetsError(
+            "bad_slicer",
+            "condition must be a terse string (e.g. 'NUMBER_GREATER(0)') or a "
+            "{type, values} dict",
+        )
+    return condformat._build_condition(structured)

@@ -22,7 +22,12 @@ import pytest
 from gsheets.core import slicers
 from gsheets.core.errors import SheetsError
 from gsheets.core.service import SheetsServices
-from gsheets.core.slicers import serialize_slicer
+from gsheets.core.slicers import (
+    build_add_slicer_request,
+    build_delete_slicer_request,
+    build_update_slicer_request,
+    serialize_slicer,
+)
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -123,11 +128,11 @@ def test_serialize_slicer_anchor_on_different_sheet_resolves_name_and_a1():
                 "endColumnIndex": 6,
             },
             "columnIndex": 0,
-            "position": {
-                "overlayPosition": {
-                    "anchorCell": {"sheetId": 1, "rowIndex": 0, "columnIndex": 8}
-                }
-            },
+        },
+        "position": {
+            "overlayPosition": {
+                "anchorCell": {"sheetId": 1, "rowIndex": 0, "columnIndex": 8}
+            }
         },
     }
     out = serialize_slicer(slicer, services, SPREADSHEET_ID)
@@ -225,10 +230,9 @@ def test_serialize_slicer_anchor_without_sheet_id_uses_bare_cell():
     services = _service_with_sheet_index()
     slicer = {
         "slicerId": 8,
-        "spec": {
-            "position": {
-                "overlayPosition": {"anchorCell": {"rowIndex": 2, "columnIndex": 1}}
-            }
+        "spec": {},
+        "position": {
+            "overlayPosition": {"anchorCell": {"rowIndex": 2, "columnIndex": 1}}
         },
     }
     out = serialize_slicer(slicer, services, SPREADSHEET_ID)
@@ -247,11 +251,10 @@ def test_serialize_slicer_anchor_quotes_sheet_name_with_space():
     )
     slicer = {
         "slicerId": 9,
-        "spec": {
-            "position": {
-                "overlayPosition": {
-                    "anchorCell": {"sheetId": 2, "rowIndex": 0, "columnIndex": 8}
-                }
+        "spec": {},
+        "position": {
+            "overlayPosition": {
+                "anchorCell": {"sheetId": 2, "rowIndex": 0, "columnIndex": 8}
             }
         },
     }
@@ -265,11 +268,10 @@ def test_serialize_slicer_dangling_anchor_sheet_id_falls_back_to_raw_id():
     services = _service_with_sheet_index()
     slicer = {
         "slicerId": 10,
-        "spec": {
-            "position": {
-                "overlayPosition": {
-                    "anchorCell": {"sheetId": 999, "rowIndex": 0, "columnIndex": 0}
-                }
+        "spec": {},
+        "position": {
+            "overlayPosition": {
+                "anchorCell": {"sheetId": 999, "rowIndex": 0, "columnIndex": 0}
             }
         },
     }
@@ -295,11 +297,10 @@ def test_serialize_slicer_anchor_top_left_row0_col0():
     services = _service_with_sheet_index()
     slicer = {
         "slicerId": 12,
-        "spec": {
-            "position": {
-                "overlayPosition": {
-                    "anchorCell": {"sheetId": 1, "rowIndex": 0, "columnIndex": 0}
-                }
+        "spec": {},
+        "position": {
+            "overlayPosition": {
+                "anchorCell": {"sheetId": 1, "rowIndex": 0, "columnIndex": 0}
             }
         },
     }
@@ -341,3 +342,172 @@ def test_serialize_slicer_is_json_serializable():
     out = serialize_slicer(golden["slicer"], services, SPREADSHEET_ID)
     # Round-trips through json without error and is byte-stable.
     assert json.loads(json.dumps(out)) == out
+
+
+# =========================================================================== build: add
+
+
+def test_build_add_slicer_request_golden():
+    """Golden-master: flat slicer spec -> exact Google ``addSlicer`` batchUpdate request dict.
+
+    The two A1 references resolve through the REAL addressing layer (driven by the two-sheet
+    index): ``Data!A1:F500`` -> the data GridRange; the single-cell anchor ``Dash!I1`` -> a
+    GridCoordinate on the OTHER tab. The ``ONE_OF_LIST(West,East)`` criterion condition is built
+    by the SHARED condformat condition builder.
+    """
+    golden = load_golden("slicer_addslicer_request")
+    services = _service_with_sheet_index(sheets_index=golden["sheets_index"])
+    request = build_add_slicer_request(services, SPREADSHEET_ID, golden["spec"])
+    assert request == golden["expected"]
+
+
+def test_build_add_slicer_request_resolves_anchor_to_grid_coordinate():
+    """A single-cell A1 ``anchor`` collapses to a ``GridCoordinate`` (sheetId/rowIndex/columnIndex)."""
+    services = _service_with_sheet_index()
+    request = build_add_slicer_request(
+        services,
+        SPREADSHEET_ID,
+        {"dataRange": "Data!A1:C10", "anchor": "Dash!I1"},
+    )
+    anchor = request["addSlicer"]["slicer"]["position"]["overlayPosition"]["anchorCell"]
+    assert anchor == {"sheetId": 1, "rowIndex": 0, "columnIndex": 8}
+
+
+def test_build_add_slicer_request_column_index_zero_kept():
+    """``columnIndex`` 0 is meaningful and must survive into the spec (presence, not truthiness)."""
+    services = _service_with_sheet_index()
+    request = build_add_slicer_request(
+        services,
+        SPREADSHEET_ID,
+        {"dataRange": "Data!A1:C10", "anchor": "Dash!A1", "columnIndex": 0},
+    )
+    assert request["addSlicer"]["slicer"]["spec"]["columnIndex"] == 0
+
+
+def test_build_add_slicer_request_hidden_values_criteria():
+    """A ``criteria`` with hidden values builds a ``FilterCriteria.hiddenValues`` (no condition)."""
+    services = _service_with_sheet_index()
+    request = build_add_slicer_request(
+        services,
+        SPREADSHEET_ID,
+        {
+            "dataRange": "Data!A1:C10",
+            "anchor": "Dash!A1",
+            "criteria": {"hidden": ["Closed", "Void"]},
+        },
+    )
+    fc = request["addSlicer"]["slicer"]["spec"]["filterCriteria"]
+    assert fc == {"hiddenValues": ["Closed", "Void"]}
+
+
+def test_build_add_slicer_request_requires_data_range():
+    """Missing ``dataRange`` raises ``missing_param`` (never builds a rangeless slicer)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(services, SPREADSHEET_ID, {"anchor": "Dash!A1"})
+    assert exc.value.code == "missing_param"
+
+
+def test_build_add_slicer_request_requires_anchor():
+    """Missing ``anchor`` raises ``missing_param`` (a slicer must be positioned)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services, SPREADSHEET_ID, {"dataRange": "Data!A1:C10"}
+        )
+    assert exc.value.code == "missing_param"
+
+
+def test_build_add_slicer_request_rejects_multi_cell_anchor():
+    """A multi-cell range passed as ``anchor`` raises ``bad_slicer`` (anchor must be ONE cell)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {"dataRange": "Data!A1:C10", "anchor": "Dash!I1:J5"},
+        )
+    assert exc.value.code == "bad_slicer"
+
+
+def test_build_add_slicer_request_rejects_non_dict_spec():
+    """A non-dict spec raises ``bad_slicer``."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(services, SPREADSHEET_ID, ["not", "a", "dict"])
+    assert exc.value.code == "bad_slicer"
+
+
+# =========================================================================== build: update
+
+
+def test_build_update_slicer_request_auto_fields_mask():
+    """``update`` builds an auto fields mask covering ONLY the changed keys (title + columnIndex)."""
+    services = _service_with_sheet_index()
+    request = build_update_slicer_request(
+        services, SPREADSHEET_ID, 4, {"title": "New", "columnIndex": 2}
+    )
+    spec = request["updateSlicerSpec"]
+    assert spec["slicerId"] == 4
+    assert spec["spec"] == {"title": "New", "columnIndex": 2}
+    # The mask covers exactly the two changed leaf fields (insertion order).
+    assert spec["fields"] == "title,columnIndex"
+
+
+def test_build_update_slicer_request_data_range_masks_atomically():
+    """A changed ``dataRange`` masks as the WHOLE ``dataRange`` leaf, not its GridRange subfields."""
+    services = _service_with_sheet_index()
+    request = build_update_slicer_request(
+        services, SPREADSHEET_ID, 4, {"dataRange": "Data!A1:C10"}
+    )
+    spec = request["updateSlicerSpec"]
+    assert spec["fields"] == "dataRange"
+    # The built spec carries the resolved GridRange (not the sentinel used only for masking).
+    assert spec["spec"]["dataRange"]["sheetId"] == 0
+
+
+def test_build_update_slicer_request_criteria_masks_atomically():
+    """A changed ``criteria`` masks as the whole ``filterCriteria`` leaf and builds the condition."""
+    services = _service_with_sheet_index()
+    request = build_update_slicer_request(
+        services,
+        SPREADSHEET_ID,
+        4,
+        {"criteria": {"condition": "NUMBER_GREATER(0)"}},
+    )
+    spec = request["updateSlicerSpec"]
+    assert spec["fields"] == "filterCriteria"
+    assert spec["spec"]["filterCriteria"]["condition"]["type"] == "NUMBER_GREATER"
+
+
+def test_build_update_slicer_request_requires_slicer_id():
+    """A ``None`` slicer id raises ``missing_param``."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_update_slicer_request(services, SPREADSHEET_ID, None, {"title": "X"})
+    assert exc.value.code == "missing_param"
+
+
+def test_build_update_slicer_request_empty_spec_refused():
+    """An empty spec (nothing to change) raises ``empty_payload`` (refuse a no-op)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_update_slicer_request(services, SPREADSHEET_ID, 4, {})
+    assert exc.value.code == "empty_payload"
+
+
+# =========================================================================== build: delete
+
+
+def test_build_delete_slicer_request_uses_embedded_object_id_space():
+    """Delete maps to ``deleteEmbeddedObject`` (slicers share the embedded-object id space)."""
+    assert build_delete_slicer_request(4) == {
+        "deleteEmbeddedObject": {"objectId": 4}
+    }
+
+
+def test_build_delete_slicer_request_requires_id():
+    """A ``None`` slicer id raises ``missing_param``."""
+    with pytest.raises(SheetsError) as exc:
+        build_delete_slicer_request(None)
+    assert exc.value.code == "missing_param"

@@ -796,6 +796,8 @@ class StructureResult(_Result):
     dimension: Optional[str] = None
     start: Optional[int] = None
     end: Optional[int] = None
+    # v0.2 §X.16 — slicer write CRUD (add/update/delete) surfaces the captured slicer id.
+    slicerId: Optional[int] = None
 
     @property
     def terse(self) -> str:
@@ -998,28 +1000,104 @@ class DimensionsResult(_Result):
 
 
 class CommentsResult(_Result):
-    """Mirror of ``core.comments`` (DESIGN §X.5, read-only v1).
+    """Mirror of ``core.comments`` — full Drive threaded-comment CRUD (DESIGN §X.5).
 
-    Drive-API comments on the spreadsheet file (NOT the Sheets API). ``comments`` is a flat list
-    of :class:`Comment` (each with flattened author, ``quoted`` snippet, opaque ``anchorRaw``, and
-    replies).
+    Drive-API comments on the spreadsheet file (NOT the Sheets API). The shape is action-specific
+    so every field below is optional and ``extra="allow"`` carries anything not pinned:
+
+    * ``action="read"`` (default) -> ``comments`` (a flat list of :class:`Comment`, each with
+      flattened author, ``quoted`` snippet, opaque ``anchorRaw``, and replies).
+    * ``action="create"`` -> ``comment`` (one :class:`Comment`).
+    * ``action="reply"`` -> ``commentId`` + ``reply`` (a flat :class:`CommentReply`).
+    * ``action="resolve"`` -> ``commentId`` + ``resolved=True`` + ``reply``.
+    * ``action="delete"`` -> ``commentId`` + ``deleted=True``.
     """
 
     spreadsheetId: Optional[str] = None
-    comments: list[Comment] = []
+    comments: Optional[list[Comment]] = None
+    # write-action fields (present per action; read carries only ``comments``)
+    comment: Optional[Comment] = None
+    commentId: Optional[str] = None
+    reply: Optional[CommentReply] = None
+    resolved: Optional[bool] = None
+    deleted: Optional[bool] = None
 
     @property
     def terse(self) -> str:
-        if not self.comments:
+        if self.deleted:
+            return f"deleted comment {self.commentId}"
+        if self.resolved:
+            return f"resolved comment {self.commentId}"
+        if self.reply is not None:
+            return f"replied to comment {self.commentId}"
+        if self.comment is not None:
+            c = self.comment
+            return f"created comment {c.id}: {(c.content or '')!r}"
+        comments = self.comments or []
+        if not comments:
             return "no comments"
-        lines = [f"{len(self.comments)} comment(s)"]
-        for c in self.comments:
+        lines = [f"{len(comments)} comment(s)"]
+        for c in comments:
             state = "resolved" if c.resolved else "open"
             n = len(c.replies or [])
             reply = f", {n} reply(ies)" if n else ""
             lines.append(
                 f"  {c.id} by {c.author or '?'}: {(c.content or '')!r} ({state}{reply})"
             )
+        return "\n".join(lines)
+
+
+class ExportResult(_Result):
+    """Mirror of ``core.export`` (DESIGN §3.x — download a spreadsheet to disk).
+
+    A WRITE-to-local-disk op that is read-only against the API (it never mutates the
+    spreadsheet). ``format`` is the normalized lower-case format; ``mimeType`` the export MIME;
+    ``path`` the local file written; ``bytes`` the written length. The same shape across every
+    format (pdf/xlsx/ods whole-workbook via Drive; csv/tsv single-sheet via Sheets).
+    """
+
+    spreadsheetId: Optional[str] = None
+    format: Optional[str] = None
+    mimeType: Optional[str] = None
+    path: Optional[str] = None
+    bytes: Optional[int] = None
+
+    @property
+    def terse(self) -> str:
+        return f"exported {self.format} -> {self.path} ({self.bytes} bytes)"
+
+
+class ReadManyResult(_Result):
+    """Mirror of ``core.read_many`` — cross-file READ fan-out (DESIGN §3.3, read-only).
+
+    One call runs a ``values`` or ``summary`` read across many spreadsheets, capturing per-file
+    errors instead of aborting. ``results`` is one entry per request IN REQUEST ORDER, MIXING
+    success result dicts (``ok:True``) and captured failures (``{spreadsheetId, ok:False,
+    error}``) — so a top-level ``ok:True`` does NOT mean every file succeeded. Each entry stays a
+    permissive dict (heterogeneous summary/values shapes) rather than a pinned sub-model.
+    """
+
+    mode: Optional[str] = None
+    count: Optional[int] = None
+    results: list[dict[str, Any]] = []
+
+    @property
+    def terse(self) -> str:
+        lines = [f"read_many mode={self.mode}: {self.count} result(s)"]
+        for entry in self.results:
+            sid = entry.get("spreadsheetId", "?")
+            if entry.get("ok") is False:
+                err = entry.get("error") or {}
+                lines.append(f"  {sid}: ERROR {err.get('code', '?')}: {err.get('message', '')}")
+            elif "comments" in entry:  # pragma: no cover - defensive, summary/values only
+                lines.append(f"  {sid}: ok")
+            elif "ranges" in entry:
+                n = sum(len(r.get("values") or []) for r in entry.get("ranges", []))
+                lines.append(f"  {sid}: {n} row(s) across {len(entry.get('ranges', []))} range(s)")
+            else:
+                title = entry.get("title", "")
+                nsheets = len(entry.get("sheets", []))
+                lines.append(f"  {sid}: {title or '(untitled)'} ({nsheets} sheet(s))")
         return "\n".join(lines)
 
 
@@ -1048,6 +1126,9 @@ RESULT_MODELS: dict[str, type[_Result]] = {
     "data_ops": DataOpsResult,
     "dimensions": DimensionsResult,
     "comments": CommentsResult,
+    # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3).
+    "export": ExportResult,
+    "read_many": ReadManyResult,
 }
 
 
@@ -1240,6 +1321,9 @@ __all__ = [
     "DataOpsResult",
     "DimensionsResult",
     "CommentsResult",
+    # v0.2 cross-file + export result models (DESIGN §3.x / §3.3)
+    "ExportResult",
+    "ReadManyResult",
     # shared sub-models
     "CellFormat",
     "Cell",

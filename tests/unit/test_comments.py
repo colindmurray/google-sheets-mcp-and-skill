@@ -22,7 +22,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from gsheets.core.comments import COMMENTS_FIELDS, comments, serialize_comment
+from gsheets.core.comments import (
+    COMMENT_FIELDS,
+    COMMENTS_FIELDS,
+    comments,
+    serialize_comment,
+)
 from gsheets.core.errors import SheetsError
 from gsheets.core.service import SheetsServices
 
@@ -78,6 +83,60 @@ def _make_http_error(status: int = 403):
         b'{"error": {"code": %d, "status": "PERMISSION_DENIED", "message": "nope"}}' % status
     )
     return HttpError(resp=resp, content=content)
+
+
+# --------------------------------------------------------------------------- write recorders
+
+
+class _DriveWriteRecorder:
+    """Stands in for a single Drive write method, e.g. ``services.drive.comments().create``.
+
+    Records each call's kwargs on ``.calls`` and returns a request whose ``.execute()`` yields
+    the configured ``response`` (or ``side_effect`` to raise).
+    """
+
+    def __init__(self, response=None, *, side_effect=None):
+        self._response = response if response is not None else {}
+        self._side_effect = side_effect
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        request_obj = MagicMock(name="drive_write_request")
+        if self._side_effect is not None:
+            request_obj.execute.side_effect = self._side_effect
+        else:
+            request_obj.execute.return_value = self._response
+        return request_obj
+
+
+def _make_write_service(
+    *,
+    comments_create=None,
+    replies_create=None,
+    comments_delete=None,
+    account_email=None,
+):
+    """Build a ``SheetsServices`` whose Drive write methods route to recorders.
+
+    Returns ``(services, recorders)`` where ``recorders`` maps the method name
+    (``"comments_create"`` / ``"replies_create"`` / ``"comments_delete"``) to its
+    :class:`_DriveWriteRecorder` (only the ones supplied are attached).
+    """
+    sheets = MagicMock(name="sheets_v4")
+    drive = MagicMock(name="drive_v3")
+    recorders: dict[str, _DriveWriteRecorder] = {}
+    if comments_create is not None:
+        recorders["comments_create"] = comments_create
+        drive.comments.return_value.create = comments_create
+    if replies_create is not None:
+        recorders["replies_create"] = replies_create
+        drive.replies.return_value.create = replies_create
+    if comments_delete is not None:
+        recorders["comments_delete"] = comments_delete
+        drive.comments.return_value.delete = comments_delete
+    services = SheetsServices(sheets=sheets, drive=drive, account_email=account_email)
+    return services, recorders
 
 
 # --------------------------------------------------------------------------- golden fixtures
@@ -381,6 +440,246 @@ class TestCommentsErrors:
             comments(services, SHEET_ID)
         assert exc.value.code == "google_api_error"
         assert exc.value.status == 403
+
+
+# =========================================================================== action dispatch
+
+
+class TestCommentsActionDispatch:
+    def test_default_action_is_read(self):
+        # No explicit action -> the original paginated read path (comments.list).
+        services, rec = _make_service([{"comments": [_golden_comment_sparse()]}])
+        out = comments(services, SHEET_ID)
+        assert out["comments"][0]["id"] == "BBBB"
+        assert rec.calls[0]["fields"] == COMMENTS_FIELDS
+
+    def test_explicit_read_action_matches_default(self):
+        services, rec = _make_service([{"comments": [_golden_comment_sparse()]}])
+        out = comments(services, SHEET_ID, action="read")
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "comments": [serialize_comment(_golden_comment_sparse())],
+        }
+        assert rec.calls[0]["fields"] == COMMENTS_FIELDS
+
+    def test_unknown_action_raises_bad_action(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="frobnicate")
+        assert exc.value.code == "bad_action"
+
+    def test_drive_unavailable_on_write_action(self):
+        # EVERY action (incl writes) requires Drive — None drive short-circuits before any call.
+        services, _ = _make_service(with_drive=False)
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="create", content="hi")
+        assert exc.value.code == "drive_unavailable"
+
+
+# =========================================================================== create
+
+
+class TestCommentsCreate:
+    def test_create_calls_comments_create_with_body_and_fields(self):
+        created = {
+            "id": "NEW1",
+            "content": "new note",
+            "author": {"displayName": "Jane Doe"},
+            "createdTime": "2026-06-01T09:00:00.000Z",
+            "resolved": False,
+        }
+        rec = _DriveWriteRecorder(created)
+        services, _ = _make_write_service(comments_create=rec)
+        out = comments(services, SHEET_ID, action="create", content="new note")
+        # Exact Drive method + body + single-comment fields mask.
+        assert len(rec.calls) == 1
+        sent = rec.calls[0]
+        assert sent["fileId"] == SHEET_ID
+        assert sent["body"] == {"content": "new note"}
+        assert sent["fields"] == COMMENT_FIELDS
+        # Returned through the SAME serializer.
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "comment": serialize_comment(created),
+        }
+
+    def test_create_with_anchor_passes_anchor_in_body(self):
+        rec = _DriveWriteRecorder({"id": "NEW2", "content": "anchored"})
+        services, _ = _make_write_service(comments_create=rec)
+        comments(
+            services,
+            SHEET_ID,
+            action="create",
+            content="anchored",
+            anchor='{"r":"x"}',
+        )
+        assert rec.calls[0]["body"] == {"content": "anchored", "anchor": '{"r":"x"}'}
+
+    def test_create_without_anchor_omits_anchor_key(self):
+        rec = _DriveWriteRecorder({"id": "NEW3", "content": "noanchor"})
+        services, _ = _make_write_service(comments_create=rec)
+        comments(services, SHEET_ID, action="create", content="noanchor")
+        assert "anchor" not in rec.calls[0]["body"]
+
+    def test_create_missing_content_raises_missing_content(self):
+        services, _ = _make_write_service(comments_create=_DriveWriteRecorder({}))
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="create")
+        assert exc.value.code == "missing_content"
+
+    def test_create_empty_content_raises_missing_content(self):
+        services, _ = _make_write_service(comments_create=_DriveWriteRecorder({}))
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="create", content="")
+        assert exc.value.code == "missing_content"
+
+    def test_create_http_error_classified(self):
+        rec = _DriveWriteRecorder(side_effect=_make_http_error(403))
+        services, _ = _make_write_service(comments_create=rec)
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="create", content="x")
+        assert exc.value.code == "google_api_error"
+        assert exc.value.status == 403
+
+
+# =========================================================================== reply
+
+
+class TestCommentsReply:
+    def test_reply_calls_replies_create_with_body_and_fields(self):
+        replied = {"id": "R1", "content": "ack", "author": {"displayName": "Bob"}}
+        rec = _DriveWriteRecorder(replied)
+        services, _ = _make_write_service(replies_create=rec)
+        out = comments(
+            services, SHEET_ID, action="reply", comment_id="AAAA", content="ack"
+        )
+        assert len(rec.calls) == 1
+        sent = rec.calls[0]
+        assert sent["fileId"] == SHEET_ID
+        assert sent["commentId"] == "AAAA"
+        assert sent["body"] == {"content": "ack"}
+        assert sent["fields"] == "id,content,author/displayName,action"
+        # Reply flattened via the SAME helper a read uses (author/content/action only).
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "commentId": "AAAA",
+            "reply": {"author": "Bob", "content": "ack"},
+        }
+
+    def test_reply_missing_comment_id_raises(self):
+        services, _ = _make_write_service(replies_create=_DriveWriteRecorder({}))
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="reply", content="ack")
+        assert exc.value.code == "missing_comment_id"
+
+    def test_reply_missing_content_raises(self):
+        services, _ = _make_write_service(replies_create=_DriveWriteRecorder({}))
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="reply", comment_id="AAAA")
+        assert exc.value.code == "missing_content"
+
+    def test_reply_http_error_classified(self):
+        rec = _DriveWriteRecorder(side_effect=_make_http_error(404))
+        services, _ = _make_write_service(replies_create=rec)
+        with pytest.raises(SheetsError) as exc:
+            comments(
+                services, SHEET_ID, action="reply", comment_id="AAAA", content="x"
+            )
+        assert exc.value.code == "google_api_error"
+        assert exc.value.status == 404
+
+
+# =========================================================================== resolve
+
+
+class TestCommentsResolve:
+    def test_resolve_posts_reply_with_resolve_action(self):
+        replied = {
+            "id": "R2",
+            "action": "resolve",
+            "author": {"displayName": "Carol"},
+        }
+        rec = _DriveWriteRecorder(replied)
+        services, _ = _make_write_service(replies_create=rec)
+        out = comments(services, SHEET_ID, action="resolve", comment_id="AAAA")
+        sent = rec.calls[0]
+        assert sent["fileId"] == SHEET_ID
+        assert sent["commentId"] == "AAAA"
+        assert sent["body"] == {"action": "resolve"}
+        assert sent["fields"] == "id,content,author/displayName,action"
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "commentId": "AAAA",
+            "resolved": True,
+            "reply": {"author": "Carol", "action": "resolve"},
+        }
+
+    def test_resolve_with_content_rides_in_body(self):
+        rec = _DriveWriteRecorder({"id": "R3", "action": "resolve"})
+        services, _ = _make_write_service(replies_create=rec)
+        comments(
+            services,
+            SHEET_ID,
+            action="resolve",
+            comment_id="AAAA",
+            content="fixed",
+        )
+        assert rec.calls[0]["body"] == {"action": "resolve", "content": "fixed"}
+
+    def test_resolve_without_content_omits_content_key(self):
+        rec = _DriveWriteRecorder({"id": "R4", "action": "resolve"})
+        services, _ = _make_write_service(replies_create=rec)
+        comments(services, SHEET_ID, action="resolve", comment_id="AAAA")
+        assert "content" not in rec.calls[0]["body"]
+
+    def test_resolve_missing_comment_id_raises(self):
+        services, _ = _make_write_service(replies_create=_DriveWriteRecorder({}))
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="resolve")
+        assert exc.value.code == "missing_comment_id"
+
+    def test_resolve_http_error_classified(self):
+        rec = _DriveWriteRecorder(side_effect=_make_http_error(403))
+        services, _ = _make_write_service(replies_create=rec)
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="resolve", comment_id="AAAA")
+        assert exc.value.code == "google_api_error"
+
+
+# =========================================================================== delete
+
+
+class TestCommentsDelete:
+    def test_delete_calls_comments_delete(self):
+        rec = _DriveWriteRecorder({})
+        services, _ = _make_write_service(comments_delete=rec)
+        out = comments(services, SHEET_ID, action="delete", comment_id="AAAA")
+        sent = rec.calls[0]
+        assert sent == {"fileId": SHEET_ID, "commentId": "AAAA"}
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "commentId": "AAAA",
+            "deleted": True,
+        }
+
+    def test_delete_missing_comment_id_raises(self):
+        services, _ = _make_write_service(comments_delete=_DriveWriteRecorder({}))
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="delete")
+        assert exc.value.code == "missing_comment_id"
+
+    def test_delete_http_error_classified(self):
+        rec = _DriveWriteRecorder(side_effect=_make_http_error(404))
+        services, _ = _make_write_service(comments_delete=rec)
+        with pytest.raises(SheetsError) as exc:
+            comments(services, SHEET_ID, action="delete", comment_id="AAAA")
+        assert exc.value.code == "google_api_error"
+        assert exc.value.status == 404
 
 
 # =========================================================================== purity guard

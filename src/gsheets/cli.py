@@ -49,6 +49,10 @@ _STRUCTURE_ACTIONS = (
     "add_filter_view",
     "update_filter_view",
     "delete_filter_view",
+    # v0.2 §X.16 — slicer write CRUD (add/update/delete).
+    "add_slicer",
+    "update_slicer",
+    "delete_slicer",
     "spreadsheet_props",
 )
 _MANAGE_ACTIONS = ("add", "delete", "duplicate", "rename", "reorder")
@@ -77,6 +81,11 @@ _DIMENSIONS_ACTIONS = (
     "set_props",
     "read",
 )
+# v0.2 cross-file + export extensions (DESIGN §3.x / §3.3) — mirrored for nice argparse errors;
+# core re-validates and raises SheetsError.
+_EXPORT_FORMATS = ("pdf", "xlsx", "ods", "csv", "tsv")
+_READ_MANY_MODES = ("values", "summary")
+_COMMENTS_ACTIONS = ("read", "create", "reply", "resolve", "delete")
 
 
 # ===========================================================================================
@@ -160,6 +169,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_data_ops(sub)
     _add_dimensions(sub)
     _add_comments(sub)
+    # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): export + multi-spreadsheet read.
+    _add_export(sub)
+    _add_read_many(sub)
     _add_batch(sub)
     _add_auth(sub)
 
@@ -484,25 +496,104 @@ def _add_dimensions(sub) -> None:
 
 
 def _add_comments(sub) -> None:
-    """NEW v0.2 tool (DESIGN §X.5): read Drive threaded comments (read-only v1)."""
+    """NEW v0.2 tool (DESIGN §X.5): read/write Drive threaded comments (full CRUD).
+
+    ``--action`` dispatches read (default) / create / reply / resolve / delete. ``delete`` is
+    DESTRUCTIVE and requires ``--confirm``. ``--no-resolved``/``--include-deleted`` apply to read.
+    """
     p = sub.add_parser(
         "comments",
-        help="read Drive threaded comments on the spreadsheet (uses the Drive API)",
+        help="read/write Drive threaded comments (read/create/reply/resolve/delete)",
     )
     _spreadsheet_id_arg(p)
+    p.add_argument(
+        "--action",
+        choices=_COMMENTS_ACTIONS,
+        default="read",
+        help="read (default) | create | reply | resolve | delete",
+    )
+    p.add_argument(
+        "--comment-id",
+        dest="comment_id",
+        default=None,
+        help="target comment id (required for reply/resolve/delete)",
+    )
+    p.add_argument(
+        "--content",
+        default=None,
+        help="comment/reply body (required for create/reply; optional for resolve)",
+    )
+    p.add_argument(
+        "--anchor",
+        default=None,
+        help="opaque Drive anchor for create (pass-through; never an A1 range)",
+    )
+    p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="required to actually run the DESTRUCTIVE delete action",
+    )
     p.add_argument(
         "--no-resolved",
         dest="include_resolved",
         action="store_false",
-        help="omit resolved comments (default: include them)",
+        help="read: omit resolved comments (default: include them)",
     )
     p.add_argument(
         "--include-deleted",
         dest="include_deleted",
         action="store_true",
-        help="include deleted comments (Drive includeDeleted)",
+        help="read: include deleted comments (Drive includeDeleted)",
     )
     p.set_defaults(func=_cmd_comments, needs_services=True)
+
+
+def _add_export(sub) -> None:
+    """NEW v0.2 tool (DESIGN §3.x): download a spreadsheet to a local file."""
+    p = sub.add_parser(
+        "export",
+        help="download a spreadsheet to a local file (pdf/xlsx/ods whole-book; csv/tsv per-sheet)",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument(
+        "--format",
+        choices=_EXPORT_FORMATS,
+        default="pdf",
+        help="pdf (default) | xlsx | ods (whole-workbook, Drive scope) | csv | tsv (one sheet)",
+    )
+    p.add_argument(
+        "--path",
+        default=None,
+        help="output path (defaults to <spreadsheetId>.<format> in the cwd)",
+    )
+    p.add_argument(
+        "--sheet",
+        default=None,
+        help="sheet to export — REQUIRED for csv/tsv, IGNORED for pdf/xlsx/ods",
+    )
+    p.set_defaults(func=_cmd_export, needs_services=True)
+
+
+def _add_read_many(sub) -> None:
+    """NEW v0.2 tool (DESIGN §3.3): cross-file values/summary read fan-out."""
+    p = sub.add_parser(
+        "read-many",
+        help="read values or summaries across many spreadsheets (per-file error capture)",
+    )
+    # NOTE: no spreadsheet_id positional — the ids live inside --requests-json (one per request).
+    p.add_argument(
+        "--requests-json",
+        type=_json_arg,
+        required=True,
+        help='requests[] \'[{"spreadsheetId":..,"ranges":[..],"render"?:..}]\' (or @file.json)',
+    )
+    p.add_argument(
+        "--mode",
+        choices=_READ_MANY_MODES,
+        default="values",
+        help="values (default; per-request ranges) | summary (cheap orientation, no ranges)",
+    )
+    p.set_defaults(func=_cmd_read_many, needs_services=True)
 
 
 def _add_batch(sub) -> None:
@@ -754,12 +845,39 @@ def _cmd_dimensions(services, args) -> dict:
 
 
 def _cmd_comments(services, args) -> dict:
+    # delete is DESTRUCTIVE — require --confirm so a stray `comments ID --action delete
+    # --comment-id X` cannot silently remove a comment.
+    if args.action == "delete" and not args.confirm:
+        raise SheetsError(
+            "confirmation_required",
+            "comments --action delete is destructive; re-run with --confirm",
+        )
     return core.comments(
         services,
         args.spreadsheet_id,
+        action=args.action,
+        comment_id=args.comment_id,
+        content=args.content,
+        anchor=args.anchor,
         include_resolved=args.include_resolved,
         include_deleted=args.include_deleted,
     )
+
+
+def _cmd_export(services, args) -> dict:
+    return core.export(
+        services,
+        args.spreadsheet_id,
+        format=args.format,
+        path=args.path,
+        sheet=args.sheet,
+    )
+
+
+def _cmd_read_many(services, args) -> dict:
+    # read-many has NO spreadsheet_id positional — the ids live inside --requests-json. core.
+    # read_many takes (services, requests, *, mode).
+    return core.read_many(services, args.requests_json, mode=args.mode)
 
 
 def _cmd_batch(services, args) -> dict:
@@ -891,6 +1009,17 @@ def _render_text(result: dict) -> str:
         lines.append(f"  cols: {hidden_cols if hidden_cols else '(none)'}")
         return "\n".join(lines)
 
+    # export (DESIGN §3.x): a terse "exported <format> -> <path> (<bytes> bytes)" line.
+    if "format" in result and "path" in result and "bytes" in result:
+        return (
+            f"exported {result.get('format')} -> {result.get('path')} "
+            f"({result.get('bytes')} bytes)"
+        )
+
+    # read_many (DESIGN §3.3): the cross-file fan-out envelope (mode/count/results).
+    if "results" in result and "mode" in result and "count" in result:
+        return _render_read_many(result)
+
     # data_ops / dimensions write summary (DESIGN §X.2/§X.7): a terse one-line action summary.
     if "action" in result and ("sheets" not in result and "cells" not in result):
         summary = _render_action_summary(result)
@@ -951,6 +1080,33 @@ def _inspect_rich_parts(cell: dict) -> list[str]:
     if pivot:
         parts.append(pivot.get("line") or f"pivot <- {pivot.get('source', '?')}")
     return parts
+
+
+def _render_read_many(result: dict) -> str:
+    """Render a cross-file ``read_many`` envelope (DESIGN §3.3): one line per result entry.
+
+    Each entry is EITHER a captured failure (``ok:False`` -> ``ERROR <code>: <message>``) or a
+    success (a summary entry -> ``<title> (<n> sheet(s))``; a values entry -> ``<n> row(s) across
+    <k> range(s)``). The top-level ``ok:true`` does NOT imply every file succeeded, so failures
+    are surfaced inline.
+    """
+    mode = result.get("mode")
+    count = result.get("count")
+    lines = [f"read-many mode={mode}: {count} result(s)"]
+    for entry in result.get("results", []):
+        sid = entry.get("spreadsheetId", "?")
+        if entry.get("ok") is False:
+            err = entry.get("error") or {}
+            lines.append(f"  {sid}: ERROR {err.get('code', '?')}: {err.get('message', '')}")
+        elif "ranges" in entry:
+            ranges = entry.get("ranges", [])
+            rows = sum(len(r.get("values") or []) for r in ranges)
+            lines.append(f"  {sid}: {rows} row(s) across {len(ranges)} range(s)")
+        else:
+            title = entry.get("title", "")
+            nsheets = len(entry.get("sheets", []))
+            lines.append(f"  {sid}: {title or '(untitled)'} ({nsheets} sheet(s))")
+    return "\n".join(lines)
 
 
 def _render_comment(comment: dict) -> str:

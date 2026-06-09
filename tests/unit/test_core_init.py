@@ -1,11 +1,11 @@
 """Re-export contract for ``gsheets.core`` (build unit ``core_init``; DESIGN §1, §3.3, §Extensions).
 
-``core/__init__.py`` is a PURE re-export module: it must surface exactly the 18 public core
+``core/__init__.py`` is a PURE re-export module: it must surface exactly the 20 public core
 functions for ``from gsheets.core import overview, inspect, ...`` and nothing transport-bound.
-(15 base, DESIGN §3.3, plus the 3 v0.2 extension top-level fns ``data_ops``/``dimensions``/
-``comments``, DESIGN §Extensions / §X.13.) These tests pin:
+(15 base, DESIGN §3.3, plus the 5 v0.2 extension top-level fns ``data_ops``/``dimensions``/
+``comments``/``export``/``read_many``, DESIGN §Extensions / §X.13 / §3.x.) These tests pin:
 
-- all 18 public symbols are present, callable, and are the SAME objects defined in their
+- all 20 public symbols are present, callable, and are the SAME objects defined in their
   owning sibling modules (no accidental shadowing / wrong wiring);
 - ``__all__`` matches the locked spec set exactly (no missing, no extra);
 - the §1 boundary holds: importing ``gsheets.core`` in a fresh interpreter pulls in none of
@@ -21,8 +21,8 @@ import sys
 
 import gsheets.core as core
 
-# The 18 public core functions, mapped to the sibling module that OWNS each one (DESIGN §1
-# layout / §3.3 surface + §Extensions / §X.13). The re-export must hand back these exact objects.
+# The 20 public core functions, mapped to the sibling module that OWNS each one (DESIGN §1
+# layout / §3.3 surface + §Extensions / §X.13 / §3.x). The re-export must hand back these objects.
 _EXPECTED_OWNERS = {
     "overview": "gsheets.core.reads",
     "inspect": "gsheets.core.reads",
@@ -43,16 +43,19 @@ _EXPECTED_OWNERS = {
     "data_ops": "gsheets.core.dataops",
     "dimensions": "gsheets.core.dimensions",
     "comments": "gsheets.core.comments",
+    # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two MORE NEW top-level core fns.
+    "export": "gsheets.core.export",
+    "read_many": "gsheets.core.multiread",
 }
 
 _EXPECTED_SYMBOLS = set(_EXPECTED_OWNERS)
 
 
 def test_core_init_all_matches_spec_exactly():
-    """``__all__`` is exactly the 18 locked public symbols — no missing, no extras."""
+    """``__all__`` is exactly the 20 locked public symbols — no missing, no extras."""
     assert set(core.__all__) == _EXPECTED_SYMBOLS
     # __all__ also has no duplicates.
-    assert len(core.__all__) == len(set(core.__all__)) == 18
+    assert len(core.__all__) == len(set(core.__all__)) == 20
 
 
 def test_core_init_exposes_all_eighteen_callables():

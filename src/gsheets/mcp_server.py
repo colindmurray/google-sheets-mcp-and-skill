@@ -35,12 +35,14 @@ from .core import (
     comments as _comments,
     data_ops as _data_ops,
     dimensions as _dimensions,
+    export as _export,
     format as _format,
     inspect as _inspect,
     manage_sheets as _manage_sheets,
     metadata as _metadata,
     overview as _overview,
     read_conditional_formats as _read_conditional_formats,
+    read_many as _read_many,
     read_values as _read_values,
     set_conditional_format as _set_conditional_format,
     set_validation as _set_validation,
@@ -394,48 +396,185 @@ def sheets_read_conditional_formats(
 
 @register(
     annotations=ToolAnnotations(
-        title="Read comments (Drive)",
+        title="Read across many spreadsheets",
         readOnlyHint=True,
         idempotentHint=True,
         openWorldHint=True,
     ),
     tags={"read"},
 )
-def sheets_comments(
+def sheets_read_many(
+    spreadsheet_id: str,
+    requests: list[dict],
+    ctx: Context,
+    mode: str = "values",
+) -> models.ReadManyResult:
+    """Fan ONE values-or-summary read across MANY spreadsheets, capturing per-file errors.
+
+    Use this to orient or pull values across a SET of spreadsheets in a single call (the
+    cross-file analogue of ``sheets_overview`` / ``sheets_read_values``). Each request names ONE
+    ``spreadsheetId``; the read applied per file is chosen by ``mode``:
+
+    * ``mode="values"`` (default) — per request, reads its ``ranges`` (REQUIRED) with an optional
+      per-request ``render`` override ("plain" | "unformatted" | "formula" | "all").
+    * ``mode="summary"`` — per request, a cheap orientation snapshot (no grid data); ``ranges``
+      is ignored.
+
+    Per-item error capture is the whole point: one bad id (404, permission denied, bad range)
+    becomes a captured ``{spreadsheetId, ok:False, error:{...}}`` entry in ``results`` instead of
+    aborting the batch — the other files still read. So a top-level ``ok:true`` does NOT mean
+    every file succeeded; inspect each ``results[]`` entry's ``ok``.
+
+    The first positional ``spreadsheet_id`` is unused by this cross-file tool (the ids come from
+    ``requests[]``); pass any of the target ids (it is accepted only to keep the universal
+    first-arg shape).
+
+    Args:
+        spreadsheet_id: A spreadsheet ID (unused — the real ids are inside ``requests``).
+        requests: A NON-EMPTY list, each ``{"spreadsheetId": "<id>", "ranges": ["Sheet1!A1:B10"],
+            "render": "plain"}`` (``ranges`` REQUIRED only in values mode; ``render`` optional).
+        mode: "values" (default) | "summary".
+
+    Returns:
+        ``{ok, mode, count, results:[...]}`` where each entry is EITHER a success result dict
+        (``{ok:True, spreadsheetId, ...}`` — a summary or values shape) OR a captured failure
+        ``{spreadsheetId, ok:False, error:{code, message, ...}}``, one per request in request order.
+    """
+    return _call(
+        models.ReadManyResult,
+        _read_many,
+        _services(ctx),
+        requests,
+        mode=mode,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Export a spreadsheet to a local file",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+    tags={"read"},
+)
+def sheets_export(
     spreadsheet_id: str,
     ctx: Context,
-    include_resolved: bool = True,
-    include_deleted: bool = False,
-) -> models.CommentsResult:
-    """Read the threaded COMMENTS on a spreadsheet — author, text, resolved state, and replies.
+    format: str = "pdf",
+    path: str | None = None,
+    sheet: str | None = None,
+) -> models.ExportResult:
+    """Download a spreadsheet to a LOCAL file. Read-only against the API; writes a local file.
 
-    Comments live on the Drive file, not the Sheets grid, so this uses the Drive API (requires a
-    Drive scope; if none is granted you get a clear ``drive_unavailable`` error — re-run with
-    ``GSHEETS_SCOPES=broad``). Each comment flattens to author/content/created/modified, a
-    ``resolved`` flag, an optional ``quoted`` snippet, and its ``replies``. The Drive ``anchor``
-    is opaque and document-specific — surfaced raw as ``anchorRaw``, never mapped to a cell.
+    This does NOT mutate the spreadsheet — it reads the data and writes a file to local disk
+    (``path``, or ``<spreadsheetId>.<ext>`` in the cwd when omitted), reporting the byte count so
+    you can verify the download. Two backends, picked by ``format``:
+
+    * WHOLE-WORKBOOK (``pdf`` / ``xlsx`` / ``ods``) — Google renders the entire workbook
+      server-side via the Drive API; the ``sheet`` arg is IGNORED. These REQUIRE a Drive scope —
+      without one you get ``drive_unavailable`` (re-run with ``GSHEETS_SCOPES=broad``).
+      Example: ``format="xlsx"`` -> writes ``<id>.xlsx``.
+    * PER-SHEET TEXT (``csv`` / ``tsv``) — exports a SINGLE named sheet, serialized locally from
+      the sheet's values (Drive's csv export only ever emits the first sheet, so this goes through
+      the Sheets API and needs only the Sheets scope). ``sheet`` is REQUIRED here — omitting it
+      gives ``missing_sheet``. Example: ``format="csv", sheet="Sheet1"`` -> writes ``<id>.csv``.
 
     Args:
         spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
-        include_resolved: Include resolved comments (default True); set False to see only open ones.
-        include_deleted: Include deleted comments (default False).
+        format: "pdf" (default) | "xlsx" | "ods" | "csv" | "tsv" (case-insensitive).
+        path: Destination path; defaults to ``<spreadsheetId>.<format>`` in the cwd.
+        sheet: The sheet to export — REQUIRED for csv/tsv, IGNORED for pdf/xlsx/ods.
 
     Returns:
-        ``{ok, spreadsheetId, comments:[{id, author, content, created, modified, resolved,
-        quoted, anchorRaw, replies:[{author, content, action}], line}]}``, where ``line`` looks
-        like 'comment AAAA by Jane Doe: "please verify Q3" (open, 1 reply)'.
+        ``{ok, spreadsheetId, format, mimeType, path, bytes}`` (the same shape for every format).
+    """
+    return _call(
+        models.ExportResult,
+        _export,
+        _services(ctx),
+        spreadsheet_id,
+        format=format,
+        path=path,
+        sheet=sheet,
+    )
+
+
+# --------------------------------------------------------------------------- WRITE tools
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Read or write comments (Drive)",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    tags={"write"},
+)
+def sheets_comments(
+    spreadsheet_id: str,
+    ctx: Context,
+    action: str = "read",
+    comment_id: str | None = None,
+    content: str | None = None,
+    anchor: str | None = None,
+    include_resolved: bool = True,
+    include_deleted: bool = False,
+) -> models.CommentsResult:
+    """Read OR write the threaded COMMENTS on a spreadsheet — list, create, reply, resolve, delete.
+
+    Comments live on the Drive file, not the Sheets grid, so EVERY action uses the Drive API
+    (requires a Drive scope; if none is granted you get a clear ``drive_unavailable`` error —
+    re-run with ``GSHEETS_SCOPES=broad``). The ``action`` dispatch (default ``"read"`` is the
+    backward-compatible list):
+
+    * ``action="read"`` (default) — list comments. Each flattens to author/content/created/
+      modified, a ``resolved`` flag, an optional ``quoted`` snippet, and its ``replies``. The
+      Drive ``anchor`` is opaque and document-specific — surfaced raw as ``anchorRaw``, never
+      mapped to a cell. ``include_resolved`` / ``include_deleted`` apply ONLY here. Example:
+      ``action="read"`` -> ``{comments:[...]}``.
+    * ``action="create"`` — add a top-level comment. REQUIRES ``content``; optional opaque
+      ``anchor`` is passed through verbatim. Returns ``{comment:{...}}``.
+    * ``action="reply"`` — post a reply on ``comment_id``. REQUIRES ``comment_id`` AND
+      ``content``. Returns ``{commentId, reply:{author?, content?, action?}}``.
+    * ``action="resolve"`` — resolve ``comment_id`` (== a reply carrying ``action:resolve`` —
+      Drive has no standalone resolve endpoint). REQUIRES ``comment_id``; optional ``content``
+      rides along as the resolving reply's body. Returns ``{commentId, resolved:True, reply:{...}}``.
+    * ``action="delete"`` — DESTRUCTIVE: remove ``comment_id``. REQUIRES ``comment_id``. Returns
+      ``{commentId, deleted:True}``.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
+        action: "read" (default) | "create" | "reply" | "resolve" | "delete".
+        comment_id: Target comment id (REQUIRED for reply/resolve/delete).
+        content: Comment/reply body (REQUIRED for create/reply; optional for resolve; ignored by
+            read/delete).
+        anchor: Optional opaque Drive anchor for create (pass-through; never an A1 range).
+        include_resolved: read only — include resolved comments (default True); False = open only.
+        include_deleted: read only — include deleted comments (default False).
+
+    Returns:
+        read -> ``{ok, spreadsheetId, comments:[{id, author, content, created, modified, resolved,
+        quoted, anchorRaw, replies:[{author, content, action}], line}]}``;
+        create -> ``{ok, spreadsheetId, comment:{...}}``;
+        reply -> ``{ok, spreadsheetId, commentId, reply:{...}}``;
+        resolve -> ``{ok, spreadsheetId, commentId, resolved:True, reply:{...}}``;
+        delete -> ``{ok, spreadsheetId, commentId, deleted:True}``.
     """
     return _call(
         models.CommentsResult,
         _comments,
         _services(ctx),
         spreadsheet_id,
+        action=action,
+        comment_id=comment_id,
+        content=content,
+        anchor=anchor,
         include_resolved=include_resolved,
         include_deleted=include_deleted,
     )
-
-
-# --------------------------------------------------------------------------- WRITE tools
 
 
 @register(
@@ -727,7 +866,7 @@ def sheets_structure(
 ) -> models.StructureResult:
     """Read OR modify a spreadsheet's structure: merges, named/protected ranges, frozen
     rows/cols, tab color, row/column groups, native Tables, banding, basic filter & filter
-    views, and spreadsheet-level properties (title/locale/timeZone).
+    views, slicers, and spreadsheet-level properties (title/locale/timeZone).
 
     ``action="read"`` returns the full structural picture (``sheet`` optional — omit for every
     tab; ``sheets`` is always a list). Each per-sheet entry also carries ``tables``,
@@ -735,10 +874,11 @@ def sheets_structure(
     terse round-trippable struct). The mutating actions target ONE tab and REQUIRE ``sheet``
     (EXCEPT ``spreadsheet_props``, which is spreadsheet-scoped and needs NEITHER ``sheet`` nor
     ``range``). Range-scoped writes (merge/add_named/protect/add_table/add_banding/
-    set_basic_filter/add_filter_view) also REQUIRE ``range``. Some paths are destructive
-    (unmerge, delete_named, unprotect, delete_table, delete_banding, delete_filter_view,
-    clear_basic_filter). Each action consumes only its documented ``params`` keys; unknown keys
-    are rejected.
+    set_basic_filter/add_filter_view/add_slicer) also REQUIRE ``range`` (for ``add_slicer`` the
+    range is the slicer's data range — pass it as ``range`` or ``params["dataRange"]``). Some
+    paths are destructive (unmerge, delete_named, unprotect, delete_table, delete_banding,
+    delete_filter_view, delete_slicer, clear_basic_filter). Each action consumes only its
+    documented ``params`` keys; unknown keys are rejected.
 
     Args:
         spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
@@ -748,11 +888,13 @@ def sheets_structure(
             "add_banding" | "update_banding" | "delete_banding" |
             "set_basic_filter" | "clear_basic_filter" |
             "add_filter_view" | "update_filter_view" | "delete_filter_view" |
+            "add_slicer" | "update_slicer" | "delete_slicer" |
             "spreadsheet_props".
         sheet: Tab name (optional for read; REQUIRED for every mutate EXCEPT spreadsheet_props).
         range: An A1 range (for merge/unmerge/add_named/protect and add_table/add_banding/
             set_basic_filter/add_filter_view; also accepted by update_table/update_banding/
-            update_filter_view to re-anchor).
+            update_filter_view to re-anchor; for add_slicer/update_slicer it is the slicer's
+            DATA range and wins over ``params["dataRange"]``).
         params: Action-specific, e.g. merge {"mergeType": "MERGE_ALL"}; add_named {"name": "x"};
             protect {"description", "editors", "warningOnly"}; freeze {"rows": 1, "cols": 2};
             tab_color {"color": "#4285F4"}; group/ungroup {"dimension": "ROWS", "start", "end"};
@@ -766,6 +908,10 @@ def sheets_structure(
             [{"col": "B", "hidden"?, "condition"?}]}; clear_basic_filter {};
             add_filter_view {"title", "sorted"?, "criteria"?}; update_filter_view {"filterViewId",
             "title"?, "range"?, "sorted"?, "criteria"?}; delete_filter_view {"filterViewId"};
+            add_slicer {"anchor": "Sheet1!H2" (REQUIRED single cell), "dataRange"? (or top-level
+            range), "title"?, "columnIndex"?, "criteria"?: {"hidden"?, "visible"?, "condition"?}};
+            update_slicer {"slicerId" (REQUIRED), "title"?, "dataRange"?, "columnIndex"?,
+            "criteria"?}; delete_slicer {"slicerId" (REQUIRED)};
             spreadsheet_props {"title"?, "locale"?, "timeZone"?} (no sheet/range — auto fields
             mask from the keys you set).
 
@@ -774,7 +920,7 @@ def sheets_structure(
         frozenCols, tabColor, protectedRanges, dimensionGroups, tables, basicFilter, filterViews,
         bandedRanges, slicers}]}``; mutate -> ``{ok, spreadsheetId, action, ...affected
         ids/ranges}`` — create actions surface the new id (``tableId``/``bandedRangeId``/
-        ``filterViewId``), spreadsheet_props echoes the updated properties.
+        ``filterViewId``/``slicerId``), spreadsheet_props echoes the updated properties.
     """
     return _call(
         models.StructureResult,

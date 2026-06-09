@@ -161,6 +161,7 @@ class TestReturnShape:
             "tableIds": [],
             "bandedRangeIds": [],
             "filterViewIds": [],
+            "slicerIds": [],
         }
 
     def test_null_replies_in_response_yields_empty_list(self):
@@ -212,6 +213,7 @@ class TestNewIdsCapture:
             "tableIds": [],
             "bandedRangeIds": [],
             "filterViewIds": [],
+            "slicerIds": [],
         }
 
     def test_duplicate_sheet_id_captured_in_sheet_bucket(self):
@@ -250,6 +252,7 @@ class TestNewIdsCapture:
             "tableIds": [],
             "bandedRangeIds": [],
             "filterViewIds": [],
+            "slicerIds": [],
         }
 
 
