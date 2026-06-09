@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "google-sheets-mcp-and-skill"
+version = "0.1.0"
+description = "Best-in-class Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness (values + formulas, cell formatting, conditional-format rules) as the thesis."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Colin Murray" }]
+keywords = ["google-sheets", "mcp", "cli", "spreadsheets", "ai", "skill", "conditional-formatting"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Office Suites",
+    "Topic :: Software Development :: Libraries",
+]
+
+# Runtime dependencies (DESIGN.md §9 — exact floors).
+# Core + auth use only stdlib + googleapiclient/google.auth*.
+# fastmcp/pydantic are adapter-side only (MCP server); argparse (CLI) is stdlib.
+dependencies = [
+    "google-api-python-client>=2.190",
+    "google-auth>=2.50",
+    "google-auth-oauthlib>=1.3",
+    "google-auth-httplib2>=0.2",
+    "fastmcp>=2.11,<3",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+]
+
+[project.scripts]
+gsheets = "gsheets.cli:main"
+google-sheets-mcp = "gsheets.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/colindmurray/google-sheets-mcp-and-skill"
+Repository = "https://github.com/colindmurray/google-sheets-mcp-and-skill"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gsheets"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "live: hits the real Google Sheets API (needs creds + GSHEETS_LIVE=1)",
+]
