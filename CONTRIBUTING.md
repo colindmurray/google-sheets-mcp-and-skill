@@ -1,14 +1,13 @@
 # Contributing to google-sheets-mcp-and-skill
 
-Thanks for your interest in contributing. This project is a best-in-class Google
-Sheets integration for AI tools, shipped as **one repo, two install paths over
-shared code**: an MCP server (`google-sheets-mcp`) and a CLI (`gsheets`) plus a
-bundled `SKILL.md`. Both adapters are thin wrappers over a single **pure core
-library** (`gsheets.core`).
+Thanks for your interest in contributing. This project is a Google Sheets integration
+for AI tools, shipped as one repo with two install paths over shared code: an MCP server
+(`google-sheets-mcp`) and a CLI (`gsheets`), plus a bundled `SKILL.md`. Both adapters are
+thin wrappers over a single pure core library (`gsheets.core`).
 
 Most of this document is about one rule — the pure-core / thin-adapter boundary —
-because preserving it is what keeps the two entrypoints behaving identically with
-zero duplicated Sheets logic. Read [The architecture rule you MUST
+because preserving it is what keeps the two entrypoints behaving identically with no
+duplicated Sheets logic. Read [The architecture rule you MUST
 preserve](#the-architecture-rule-you-must-preserve) before writing any code, and
 see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
@@ -203,11 +202,11 @@ its MCP registration + its CLI subcommand + its docs*, all with matching field n
 
 ### Adding a capability without a new top-level tool
 
-Not every new capability needs a new core function. Several tools are **multi-action
-dispatchers** (`structure`, `data_ops`, `dimensions`, `metadata`, `manage_sheets`,
-`charts`), and the cheaper, more cohesive way to add a single-request capability is often a
-**new action on an existing tool** rather than a whole new tool. Prefer this when the
-capability is a natural sibling of what the tool already does:
+Not every new capability needs a new core function. Several tools are multi-action
+dispatchers (`structure`, `data_ops`, `dimensions`, `comments`, `metadata`,
+`manage_sheets`, `charts`), and the cheaper, more cohesive way to add a single-request
+capability is often a new action on an existing tool rather than a whole new tool. Prefer
+this when the capability is a natural sibling of what the tool already does:
 
 - A new structural read/write (tables, banding, filters, slicers, spreadsheet properties)
   belongs on `structure` as a new action and/or a new sheet-scoped read key — not a new

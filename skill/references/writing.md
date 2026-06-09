@@ -24,6 +24,9 @@ For exact flags see `commands.md` or `gsheets <cmd> --help`. Examples use `<YOUR
 - [`dimensions` — row & column operations](#dimensions--row--column-operations)
 - [Structure, tabs, metadata](#structure-tabs-metadata)
   - [Tables, banding, filters, spreadsheet props (v0.2)](#tables-banding-filters-spreadsheet-props-v02)
+  - [Slicer writes (v0.2)](#slicer-writes-v02)
+- [`comments` writes — create / reply / resolve / delete](#comments-writes--create--reply--resolve--delete)
+- [`export` — download to a local file (no mutation)](#export--download-to-a-local-file-no-mutation)
 - [CRUD symmetry — read it back](#crud-symmetry--read-it-back)
 
 ---
@@ -268,9 +271,10 @@ them, so re-read any A1 references you cached afterward. See `commands.md` for t
 - **`structure`** writes go through the same auto field-mask where applicable, and `--sheet` is
   **required** to mutate the sheet-scoped actions (omit only for `read`, and for the
   spreadsheet-scoped `spreadsheet_props`). `unmerge`, `delete_named`, `unprotect`, `ungroup`, and
-  the v0.2 deletes (`delete_table`, `delete_banding`, `clear_basic_filter`, `delete_filter_view`)
-  are destructive. New `namedRangeId`/`protectedRangeId`/`tableId`/`bandedRangeId`/`filterViewId`s
-  come back in the result so a create-then-populate flow has the id immediately.
+  the v0.2 deletes (`delete_table`, `delete_banding`, `clear_basic_filter`, `delete_filter_view`,
+  `delete_slicer`) are destructive. New `namedRangeId`/`protectedRangeId`/`tableId`/
+  `bandedRangeId`/`filterViewId`/`slicerId`s come back in the result so a create-then-populate flow
+  has the id immediately.
 - **`manage-sheets`** returns the new `sheetId`/title/index for `add`/`duplicate`. `delete` is
   destructive — confirm first. (Row/column ops live on `dimensions`, above, not here.)
 - **`metadata`** writes durable key/value anchors (row/column range, whole sheet, or spreadsheet)
@@ -281,8 +285,8 @@ See the per-action `params` key tables in `commands.md`; an unknown key raises `
 ### Tables, banding, filters, spreadsheet props (v0.2)
 
 `structure` gained write CRUD for the structural reads `structure --action read` surfaces, so
-everything you can read back you can also create/edit/delete (full CRUD symmetry — slicers excepted,
-read-only in v1):
+everything you can read back you can also create/edit/delete (full CRUD symmetry, slicers included —
+see [Slicer writes](#slicer-writes-v02) below):
 
 ```sh
 # Create a native Table over a range (a DROPDOWN column needs a ONE_OF_LIST validation):
@@ -310,9 +314,95 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action spreadsheet_props \
 
 The `tableId` / `bandedRangeId` / `filterViewId` returned on create are how you address the matching
 `update_*` / `delete_*` action — read them back with `structure --action read`. `spreadsheet_props`
-is the **write side** of `overview`'s `locale` / `timeZone`. Slicer creation is out of v1 — read
-slicers via `structure --action read`, create/edit one through `batch`. See `commands.md` for every
-action's `params` keys.
+is the **write side** of `overview`'s `locale` / `timeZone`. See `commands.md` for every action's
+`params` keys.
+
+### Slicer writes (v0.2)
+
+Slicers gained write CRUD: `add_slicer` / `update_slicer` / `delete_slicer`, all through the
+existing `structure` subcommand. A slicer points at a **data range**, filters one of its columns,
+and is positioned at a single **anchor** cell (usually on a different tab):
+
+```sh
+# Add a slicer over a data range, anchored at S!E1, filtering column 0:
+gsheets structure <YOUR_SPREADSHEET_ID> --action add_slicer --sheet S --range 'S!A1:C4' \
+  --params-json '{"title":"Region","columnIndex":0,"anchor":"S!E1"}'
+#   -> returns the new slicerId.
+
+# Update a slicer by id (auto fields mask — only the keys you pass are written):
+gsheets structure <YOUR_SPREADSHEET_ID> --action update_slicer --sheet S \
+  --params-json '{"slicerId":12,"title":"Region (filtered)","criteria":{"condition":"NUMBER_GREATER(0)"}}'
+
+# Delete a slicer by id (DESTRUCTIVE; maps to deleteEmbeddedObject):
+gsheets structure <YOUR_SPREADSHEET_ID> --action delete_slicer --sheet S \
+  --params-json '{"slicerId":12}'
+```
+
+- The **data range** is the top-level `--range` *or* `params["dataRange"]` (top-level `--range`
+  wins when both are given). **`anchor`** (a single A1 cell, required on add) goes in `--params-json`.
+- `add_slicer` accepts `title`, `columnIndex` (0-based offset into the data range of the filtered
+  column), `anchor`, and `criteria` (`{"hidden"?, "visible"?, "condition"?}` — a `condition` reuses
+  the same terse condition grammar as conditional formats and filters, e.g. `NUMBER_GREATER(0)`).
+- `update_slicer` / `delete_slicer` take `--params-json '{"slicerId":N, ...}'`; `update_slicer`
+  builds its `fields` mask from the keys you pass (`title` / `dataRange` / `columnIndex` /
+  `criteria`) and refuses an empty change.
+- Read it back with `structure --action read`; the new slicer shows up in the host sheet's
+  `slicers` list with its terse `@ <anchor>` line (see `reading.md`).
+
+## `comments` writes — create / reply / resolve / delete
+
+`comments` is full CRUD (the read action is in `reading.md`). The write actions go through the
+**Drive API**, so they need a Drive scope just like the read — `drive.file` (the default) for files
+this tool created/opened, else `GSHEETS_SCOPES=broad` for someone else's shared sheet, otherwise
+`drive_unavailable`.
+
+```sh
+# Create a top-level comment (--content required; optional opaque --anchor passes through):
+gsheets comments <YOUR_SPREADSHEET_ID> --action create --content 'please verify Q3 totals'
+
+# Reply to an existing comment (--comment-id AND --content required):
+gsheets comments <YOUR_SPREADSHEET_ID> --action reply --comment-id AAAA --content 'verified'
+
+# Resolve a comment (--comment-id required; --content optional — rides along as the reply body):
+gsheets comments <YOUR_SPREADSHEET_ID> --action resolve --comment-id AAAA --content 'closing'
+
+# Delete a comment (DESTRUCTIVE — requires --confirm):
+gsheets comments <YOUR_SPREADSHEET_ID> --action delete --comment-id AAAA --confirm
+```
+
+- **`resolve` == posting a reply with `action:resolve`.** Drive has no standalone resolve endpoint,
+  so resolving is implemented as a reply carrying `action="resolve"`; an optional `--content` is
+  that reply's body. The return is `{commentId, resolved:true, reply:{...}}`.
+- **`delete` is destructive and requires `--confirm`** — without it the CLI refuses with
+  `confirmation_required` rather than removing the comment. (On the MCP side `sheets_comments` is a
+  write tool: `readOnlyHint=False`, `destructiveHint=True`.)
+- **`--anchor` is opaque** — passed through verbatim on `create`, never interpreted as an A1 range
+  (Drive anchors have no documented cell mapping).
+- `create` returns the new comment through the same serializer a read uses (so `comments --action
+  read` round-trips it); `reply`/`resolve` return the flattened reply.
+
+## `export` — download to a local file (no mutation)
+
+`export` writes a **local file**; it never mutates the spreadsheet (hence `readOnlyHint=True` on
+`sheets_export` — read-only against the API, even though it writes to disk). Two backends, picked by
+`--format`:
+
+```sh
+# Whole-workbook render via Drive (needs a Drive scope) — --sheet is IGNORED:
+gsheets export <YOUR_SPREADSHEET_ID> --format pdf
+gsheets export <YOUR_SPREADSHEET_ID> --format xlsx --path /tmp/book.xlsx
+
+# Single sheet, serialized locally from values (Sheets scope only) — --sheet REQUIRED:
+gsheets export <YOUR_SPREADSHEET_ID> --format csv --sheet Sheet1
+```
+
+- **`pdf` / `xlsx` / `ods`** are whole-workbook exports rendered server-side via Drive
+  `files.export`. They REQUIRE a Drive scope (else `drive_unavailable`); `--sheet` is ignored.
+- **`csv` / `tsv`** export a single named `--sheet`, read through the Sheets API and serialized
+  locally (Drive's csv export only ever emits the first sheet, so this path avoids Drive and needs
+  only the Sheets scope). `--sheet` is REQUIRED here — omitting it raises `missing_sheet`.
+- `--path` defaults to `<spreadsheetId>.<format>` in the cwd. The result is
+  `{format, mimeType, path, bytes}` (the byte count lets you verify the download).
 
 ## CRUD symmetry — read it back
 
@@ -330,11 +420,11 @@ gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!C2'
 ```
 
 The v0.2 structural writes round-trip the same way — after `add_table` / `add_banding` /
-`set_basic_filter` / `add_filter_view` / `spreadsheet_props`, re-read with `structure --action read`
-(or `overview` for `locale`/`timeZone`) to confirm; after a `dimensions` op, `dimensions --action
-read` reports the new hidden state.
+`set_basic_filter` / `add_filter_view` / `add_slicer` / `spreadsheet_props`, re-read with `structure
+--action read` (or `overview` for `locale`/`timeZone`) to confirm; after a `dimensions` op,
+`dimensions --action read` reports the new hidden state. `export` is the exception to read-back: it
+produces a local file, so verify it by the returned `path`/`bytes`, not by re-reading the sheet.
 
-The v1 exceptions are **charts** and **slicers**: `charts --action read` returns chart *metadata
-only* (`chartId`, `title`, `type`, `anchor`), not the full spec, and slicers are **read-only** (no
-typed write). For full chart-spec fidelity or slicer creation, use `batch` (raw `addChart` /
-`updateChartSpec` / `addSlicer`).
+The remaining read-back gap is **charts**: `charts --action read` returns chart *metadata only*
+(`chartId`, `title`, `type`, `anchor`), not the full spec. For full chart-spec fidelity use `batch`
+(raw `addChart` / `updateChartSpec`).

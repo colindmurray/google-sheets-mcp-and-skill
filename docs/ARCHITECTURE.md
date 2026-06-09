@@ -44,7 +44,8 @@ Five invariants follow from that thesis and are not negotiable:
                 ┌─────────────────────────────────────────────────────┐
                 │                  PURE CORE  (gsheets.core)           │
                 │  values · reads · formatting · rules · structure ·   │
-                │  charts · batch · data_ops · dimensions · comments   │
+                │  charts · batch · data_ops · dimensions · comments · │
+                │  export · multiread                                  │
                 │    +   helpers:                                      │
                 │  addressing · colors · fieldsmask · flatten ·        │
                 │  condformat · errors · service   +   serializers:    │
@@ -106,12 +107,27 @@ condformat boundary) and returns plain dicts carrying a `line` field:
 | `tables` | `serialize_table()` + `build_{add,update,delete}_table_request()` — native Sheets `Table` read shape and the write requests. |
 | `filters` | `serialize_basic_filter()` / `serialize_filter_view()` + `build_*` filter requests — basic-filter and filter-view state and writes. |
 | `banding` | `serialize_banding()` + `build_{add,update,delete}_banding_request()` — alternating-color band ranges. |
-| `slicers` | `serialize_slicer()` — slicer read shape (read-only in v1). |
-| `comments` | `serialize_comment()` — flatten a Drive `Comment` (author, content, replies); the `comments` core function lives here too. |
+| `slicers` | `serialize_slicer()` — slicer read shape — plus `build_{add,update,delete}_slicer_request()` for the slicer write CRUD. |
+| `comments` | `serialize_comment()` — flatten a Drive `Comment` (author, content, replies); the `comments` core function (full CRUD over the Drive API) lives here too. |
 
-The new top-level core functions `data_ops` (`core/dataops.py`) and `dimensions`
-(`core/dimensions.py`) are single-dispatch wrappers over the one-request `batchUpdate`
-data and dimension verbs; they import only the shared helpers and stay boundary-pure.
+Five additional top-level core functions live in their own modules and stay boundary-pure:
+
+- `data_ops` (`core/dataops.py`) and `dimensions` (`core/dimensions.py`) are single-dispatch
+  wrappers over the one-request `batchUpdate` data and dimension verbs.
+- `comments` (`core/comments.py`) is full CRUD over Drive threaded comments (it does not touch
+  the Sheets API).
+- `export` (`core/export.py`) downloads a workbook (Drive) or a single sheet (Sheets) to a local
+  file.
+- `read_many` (`core/multiread.py`) fans a read across many spreadsheets, capturing per-file
+  errors.
+
+One boundary-sensitive detail lives in `export`. The Drive-backed formats stream bytes down with
+`MediaIoBaseDownload` from `googleapiclient.http`, which transitively imports `httplib2` →
+`argparse` — a module the pure-core guard forbids from a clean `import gsheets.core`. Since
+`export` is re-exported from `gsheets.core`, a top-level import would leak `argparse` into the
+package import, so `MediaIoBaseDownload` is bound lazily inside `_export_via_drive` (the
+module-level name stays a monkeypatch seam for tests). It is the only place core imports anything
+beyond module top.
 
 ### Auth (`gsheets.auth`) — credential resolution
 
@@ -193,14 +209,15 @@ Two write-side subtleties worth knowing:
 
 ## The function surface
 
-Eighteen core functions, each exposed as one MCP tool and one CLI subcommand. The
-understanding path is `overview → inspect → read_conditional_formats`; the change path is
-the writers; the raw escape hatch is presented last.
+Twenty core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
+auth-only `auth` subcommand that has no core function). The understanding path is
+`overview → inspect → read_conditional_formats`; the change path is the writers; the raw escape
+hatch is presented last.
 
 | Core fn | What it does | Kind |
 |---|---|---|
 | `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`. No grid data. | read |
-| `inspect` | Flagship rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
+| `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
 | `write_values` | Write/update one or more ranges; `USER_ENTERED` default; multi-range in one call. | write |
@@ -209,13 +226,15 @@ the writers; the raw escape hatch is presented last.
 | `format` | Apply cell formatting (background, font, number/date pattern, alignment, wrap, padding, borders, note) atomically with an auto fields mask. | write |
 | `set_conditional_format` | Add / update / delete a boolean or gradient rule by positional index; index-shift-safe batch form. | write |
 | `set_validation` | Set / clear data validation on a range (structured rule, round-trips from `inspect`). | write |
-| `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — plus the v0.2 reads (native tables, basic filter, filter views, banding, slicers) and writes (table / banding / filter CRUD, spreadsheet `title`/`locale`/`timeZone`). One structural interface. | read/write |
+| `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — plus the v0.2 reads (native tables, basic filter, filter views, banding, slicers) and writes (table / banding / filter / slicer CRUD, spreadsheet `title`/`locale`/`timeZone`). One structural interface. | read/write |
 | `manage_sheets` | Add / delete / duplicate / rename / reorder tabs; returns new ids. | write |
 | `metadata` | Read / write developer metadata for durable row/column/sheet anchors. | write |
 | `charts` | Create / update / delete / read embedded charts (read returns metadata only in v1). | write |
 | `data_ops` | Single-request data verbs: `find_replace`, `delete_duplicates`, `trim_whitespace`, `sort_range`, `text_to_columns`, `auto_fill`, `copy_paste`, `cut_paste`. | write |
 | `dimensions` | Row/column ops: `insert` / `delete` / `move` / `append`, `auto_resize`, `set_props` (height/width/hide), and `read` (which rows/cols are hidden). | read/write |
-| `comments` | Read Drive threaded comments (author, content, replies, resolved state) on the spreadsheet file. Read-only in v1; uses the Drive API. | read |
+| `comments` | Drive threaded comments on the spreadsheet file (author, content, replies, resolved state). Full CRUD via an `action` dispatch (`read` / `create` / `reply` / `resolve` / `delete`); uses the Drive API, not the Sheets API. | read/write |
+| `export` | Download the workbook (`pdf` / `xlsx` / `ods`, via Drive `files.export`) or one sheet (`csv` / `tsv`, serialized locally from values) to a local file. | read |
+| `read_many` | Fan a values or summary read across many spreadsheets; a bad id is captured as a per-file `{ok: false, error}` entry instead of failing the batch. | read |
 | `batch` | Power-user escape hatch: a raw ordered list of `batchUpdate` requests. | write |
 
 The structure read and the conditional-format read share a **shape-stable multi-sheet
@@ -297,7 +316,7 @@ gradient case.
 
 ---
 
-## v0.2 serialization grammars (richer reads)
+## v0.2 capabilities (richer reads, then files and cross-file)
 
 The conditional-format line style generalizes. Every richer read added in v0.2 follows the
 same discipline: **flattened hex colors**, a terse `[range] kind …` (or `kind … [range]`)
@@ -305,7 +324,10 @@ same discipline: **flattened hex colors**, a terse `[range] kind …` (or `kind 
 **omit-when-absent** so a sparse value stays token-cheap. Each serializer takes
 already-resolved A1 strings; the owning read function resolves `GridRange → A1` first.
 Per-cell rich data (runs, hyperlink, pivot) is attached **only to a cell that actually
-carries it** — never emitted as an empty placeholder.
+carries it** — never emitted as an empty placeholder. The slicer and comment serializers gained
+write builders in v0.2 (`structure` slicer CRUD; `comments` action CRUD). The last two
+subsections (`export`, `read_many`) are not serializers — they are the file-output and
+cross-file capabilities, documented here for completeness.
 
 ### Rich-text runs + cell hyperlink (`richtext`)
 
@@ -416,7 +438,7 @@ Full-CRUD via the `structure` actions `add_banding` / `update_banding` / `delete
 ### Slicers (`slicers`)
 
 A `Slicer` flattens to its id, title, data range, filtered column index, dashboard anchor,
-and a terse criterion. Read-only in v1 (writes use `batch`).
+and a terse criterion.
 
 ```jsonc
 { "slicerId": 4, "title": "Region", "range": "Data!A1:F500", "columnIndex": 0,
@@ -427,12 +449,26 @@ and a terse criterion. Read-only in v1 (writes use `batch`).
 slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1
 ```
 
+The anchor reads back as `{sheet, row, col}` and renders as `@ <Sheet>!<cell>`. A 0-valued
+index is meaningful (top row / first column), so a top-left, row-0 anchor still renders (e.g.
+`@ Sheet!E1`); an index absent from the response is treated as 0.
+
+Full-CRUD via the `structure` actions `add_slicer` / `update_slicer` / `delete_slicer`.
+`add_slicer` takes the data range as the top-level A1 `range` (or `params.dataRange`) plus a
+required single-cell `anchor`, and returns the new `slicerId` from the `addSlicer` reply.
+`update_slicer` / `delete_slicer` address the slicer by `slicerId` in `params`; `delete_slicer`
+maps to `deleteEmbeddedObject` since slicers share the embedded-object id space.
+
 ### Drive comments (`comments`)
 
-The `comments` tool reads threaded comments from the spreadsheet **file** via the Drive
-API (not the Sheets API). Each comment flattens its author display name, content,
-timestamps, `resolved` state, an optional quoted snippet, and its replies (each with an
-optional `action` such as `resolve`).
+The `comments` tool reads and writes threaded comments on the spreadsheet **file** via the
+Drive API (not the Sheets API — Sheets has no comment surface). An `action` dispatch (default
+`read`) selects the operation: `read` paginates `comments.list`; `create` posts a top-level
+comment; `reply` posts a reply; `resolve` resolves a comment by posting a reply with
+`action="resolve"` (Drive has no standalone resolve endpoint); `delete` removes a comment (the
+destructive action — the CLI requires `--confirm`). Each comment flattens its author display
+name, content, timestamps, `resolved` state, an optional quoted snippet, and its replies (each
+with an optional `action` such as `resolve`).
 
 ```jsonc
 { "id": "AAAA", "author": "Jane Doe", "content": "please verify Q3",
@@ -448,9 +484,33 @@ comment AAAA by Jane Doe: "please verify Q3" (open, 1 reply)
 A Sheets comment `anchor` is an **opaque, document-type-specific** string with no documented
 A1 mapping, so it is surfaced raw under `anchorRaw` at the document level only — it is never
 claimed to map to a cell. The Drive `comments.list` call **requires** an explicit `fields`
-mask (omitting it errors), so core always sends one and paginates. If no Drive service is
-available (no Drive scope), core raises `SheetsError("drive_unavailable")` with a hint to
+mask (omitting it errors), so core always sends one and paginates. Every action requires Drive;
+without it (no Drive scope), core raises `SheetsError("drive_unavailable")` with a hint to
 enable a Drive scope.
+
+### Export (`export`)
+
+`export` is not a serializer — it writes a local file and returns
+`{format, mimeType, path, bytes}`. Two backends, chosen by `format`:
+
+- `pdf` / `xlsx` / `ods` — whole-workbook export via Drive `files.export`. Google renders the
+  workbook server-side; the bytes stream down with `MediaIoBaseDownload` (the lazy import above).
+  Requires a Drive scope; the `sheet` arg is ignored. No Drive service → `drive_unavailable`.
+- `csv` / `tsv` — one sheet, serialized locally with the stdlib `csv` module from
+  `read_values(render="plain")` (Drive's csv export only emits the first sheet, so we never use
+  it). Sheets scope only; `sheet` is required → `missing_sheet` if omitted.
+
+The MCP tool is `readOnlyHint=True`: it mutates no spreadsheet, it only writes a local file.
+
+### Read across files (`read_many`)
+
+`read_many` fans one read across many spreadsheets in a single call. It takes a list of request
+dicts, each naming a `spreadsheetId`; `mode` picks the per-file read — `summary` runs `overview`,
+`values` runs `read_values` over that request's `ranges` (with an optional per-request `render`).
+Validation of the request list is up front (a malformed batch is a caller bug), but a live Google
+failure on one id (404, permission denied, bad range) is **caught per file** and recorded as a
+`{spreadsheetId, ok: false, error}` entry — the other files still read. It is read-only by design:
+the Sheets API has no cross-file atomic write, so a multi-file mutation could only half-apply.
 
 ---
 

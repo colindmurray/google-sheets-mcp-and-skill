@@ -16,6 +16,7 @@ placeholder — the real ID comes from the user, the URL they paste (the token b
   - [`read-values`](#read-values)
   - [`read-conditional-formats`](#read-conditional-formats)
   - [`comments`](#comments)
+  - [`read-many`](#read-many)
 - [Writing](#writing)
   - [`write-values`](#write-values)
   - [`append-rows`](#append-rows)
@@ -30,6 +31,8 @@ placeholder — the real ID comes from the user, the URL they paste (the token b
   - [`manage-sheets`](#manage-sheets)
   - [`metadata`](#metadata)
   - [`charts`](#charts)
+- [Export](#export)
+  - [`export`](#export-1)
 - [Escape hatch](#escape-hatch)
   - [`batch`](#batch)
 - [Auth](#auth)
@@ -151,25 +154,83 @@ source of truth. See `reading.md` for the full line grammar.
 
 ### `comments`
 
-Read the spreadsheet's Drive **threaded comments** — author, text, resolved state, replies, and any
-quoted snippet. Read-only in v1. Uses the **Drive API** (not the Sheets API).
+Read or write the spreadsheet's Drive **threaded comments** — author, text, resolved state, replies,
+and any quoted snippet. Full CRUD. Uses the **Drive API** (not the Sheets API): Sheets has no comment
+surface, so comments live on the Drive file resource and `read`/`create`/`reply`/`resolve`/`delete`
+all go through Drive.
 
 ```
-gsheets comments <YOUR_SPREADSHEET_ID> [--no-resolved] [--include-deleted]
+gsheets comments <YOUR_SPREADSHEET_ID> [--action {read,create,reply,resolve,delete}] \
+  [--comment-id ID] [--content TEXT] [--anchor RAW] [--confirm] \
+  [--no-resolved] [--include-deleted]
 ```
 
 | Flag | Effect |
 |---|---|
-| `--no-resolved` | Hide comments that have been resolved (show only open ones). Resolved are shown by default. |
-| `--include-deleted` | Also include deleted comments (passes Drive's `includeDeleted`). Off by default. |
+| `--action {read,create,reply,resolve,delete}` | Default `read`. See the action table below. |
+| `--comment-id ID` | Target comment id. **Required** for `reply`/`resolve`/`delete`. |
+| `--content TEXT` | Comment/reply body. **Required** for `create`/`reply`; optional for `resolve` (rides along as the resolving reply's text); ignored by `read`/`delete`. |
+| `--anchor RAW` | Opaque Drive anchor passed through verbatim on `create` (never an A1 range). |
+| `--confirm` | **Required** to actually run the destructive `delete`; without it `delete` raises `confirmation_required`. |
+| `--no-resolved` | `read` only — omit resolved comments (shown by default). |
+| `--include-deleted` | `read` only — also include deleted comments (Drive's `includeDeleted`). |
 
-**Drive scope is required.** `drive.file` (the default scope) covers files this tool created or
-opened; a spreadsheet shared with you by someone else needs `GSHEETS_SCOPES=broad` (or
+| `--action` | Needs | Does |
+|---|---|---|
+| `read` (default) | — | Paginate `comments.list`; returns `comments[]`. `--no-resolved`/`--include-deleted` apply here. |
+| `create` | `--content` (opt. `--anchor`) | Post a new top-level comment; returns it under `comment`. |
+| `reply` | `--comment-id` + `--content` | Post a reply on a comment; returns the reply. |
+| `resolve` | `--comment-id` (opt. `--content`) | Resolve a comment by posting a reply with `action:resolve` (Drive has no standalone resolve verb); returns `resolved:true` + the reply. |
+| `delete` | `--comment-id` + `--confirm` | **Destructive.** Delete a comment; returns `deleted:true`. |
+
+**Drive scope is required for every action.** `drive.file` (the default scope) covers files this tool
+created or opened; a spreadsheet shared with you by someone else needs `GSHEETS_SCOPES=broad` (or
 `--scopes broad`) — otherwise the call raises `drive_unavailable`. The comment **`anchor` is opaque**
 (document-type-specific, not an A1 range), so comments are surfaced at the document level only and
 are never mapped to a cell. Each comment prints as
 `comment <id> by <author>: "<content>" (open|resolved, N replies)` plus structured fields (`author`,
 `content`, `created`, `modified`, `resolved`, `quoted`, `replies[]`, `anchorRaw`). See `reading.md`.
+
+```sh
+gsheets comments <YOUR_SPREADSHEET_ID> --action create --content 'please verify Q3'
+gsheets comments <YOUR_SPREADSHEET_ID> --action reply --comment-id AAAABBBB --content 'done'
+gsheets comments <YOUR_SPREADSHEET_ID> --action resolve --comment-id AAAABBBB
+gsheets comments <YOUR_SPREADSHEET_ID> --action delete --comment-id AAAABBBB --confirm
+```
+
+### `read-many`
+
+Read **values or summaries across many spreadsheets** in one call, capturing each file's failure as a
+per-entry error instead of aborting the batch. Read-only by design (the Sheets API has no cross-file
+atomic write).
+
+```
+gsheets [--json] read-many --requests-json '[{"spreadsheetId":"..","ranges":["A1:B2"]}]' [--mode {values,summary}]
+```
+
+There is **no positional `spreadsheet_id` and no `--ranges` flag** here — the ids (and per-request
+ranges) live inside `--requests-json`. Each request is `{"spreadsheetId": str, "ranges"?: [A1,...],
+"render"?: "plain"|"unformatted"|"formula"|"all"}`.
+
+| Flag | Effect |
+|---|---|
+| `--requests-json` (**required**) | `requests[]` array (or `@file.json`). Each item names one `spreadsheetId`; `values` mode also requires `ranges`. |
+| `--mode values` (default) | Read each request's `ranges` via `values.batchGet` (per-request `render`, default `plain`). |
+| `--mode summary` | Cheap per-id orientation (like `overview`, no grid data); `ranges` is ignored. |
+
+A malformed batch (a non-dict item, a missing `spreadsheetId`, or a `values`-mode item missing
+`ranges`) fails fast as `bad_requests`. A live failure on one id (404, permission, bad range) is
+captured as a `{"spreadsheetId", "ok": false, "error": {...}}` entry in `results` — the other files
+still read. The envelope is `{"ok": true, "mode", "count", "results": [...]}`, so a top-level
+`ok:true` does **not** imply every file succeeded.
+
+```sh
+gsheets --json read-many \
+  --requests-json '[{"spreadsheetId":"<YOUR_SPREADSHEET_ID>","ranges":["Sheet1!A1:B2"]},
+                    {"spreadsheetId":"<OTHER_ID>","ranges":["Data!A:A"],"render":"unformatted"}]'
+gsheets read-many --mode summary \
+  --requests-json '[{"spreadsheetId":"<YOUR_SPREADSHEET_ID>"},{"spreadsheetId":"<OTHER_ID>"}]'
+```
 
 ---
 
@@ -416,11 +477,26 @@ Tables / banding / filters / spreadsheet props (v0.2):
 | `delete_filter_view` | — | `{"filterViewId": int}` (**destructive**) |
 | `spreadsheet_props` | — (spreadsheet-scoped) | `{"title"?: str, "locale"?: str, "timeZone"?: str}` (the write side of `overview`'s `locale`/`timeZone`) |
 
+Slicers (a slicer is an on-grid filter control: it points at a data range, filters one column of it,
+and is anchored at a cell on a usually-different sheet):
+
+| `--action` | Needs | `--params-json` keys |
+|---|---|---|
+| `add_slicer` | `--range` **or** `params.dataRange` | `{"dataRange"?: A1, "anchor": A1 single cell, "title"?: str, "columnIndex"?: int, "criteria"?: {"hidden"?: [...], "visible"?: [...], "condition"?: "NUMBER_GREATER(0)"}}`. The data range can come from the top-level `--range` (which wins) or `params.dataRange`; `anchor` is required. Returns the new `slicerId`. |
+| `update_slicer` | — | `{"slicerId": int, "title"?, "dataRange"?: A1 (or via `--range`), "columnIndex"?, "criteria"?}`. Auto fields mask; the anchor is immutable. |
+| `delete_slicer` | — | `{"slicerId": int}` (**destructive** — maps to `deleteEmbeddedObject`, since slicers share the embedded-object id space). |
+
 `unmerge`, `delete_named`, `unprotect`, `ungroup`, `delete_table`, `delete_banding`,
-`clear_basic_filter`, and `delete_filter_view` are **destructive** — confirm first. New
-`namedRangeId`/`protectedRangeId`/`tableId`/`bandedRangeId`/`filterViewId`s are returned in the
-result. Slicer **write** is out of v1 (slicers are readable via `--action read`; create/edit one
-through `batch`).
+`clear_basic_filter`, `delete_filter_view`, and `delete_slicer` are **destructive** — confirm first.
+New `namedRangeId`/`protectedRangeId`/`tableId`/`bandedRangeId`/`filterViewId`/`slicerId`s are
+returned in the result.
+
+```sh
+gsheets structure <YOUR_SPREADSHEET_ID> --action add_slicer --range 'Data!A1:F500' \
+  --params-json '{"title":"Region","columnIndex":0,"anchor":"Dash!I1"}'
+gsheets structure <YOUR_SPREADSHEET_ID> --action update_slicer \
+  --params-json '{"slicerId":4,"title":"Area"}'
+```
 
 ### `dimensions`
 
@@ -515,6 +591,38 @@ gsheets charts <YOUR_SPREADSHEET_ID> --action {create,update,delete,read} \
 `--spec-json` keys (create/update): `{"title": str, "type": "LINE"|"COLUMN"|"BAR"|"PIE"|"SCATTER"|"AREA",
 "series": ["Sheet1!B1:B100", ...], "domain": "Sheet1!A1:A100", "anchor": {"sheet": str, "row": int, "col": int}}`.
 `delete` is **destructive**.
+
+---
+
+## Export
+
+### `export`
+
+Download a spreadsheet to a **local file**. Two backends, picked by `--format`: `pdf`/`xlsx`/`ods`
+export the whole workbook through Drive's `files.export`; `csv`/`tsv` serialize a single named sheet
+locally (no Drive). This writes a file on disk but never mutates the spreadsheet.
+
+```
+gsheets export <YOUR_SPREADSHEET_ID> [--format {pdf,xlsx,ods,csv,tsv}] [--path P] [--sheet S]
+```
+
+| Flag | Effect |
+|---|---|
+| `--format pdf` (default) | Whole-workbook PDF (Drive). |
+| `--format xlsx` / `--format ods` | Whole-workbook Excel / OpenDocument (Drive). |
+| `--format csv` / `--format tsv` | One sheet, serialized from its plain values with the stdlib `csv` module. **Requires `--sheet`** (Drive's csv export only emits the first sheet, so this always goes through the Sheets API). |
+| `--path P` | Output path. Defaults to `<spreadsheetId>.<format>` in the cwd. |
+| `--sheet S` | Sheet to export — **required for csv/tsv, ignored for pdf/xlsx/ods** (Drive renders the whole book). |
+
+`pdf`/`xlsx`/`ods` need a **Drive scope** (they call `files.export`); without one the call raises
+`drive_unavailable` (use `GSHEETS_SCOPES=broad` or `--scopes broad`). `csv`/`tsv` need only the Sheets
+scope. Returns `{format, mimeType, path, bytes}` (terse: `exported <format> -> <path> (<n> bytes)`).
+Omitting `--sheet` for csv/tsv raises `missing_sheet`.
+
+```sh
+gsheets export <YOUR_SPREADSHEET_ID> --format pdf --path book.pdf
+gsheets export <YOUR_SPREADSHEET_ID> --format csv --sheet Sheet1 --path sheet1.csv
+```
 
 ---
 

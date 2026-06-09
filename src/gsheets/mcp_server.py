@@ -269,11 +269,11 @@ def sheets_inspect(
     include_rich_text: bool = False,
     include_pivot: bool = False,
 ) -> models.InspectResult:
-    """Read a range RICHLY: values AND formulas, both userEntered & effective formats, merges,
+    """Read a range richly: values and formulas, both userEntered & effective formats, merges,
     notes, and structured data-validation — in one call, with a tight fields mask.
 
-    This is the flagship read. ``effectiveFormat`` shows what actually renders (including the
-    result of conditional formatting); ``userEnteredFormat`` shows the author's intent.
+    ``effectiveFormat`` shows what actually renders (including the result of conditional
+    formatting); ``userEnteredFormat`` shows the author's intent.
     ``validationRule`` round-trips straight back into ``sheets_set_validation``. Set
     ``compact=True`` to collapse identical cells into rectangular runs (big token savings on
     repetitive blocks); set the ``include_*`` flags to False to trim the payload further. Opt
@@ -409,10 +409,10 @@ def sheets_read_many(
     ctx: Context,
     mode: str = "values",
 ) -> models.ReadManyResult:
-    """Fan ONE values-or-summary read across MANY spreadsheets, capturing per-file errors.
+    """Fan one values-or-summary read across many spreadsheets, capturing per-file errors.
 
-    Use this to orient or pull values across a SET of spreadsheets in a single call (the
-    cross-file analogue of ``sheets_overview`` / ``sheets_read_values``). Each request names ONE
+    Use this to orient or pull values across a set of spreadsheets in a single call (the
+    cross-file analogue of ``sheets_overview`` / ``sheets_read_values``). Each request names one
     ``spreadsheetId``; the read applied per file is chosen by ``mode``:
 
     * ``mode="values"`` (default) — per request, reads its ``ranges`` (REQUIRED) with an optional
@@ -420,10 +420,10 @@ def sheets_read_many(
     * ``mode="summary"`` — per request, a cheap orientation snapshot (no grid data); ``ranges``
       is ignored.
 
-    Per-item error capture is the whole point: one bad id (404, permission denied, bad range)
-    becomes a captured ``{spreadsheetId, ok:False, error:{...}}`` entry in ``results`` instead of
-    aborting the batch — the other files still read. So a top-level ``ok:true`` does NOT mean
-    every file succeeded; inspect each ``results[]`` entry's ``ok``.
+    Errors are captured per item: one bad id (404, permission denied, bad range) becomes a
+    ``{spreadsheetId, ok:False, error:{...}}`` entry in ``results`` instead of aborting the batch —
+    the other files still read. So a top-level ``ok:true`` does NOT mean every file succeeded;
+    inspect each ``results[]`` entry's ``ok``.
 
     The first positional ``spreadsheet_id`` is unused by this cross-file tool (the ids come from
     ``requests[]``); pass any of the target ids (it is accepted only to keep the universal
@@ -523,12 +523,11 @@ def sheets_comments(
     include_resolved: bool = True,
     include_deleted: bool = False,
 ) -> models.CommentsResult:
-    """Read OR write the threaded COMMENTS on a spreadsheet — list, create, reply, resolve, delete.
+    """Read or write the threaded comments on a spreadsheet — list, create, reply, resolve, delete.
 
-    Comments live on the Drive file, not the Sheets grid, so EVERY action uses the Drive API
-    (requires a Drive scope; if none is granted you get a clear ``drive_unavailable`` error —
-    re-run with ``GSHEETS_SCOPES=broad``). The ``action`` dispatch (default ``"read"`` is the
-    backward-compatible list):
+    Comments live on the Drive file, not the Sheets grid, so every action uses the Drive API
+    (requires a Drive scope; without one you get a ``drive_unavailable`` error — re-run with
+    ``GSHEETS_SCOPES=broad``). The ``action`` dispatch (default ``"read"`` lists comments):
 
     * ``action="read"`` (default) — list comments. Each flattens to author/content/created/
       modified, a ``resolved`` flag, an optional ``quoted`` snippet, and its ``replies``. The
@@ -765,7 +764,7 @@ def sheets_set_conditional_format(
     ``{ranges, kind, condition, format}`` dict — the line never carries an index; ``index``
     comes only from the kwarg.
 
-    To mutate SEVERAL rules safely, pass ``rules`` (a list of ``{"action","index","rule"}``
+    To mutate several rules safely, pass ``rules`` (a list of ``{"action","index","rule"}``
     items, ``rule`` omitted for delete): core sorts them high index -> low and applies them in
     ONE batch so earlier edits never shift later targets. If you issue multiple SINGLE calls
     instead, order them high index -> low yourself (or re-read indices between calls). Supplying
@@ -871,14 +870,19 @@ def sheets_structure(
     ``action="read"`` returns the full structural picture (``sheet`` optional — omit for every
     tab; ``sheets`` is always a list). Each per-sheet entry also carries ``tables``,
     ``basicFilter``, ``filterViews``, ``bandedRanges``, and ``slicers`` (each serialized into a
-    terse round-trippable struct). The mutating actions target ONE tab and REQUIRE ``sheet``
-    (EXCEPT ``spreadsheet_props``, which is spreadsheet-scoped and needs NEITHER ``sheet`` nor
-    ``range``). Range-scoped writes (merge/add_named/protect/add_table/add_banding/
-    set_basic_filter/add_filter_view/add_slicer) also REQUIRE ``range`` (for ``add_slicer`` the
-    range is the slicer's data range — pass it as ``range`` or ``params["dataRange"]``). Some
-    paths are destructive (unmerge, delete_named, unprotect, delete_table, delete_banding,
-    delete_filter_view, delete_slicer, clear_basic_filter). Each action consumes only its
-    documented ``params`` keys; unknown keys are rejected.
+    terse round-trippable struct). Mutating actions locate their target in one of three ways.
+    **Sheet-scoped** actions (``freeze``, ``tab_color``, ``group``, ``ungroup``,
+    ``clear_basic_filter``) REQUIRE ``sheet``. **Range-scoped** writes (``merge``, ``unmerge``,
+    ``add_named``, ``protect``, ``add_table``, ``add_banding``, ``set_basic_filter``,
+    ``add_filter_view``, ``add_slicer``) take their target from ``range`` (for ``add_slicer``
+    that range is the slicer's data range — pass it as ``range`` or ``params["dataRange"]``).
+    **Id-addressed** writes (``delete_named``, ``unprotect``, ``update_table``/``delete_table``,
+    ``update_banding``/``delete_banding``, ``update_filter_view``/``delete_filter_view``,
+    ``update_slicer``/``delete_slicer``) take the object id in ``params`` and need neither;
+    ``spreadsheet_props`` is spreadsheet-scoped and needs neither. Some paths are destructive
+    (unmerge, delete_named, unprotect, delete_table, delete_banding, delete_filter_view,
+    delete_slicer, clear_basic_filter). Each action consumes only its documented ``params``
+    keys; unknown keys are rejected.
 
     Args:
         spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
@@ -890,7 +894,9 @@ def sheets_structure(
             "add_filter_view" | "update_filter_view" | "delete_filter_view" |
             "add_slicer" | "update_slicer" | "delete_slicer" |
             "spreadsheet_props".
-        sheet: Tab name (optional for read; REQUIRED for every mutate EXCEPT spreadsheet_props).
+        sheet: Tab name. Optional for read; REQUIRED for the sheet-scoped mutations
+            (freeze/tab_color/group/ungroup/clear_basic_filter). Range-scoped and id-addressed
+            writes read the tab from ``range`` or the object id, so they ignore ``sheet``.
         range: An A1 range (for merge/unmerge/add_named/protect and add_table/add_banding/
             set_basic_filter/add_filter_view; also accepted by update_table/update_banding/
             update_filter_view to re-anchor; for add_slicer/update_slicer it is the slicer's
@@ -1193,8 +1199,8 @@ def sheets_charts(
     tags={"write"},
 )
 def sheets_batch(spreadsheet_id: str, requests: list[dict], ctx: Context) -> models.BatchResult:
-    """Power-user ESCAPE HATCH: send a raw, ordered list of ``spreadsheets.batchUpdate``
-    requests. Prefer the typed tools above for everything they cover.
+    """ESCAPE HATCH: send a raw, ordered list of ``spreadsheets.batchUpdate`` requests. Prefer
+    the typed tools above for everything they cover.
 
     Use this only when a typed tool cannot express the operation (e.g. full chart specs, exotic
     requests). Each item is a raw Sheets API request object. Returns the raw replies plus any

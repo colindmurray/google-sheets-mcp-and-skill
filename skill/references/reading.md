@@ -1,9 +1,10 @@
 # gsheets — reading deep dive
 
-How to *read* a Google Sheet richly and cheaply: `overview` → `inspect` →
-`read-conditional-formats`, plus render modes, compact runs, and the conditional-format line
-grammar. This is the differentiator — generic tooling reads values; `gsheets` reads the formulas
-behind them, the format a cell *actually renders*, and the rules that color cells dynamically.
+How to read a Google Sheet richly and cheaply: `overview` → `inspect` →
+`read-conditional-formats`, plus render modes, compact runs, the conditional-format line grammar,
+structural reads, comments, and the cross-file `read-many` fan-out. Generic tooling reads values;
+`gsheets` reads the formulas behind them, the format a cell *actually renders*, and the rules that
+color cells dynamically.
 
 For exact flags see `commands.md` or `gsheets <cmd> --help`. Examples use `<YOUR_SPREADSHEET_ID>`.
 
@@ -24,7 +25,8 @@ For exact flags see `commands.md` or `gsheets <cmd> --help`. Examples use `<YOUR
   - [Gradient rules](#gradient-rules)
   - [Index is the only addressing source of truth](#index-is-the-only-addressing-source-of-truth)
 - [`structure --action read` — the structural picture](#structure--action-read--the-structural-picture)
-- [`comments` — Drive threaded comments](#comments--drive-threaded-comments)
+- [`comments --action read` — Drive threaded comments](#comments--action-read--drive-threaded-comments)
+- [`read-many` — cross-file fan-out](#read-many--cross-file-fan-out)
 - [Token efficiency notes](#token-efficiency-notes)
 
 ---
@@ -323,25 +325,35 @@ gsheets --json structure <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1
 - **`bandedRanges`** — alternating-color (banded) ranges; a cheap "this rectangle is a deliberate
   table" hint, with the header/first/second/footer hexes.
   Terse: `banding 7 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF / #E8F0FE`.
-- **`slicers`** — slicer controls (id, title, source range, filtered column, anchor). Read-only.
-  Terse: `slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1`.
+- **`slicers`** — on-grid slicer controls: `slicerId`, `title`, source `range`, filtered
+  `columnIndex`, a flattened `anchor` (`{sheet, row, col}`), and a terse `criteria`. The slicer's
+  anchor sheet is usually a *different* tab from its data range, so the anchor resolves its own
+  `sheetId` → sheet name.
+  Terse: `slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1` (with ` -> <criterion>` appended when a
+  filter criterion is set). The anchor renders from `{sheet,row,col}` as a sheet-qualified
+  single-cell A1 ref. `row`/`col` are 0-based and a `GridCoordinate` *omits* a 0 index, so an
+  absent index reads back as 0 — a top-left/row-0 anchor still renders (e.g. an anchor the API
+  returned as `{columnIndex: 4}` reads as `{row: 0, col: 4}` and renders `@ Sheet!E1`). Slicers
+  gained write CRUD in v0.2 (`add_slicer`/`update_slicer`/`delete_slicer` — see `writing.md`).
 
 `dimensionGroups` is the flattened row/column-group output (the read mask requests Google's
 `rowGroups` + `columnGroups` under the hood). All of these are read with a tight field mask — never
 grid data.
 
-## `comments` — Drive threaded comments
+## `comments --action read` — Drive threaded comments
 
 Human review intent often lives in **comments**, not the grid — and a value read never sees it.
-`comments` surfaces the spreadsheet's Drive comment threads (read-only in v1):
+`comments` defaults to `--action read`, listing the spreadsheet's Drive comment threads (the
+create/reply/resolve/delete write actions live in `writing.md`):
 
 ```sh
-gsheets comments <YOUR_SPREADSHEET_ID>                  # all comments (resolved included)
-gsheets comments <YOUR_SPREADSHEET_ID> --no-resolved    # only open threads
+gsheets comments <YOUR_SPREADSHEET_ID>                     # all comments (resolved included)
+gsheets comments <YOUR_SPREADSHEET_ID> --no-resolved       # only open threads
+gsheets comments <YOUR_SPREADSHEET_ID> --include-deleted    # include deleted comments
 ```
 
-Each comment flattens to author, content, timestamps, resolved state, any quoted snippet, and its
-replies:
+`--no-resolved` and `--include-deleted` apply to `read` only. Each comment flattens to author,
+content, timestamps, resolved state, any quoted snippet, and its replies:
 
 ```jsonc
 { "id": "AAAA", "author": "Jane Doe", "content": "please verify Q3",
@@ -355,13 +367,50 @@ Terse line: `comment AAAA by Jane Doe: "please verify Q3" (open, 1 reply)`.
 
 Two things to know:
 
-- **It uses the Drive API, so it needs a Drive scope.** `drive.file` (the default) reaches files
-  this tool created or opened; for a spreadsheet someone else shared with you, run with
-  `GSHEETS_SCOPES=broad` (or `--scopes broad`) — otherwise the call raises `drive_unavailable`.
+- **Comments use the Drive API, so they need a Drive scope** — `drive.file` (the default) reaches
+  files this tool created or opened; for a spreadsheet someone else shared with you, run with
+  `GSHEETS_SCOPES=broad` (or `--scopes broad`), otherwise the call raises `drive_unavailable`. This
+  applies to every action, read and write.
 - **The `anchor` is opaque**, not an A1 range — Google encodes it as a document-type-specific blob
   with no documented cell mapping. The raw value is surfaced as `anchorRaw` for reference, but
-  comments are document-level here and are **never** mapped to a cell. (Resolve/reply/create are
-  out of v1 — read-only.)
+  comments are document-level and are **never** mapped to a cell.
+
+## `read-many` — cross-file fan-out
+
+One call that reads values or summaries across **many spreadsheets**, capturing per-file errors
+instead of aborting the batch. The ids live **inside** `--requests-json` (one per request) — there
+is no positional `spreadsheet_id` and no `--ranges` flag on this command. `--json` is global, so it
+goes **before** the subcommand:
+
+```sh
+# values across two files (per-request ranges; optional per-request render):
+gsheets --json read-many --requests-json '[
+  {"spreadsheetId":"<YOUR_SPREADSHEET_ID>","ranges":["Sheet1!A1:B2"]},
+  {"spreadsheetId":"<ANOTHER_ID>","ranges":["Data!A:A"],"render":"unformatted"}
+]'
+
+# cheap orientation across a set (no ranges read):
+gsheets --json read-many --mode summary --requests-json '[
+  {"spreadsheetId":"<YOUR_SPREADSHEET_ID>"},
+  {"spreadsheetId":"<ANOTHER_ID>"}
+]'
+```
+
+- `--mode values` (default) reads each request's `ranges` (required per request in this mode); an
+  optional per-request `"render"` overrides the default `plain` (`plain | unformatted | formula |
+  all`, same as `read-values`).
+- `--mode summary` runs an `overview` per id (no grid data); `ranges` is ignored.
+
+The envelope is `{ok, mode, count, results}`. Per-file error capture is the point: a bad id (404,
+permission denied, bad range) becomes a `{"spreadsheetId":..,"ok":false,"error":{...}}` entry in
+`results` rather than failing the whole call — the other files still read. So **a top-level
+`ok:true` does NOT mean every file succeeded**; check each `results[]` entry's `ok`. Successful
+entries are the underlying core result dict (an `overview` shape in summary mode, a `read-values`
+shape in values mode), each carrying its own `spreadsheetId`.
+
+A *malformed batch* (not a per-file failure) still raises: an empty list, a non-dict request, a
+request missing `spreadsheetId`, or a values-mode request missing `ranges` all raise `bad_requests`
+up front (the whole batch is validated before any read fires).
 
 ## Token efficiency notes
 

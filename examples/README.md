@@ -1,16 +1,38 @@
 # Examples — `gsheets` recipes
 
-Small, copy-pasteable recipes that show off the read-side richness and the safe-write
-defaults of the `gsheets` CLI. Each is a runnable shell script that reads the **spreadsheet id from
-the environment** (never hard-coded) and uses placeholder ids in its comments.
+Copy-pasteable recipes covering the read-side reads and the safe-write defaults of the `gsheets`
+CLI. Each is a runnable shell script that reads the spreadsheet id from the environment (never
+hard-coded) and uses placeholder ids in its comments.
 
 | Recipe | What it shows |
 |---|---|
 | [`audit_conditional_formatting.sh`](audit_conditional_formatting.sh) | Audit every conditional-format rule in a sheet — the rules that color cells dynamically, which generic tooling can't read. |
-| [`audit_tables_and_filters.sh`](audit_tables_and_filters.sh) | Audit a sheet's native **tables**, **filter views**, **banding**, and **slicers** — structural objects a value read never sees — each as a terse round-trippable line with its id. |
-| [`read_column_formulas.sh`](read_column_formulas.sh) | Read the **formulas** behind a column (not just the computed values), with formula + result side by side. |
-| [`safe_value_write.sh`](safe_value_write.sh) | A safe value write: read the target first, write with `USER_ENTERED`, then read it back to verify (full CRUD symmetry). |
+| [`audit_tables_and_filters.sh`](audit_tables_and_filters.sh) | Audit a sheet's native tables, filter views, banding, and slicers — structural objects a value read never sees — each as a terse round-trippable line with its id. |
+| [`read_column_formulas.sh`](read_column_formulas.sh) | Read the formulas behind a column (not just the computed values), with formula + result side by side. |
+| [`safe_value_write.sh`](safe_value_write.sh) | A safe value write: read the target first, write with `USER_ENTERED`, then read it back to verify. |
 | [`bulk_find_replace.sh`](bulk_find_replace.sh) | A safe bulk (regex) find/replace via `data-ops`: read the scope first, replace in one batch, then read back and check the `occurrencesChanged` count. |
+
+The CLI surface is broader than these scripts. A few capabilities without a dedicated recipe, as
+one-liners:
+
+```sh
+# Export the workbook (pdf/xlsx/ods need a Drive scope; csv/tsv take one --sheet, Sheets scope only)
+gsheets export <YOUR_SPREADSHEET_ID> --format xlsx --path ./book.xlsx
+gsheets export <YOUR_SPREADSHEET_ID> --format csv --sheet Sheet1
+
+# Read across many spreadsheets — ids live in --requests-json (no <ID> positional); a bad id is
+# captured per-file, not fatal. --json is global, so it precedes the subcommand.
+gsheets --json read-many \
+  --requests-json '[{"spreadsheetId":"<YOUR_SPREADSHEET_ID>","ranges":["Sheet1!A1:B2"]}]'
+
+# Comments (full CRUD via the Drive API). resolve posts a reply with action:resolve; delete needs --confirm.
+gsheets comments <YOUR_SPREADSHEET_ID> --action create --content 'Check Q3'
+gsheets comments <YOUR_SPREADSHEET_ID> --action delete --comment-id <CID> --confirm
+
+# Slicers ride the structure subcommand. The data range is --range; add_slicer needs a single-cell anchor.
+gsheets structure <YOUR_SPREADSHEET_ID> --action add_slicer --sheet Data --range 'Data!A1:C4' \
+  --params-json '{"title":"Region","columnIndex":0,"anchor":"Data!E1"}'
+```
 
 ## Prerequisites
 
@@ -58,4 +80,3 @@ Each script prints the exact `gsheets` commands it runs, so you can copy individ
 - **Quote A1 ranges** — `!`, `:`, and spaces are shell-significant: `'Sheet1!A1:D20'`.
 - **The spreadsheet id is read from `$GSHEETS_EXAMPLE_SPREADSHEET_ID`**, so nothing real is ever
   written into the committed tree.
-</content>

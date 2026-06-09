@@ -12,10 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-06-09
 
-Adds 17 verified feature-gap capabilities on top of the v0.1.0 surface — all additive,
-with every base signature and test preserved. Two new tools (`data_ops`, `comments`), one
-new tool (`dimensions`), and mask/flag/action extensions to existing tools (`inspect`,
-`structure`, `overview`). Nine new boundary-pure serializer/dispatch modules. Read-side
+Adds verified feature-gap capabilities on top of the v0.1.0 surface — all additive, with
+every base signature and test preserved. The tool surface grows from 15 to 20: new
+`data_ops`, `dimensions`, `comments`, `export`, and `read_many` tools, plus mask / flag /
+action extensions to existing tools (`inspect`, `structure`, `overview`). `comments` and
+the slicer actions on `structure` close the last read-only gaps into full CRUD. Read-side
 richness and token efficiency carry through: per-cell rich data is emitted only when
 present, complex reads are serialized into terse round-trippable lines, and writes keep
 `USER_ENTERED` defaults with auto fields masks and index-safe batches.
@@ -42,6 +43,9 @@ present, complex reads are serialized into terse round-trippable lines, and writ
     `bandedRangeId`). (#9)
   - Filters — `set_basic_filter` / `clear_basic_filter` and `add_filter_view` /
     `update_filter_view` / `delete_filter_view` (captures new `filterViewId`). (#4)
+  - Slicers — `add_slicer` / `update_slicer` / `delete_slicer` (`add_slicer` takes the data
+    range via the top-level `range` or `params.dataRange` and returns the new `slicerId`;
+    `update_slicer` / `delete_slicer` take `params.slicerId`). (#16)
   - Spreadsheet properties — `spreadsheet_props` sets `title` / `locale` / `timeZone`
     (spreadsheet-scoped; auto fields mask). (#12)
 - **Spreadsheet metadata read on `overview`:** top-level `locale` and `timeZone` (omitted
@@ -54,22 +58,43 @@ present, complex reads are serialized into terse round-trippable lines, and writ
 - **New `dimensions` tool** — row/column operations: `insert` / `delete` / `move` /
   `append` (#7), `auto_resize` (#10), `set_props` for pixel size / `hiddenByUser` (#13), and
   a `read` that reports which rows/columns are hidden (#13).
-- **New `comments` tool (read-only v1)** — reads Drive threaded comments on the spreadsheet
-  file (author, content, timestamps, `resolved`, quoted snippet, replies) via the Drive API.
-  The opaque, non-A1 `anchor` is surfaced raw at the document level only. The required Drive
-  `fields` mask is always sent and results are paginated; raises `drive_unavailable` when no
-  Drive scope is present. (#5)
-- **New pure-core serializer / dispatch modules** (boundary-pure, golden-master tested):
-  `richtext`, `pivot`, `tables`, `filters`, `banding`, `slicers`, `comments`, `dataops`,
-  `dimensions`. Three new top-level core functions (`data_ops`, `dimensions`, `comments`)
-  are re-exported from `gsheets.core`.
+- **New `comments` tool (full CRUD)** — read/create/reply/resolve/delete on the Drive
+  threaded comments of the spreadsheet file, via the Drive API. `read` (default) flattens
+  each comment to author/content/timestamps/`resolved`/quoted snippet/replies, paginates,
+  and honors `include_resolved`/`include_deleted`; the opaque non-A1 `anchor` is surfaced
+  raw at the document level. `create`/`reply`/`resolve`/`delete` are the write actions —
+  `resolve` posts a reply carrying `action:resolve` (Drive has no standalone resolve
+  endpoint). The required Drive `fields` mask is always sent; raises `drive_unavailable`
+  when no Drive scope is present. The MCP tool is a write tool (`readOnlyHint=False`,
+  `destructiveHint=True`); the CLI `--action delete` requires `--confirm`. (#5)
+- **New `export` tool** — downloads a spreadsheet to a local file. `pdf`/`xlsx`/`ods`
+  render the whole workbook server-side via Drive `files.export` (needs a Drive scope, else
+  `drive_unavailable`); `csv`/`tsv` serialize a single named `--sheet` from its values
+  through the Sheets API (no Drive scope). Read-only against the spreadsheet — it writes a
+  local file and returns `{format, mimeType, path, bytes}`. (#18)
+- **New `read_many` tool** — fans one values-or-summary read across many spreadsheets in a
+  single call (the cross-file analogue of `overview`/`read_values`). Each request names one
+  `spreadsheetId`; a bad id (404, permission denied, bad range) is captured as a per-file
+  `{ok:false, error}` entry instead of aborting the batch, so a top-level `ok:true` does not
+  mean every file succeeded. Read-only. CLI: ids and ranges live inside `--requests-json`
+  (no positional id, no `--ranges`); the global `--json` flag precedes the subcommand. (#19)
+- **New pure-core serializer / dispatch modules** (boundary-pure, golden-master tested
+  where they serialize): `richtext`, `pivot`, `tables`, `filters`, `banding`, `slicers`,
+  `comments`, `dataops`, `dimensions`, `export`, `multiread`. Five new top-level core
+  functions (`data_ops`, `dimensions`, `comments`, `export`, `read_many`) are re-exported
+  from `gsheets.core`.
 - **Adapter + model parity:** new Pydantic mirror models (`TextRun`, `Pivot*`, `Table`,
-  `BasicFilter`, `FilterView`, `Banding`, `Slicer`, `Comment`, `DataOpsResult`,
-  `DimensionsResult`, `CommentsResult`) and extensions to `Cell` / `Run` / `SheetStructure`
-  / `OverviewResult`; three new MCP tools (`sheets_data_ops`, `sheets_dimensions`,
-  `sheets_comments`) plus the `include_rich_text` / `include_pivot` kwargs on
-  `sheets_inspect`; three new CLI subcommands (`data-ops`, `dimensions`, `comments`) plus
-  `--rich-text` / `--pivot` flags on `inspect`.
+  `BasicFilter`, `FilterView`, `Banding`, `Slicer`, `Comment`, `CommentReply`,
+  `DataOpsResult`, `DimensionsResult`, `CommentsResult`, `ExportResult`, `ReadManyResult`)
+  and extensions to `Cell` / `Run` / `SheetStructure` / `OverviewResult`; five new MCP tools
+  (`sheets_data_ops`, `sheets_dimensions`, `sheets_comments`, `sheets_export`,
+  `sheets_read_many`) plus the `include_rich_text` / `include_pivot` kwargs on
+  `sheets_inspect`; five new CLI subcommands (`data-ops`, `dimensions`, `comments`,
+  `export`, `read-many`) plus `--rich-text` / `--pivot` flags on `inspect`. `comments` adds
+  the `--action {read,create,reply,resolve,delete}` write surface (`--confirm` gates
+  delete); `structure` adds the `add_slicer` / `update_slicer` / `delete_slicer` actions.
+  The global `--json` flag is defined on the top-level parser, so it precedes the
+  subcommand (`gsheets --json read-many …`).
 
 ### Changed
 - `structure(action="read")` now requests `sheets.rowGroups` + `sheets.columnGroups` for the
@@ -81,6 +106,10 @@ present, complex reads are serialized into terse round-trippable lines, and writ
   `DeleteDuplicatesResponse.duplicatesRemovedCount` reply field (it previously read a
   non-existent `duplicatesRemoved`, so the surfaced `duplicatesRemoved` was always `0`). Caught
   by the new live round-trip; the unit fixture now mocks the real field name to guard it.
+- Slicer anchor read: a `GridCoordinate` omits `rowIndex`/`columnIndex` when they are `0`, so a
+  top-left or row-0 slicer anchor previously lost its `row`/`col`. The anchor now defaults absent
+  indices to `0`, so it always reads back as `{sheet, row, col}` and the terse line always renders
+  (e.g. `@ Sheet!E1` for an anchor the API returned as `{columnIndex: 4}` with `rowIndex` omitted).
 
 ### Notes
 - Connected Sheets / data sources (`dataSourceTable`, `dataSourceFormula`, spreadsheet
@@ -88,7 +117,7 @@ present, complex reads are serialized into terse round-trippable lines, and writ
   they remain readable through the `batch` / raw `spreadsheets.get` escape hatch. (#17)
 - The `tests_boundary_guard` pytest marker is now registered to silence its
   `PytestUnknownMarkWarning`.
-- The 17 v0.2 capabilities are covered by live round-trip integration tests
+- The v0.2 capabilities are exercised by live round-trip integration tests
   (`tests/integration/test_live_v02.py`, `@pytest.mark.live`): each new write verb is written
   and read back, and each new read is exercised against a real spreadsheet. They are gated on
   `GSHEETS_LIVE=1` + `GSHEETS_TEST_SPREADSHEET_ID` (never a committed/Production id) and skip in
