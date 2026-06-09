@@ -1,0 +1,18 @@
+{
+  "ranges": ["Cliff!H2:H100"],
+  "gradientRule": {
+    "minpoint": {
+      "type": "MIN",
+      "colorStyle": { "rgbColor": { "red": 0.95686275, "green": 0.2627451, "blue": 0.21176471 } }
+    },
+    "midpoint": {
+      "type": "NUMBER",
+      "value": "50",
+      "colorStyle": { "rgbColor": { "red": 1.0, "green": 0.92156863, "blue": 0.23137255 } }
+    },
+    "maxpoint": {
+      "type": "MAX",
+      "colorStyle": { "rgbColor": { "red": 0.29803922, "green": 0.6862745, "blue": 0.3137255 } }
+    }
+  }
+}

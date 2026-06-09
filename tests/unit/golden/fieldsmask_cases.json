@@ -1,0 +1,140 @@
+{
+  "_doc": "Golden-master cases for build_fields_mask (DESIGN §5.1). Each case: a Google write payload (the value under e.g. repeatCell.cell) -> the exact minimal dotted/group fields mask. Includes numberFormat & padding atomic-leaf cases and a *ColorStyle case so atomic-leaf behavior is pinned. No real IDs/creds.",
+  "cases": [
+    {
+      "name": "single_color_style_atomic",
+      "payload": {
+        "userEnteredFormat": {
+          "backgroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.804, "blue": 0.804}}
+        }
+      },
+      "mask": "userEnteredFormat.backgroundColorStyle"
+    },
+    {
+      "name": "single_text_format_child_dotted",
+      "payload": {
+        "userEnteredFormat": {"textFormat": {"bold": true}}
+      },
+      "mask": "userEnteredFormat.textFormat.bold"
+    },
+    {
+      "name": "number_format_atomic_leaf",
+      "payload": {
+        "userEnteredFormat": {"numberFormat": {"type": "PERCENT", "pattern": "0.00%"}}
+      },
+      "mask": "userEnteredFormat.numberFormat"
+    },
+    {
+      "name": "padding_atomic_leaf",
+      "payload": {
+        "userEnteredFormat": {"padding": {"top": 2, "left": 3}}
+      },
+      "mask": "userEnteredFormat.padding"
+    },
+    {
+      "name": "text_rotation_atomic_leaf",
+      "payload": {
+        "userEnteredFormat": {"textRotation": {"angle": 45}}
+      },
+      "mask": "userEnteredFormat.textRotation"
+    },
+    {
+      "name": "multi_child_group_with_atomic_and_text",
+      "payload": {
+        "userEnteredFormat": {
+          "backgroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.804, "blue": 0.804}},
+          "textFormat": {"bold": true},
+          "numberFormat": {"type": "PERCENT", "pattern": "0.00%"},
+          "padding": {"top": 2, "right": 3, "bottom": 2, "left": 3}
+        }
+      },
+      "mask": "userEnteredFormat(backgroundColorStyle,textFormat.bold,numberFormat,padding)"
+    },
+    {
+      "name": "text_format_multiple_children_group",
+      "payload": {
+        "userEnteredFormat": {
+          "textFormat": {
+            "bold": true,
+            "italic": false,
+            "foregroundColorStyle": {"rgbColor": {"red": 0.106, "green": 0.369, "blue": 0.125}}
+          }
+        }
+      },
+      "mask": "userEnteredFormat.textFormat(bold,italic,foregroundColorStyle)"
+    },
+    {
+      "name": "format_plus_note_sibling",
+      "payload": {
+        "userEnteredFormat": {
+          "backgroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.804, "blue": 0.804}},
+          "textFormat": {"bold": true},
+          "numberFormat": {"type": "PERCENT", "pattern": "0.00%"},
+          "padding": {"top": 2, "left": 3}
+        },
+        "note": "reviewed"
+      },
+      "mask": "userEnteredFormat(backgroundColorStyle,textFormat.bold,numberFormat,padding),note"
+    },
+    {
+      "name": "note_only",
+      "payload": {"note": "reviewed"},
+      "mask": "note"
+    },
+    {
+      "name": "sheet_properties_tab_color_atomic",
+      "payload": {
+        "tabColorStyle": {"rgbColor": {"red": 0.259, "green": 0.522, "blue": 0.957}}
+      },
+      "mask": "tabColorStyle"
+    },
+    {
+      "name": "grid_properties_frozen_group",
+      "payload": {
+        "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 2}
+      },
+      "mask": "gridProperties(frozenRowCount,frozenColumnCount)"
+    },
+    {
+      "name": "grid_properties_single_frozen_dotted",
+      "payload": {
+        "gridProperties": {"frozenRowCount": 1}
+      },
+      "mask": "gridProperties.frozenRowCount"
+    },
+    {
+      "name": "halign_valign_wrap_scalars",
+      "payload": {
+        "userEnteredFormat": {
+          "horizontalAlignment": "CENTER",
+          "verticalAlignment": "MIDDLE",
+          "wrapStrategy": "WRAP"
+        }
+      },
+      "mask": "userEnteredFormat(horizontalAlignment,verticalAlignment,wrapStrategy)"
+    },
+    {
+      "name": "clear_formats_validation_notes_group",
+      "payload": {
+        "userEnteredFormat": {"backgroundColorStyle": {"rgbColor": {"red": 0, "green": 0, "blue": 0}}},
+        "dataValidation": {"condition": {"type": "ONE_OF_LIST"}},
+        "note": ""
+      },
+      "mask": "userEnteredFormat.backgroundColorStyle,dataValidation.condition.type,note"
+    },
+    {
+      "name": "deeply_nested_single_path",
+      "payload": {
+        "a": {"b": {"c": {"d": 1}}}
+      },
+      "mask": "a.b.c.d"
+    },
+    {
+      "name": "border_color_style_atomic_inside_group",
+      "payload": {
+        "top": {"style": "SOLID", "colorStyle": {"rgbColor": {"red": 0, "green": 0, "blue": 0}}}
+      },
+      "mask": "top(style,colorStyle)"
+    }
+  ]
+}

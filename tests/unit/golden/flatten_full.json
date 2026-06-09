@@ -1,0 +1,50 @@
+{
+  "input": {
+    "backgroundColorStyle": {
+      "rgbColor": {"red": 1.0, "green": 0.8039215686274314, "blue": 0.8235294117647058}
+    },
+    "textFormat": {
+      "foregroundColorStyle": {"rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+      "bold": true,
+      "italic": false,
+      "underline": true,
+      "strikethrough": false,
+      "fontSize": 10,
+      "fontFamily": "Arial"
+    },
+    "numberFormat": {"type": "PERCENT", "pattern": "0.00%"},
+    "horizontalAlignment": "CENTER",
+    "verticalAlignment": "MIDDLE",
+    "wrapStrategy": "WRAP",
+    "borders": {
+      "top": {"style": "SOLID", "width": 1, "colorStyle": {"rgbColor": {}}},
+      "bottom": {"style": "SOLID_THICK", "width": 3, "colorStyle": {"rgbColor": {"red": 0.2588235294117647}}},
+      "left": {"style": "NONE"},
+      "right": {"style": "DASHED", "width": 1, "colorStyle": {"rgbColor": {"red": 1.0}}}
+    },
+    "padding": {"top": 2, "right": 3, "bottom": 2, "left": 3},
+    "textRotation": {"angle": 45}
+  },
+  "expected": {
+    "bg": "#FFCDD2",
+    "fg": "#000000",
+    "bold": true,
+    "italic": false,
+    "underline": true,
+    "strikethrough": false,
+    "fontSize": 10,
+    "fontFamily": "Arial",
+    "numberFormatType": "PERCENT",
+    "numberFormat": "0.00%",
+    "halign": "CENTER",
+    "valign": "MIDDLE",
+    "wrap": "WRAP",
+    "borders": {
+      "top": "SOLID #000000",
+      "bottom": "SOLID_THICK #420000",
+      "right": "DASHED #FF0000"
+    },
+    "padding": {"top": 2, "right": 3, "bottom": 2, "left": 3},
+    "textRotation": {"angle": 45}
+  }
+}

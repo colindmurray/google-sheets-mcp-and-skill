@@ -1,0 +1,83 @@
+{
+  "_doc": "Golden-master pairs for a1_to_gridrange / gridrange_to_a1 (DESIGN §5.2, §10). The mock sheet index maps title->sheetId: Cliff->0, Plan->17, 'My Sheet'->42. 'a1' is the input; 'gridrange' is the expected GridRange (0-based half-open, indices omitted for unbounded). 'roundtrip' is the canonical A1 gridrange_to_a1 should reproduce (may differ from 'a1' when the input used a non-canonical form).",
+  "cases": [
+    {
+      "name": "bounded_rectangle",
+      "a1": "Cliff!A1:D5",
+      "gridrange": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 5, "startColumnIndex": 0, "endColumnIndex": 4},
+      "roundtrip": "Cliff!A1:D5"
+    },
+    {
+      "name": "single_cell",
+      "a1": "Cliff!B2",
+      "gridrange": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 1, "endColumnIndex": 2},
+      "roundtrip": "Cliff!B2"
+    },
+    {
+      "name": "single_cell_range_form",
+      "a1": "Cliff!D7:D7",
+      "gridrange": {"sheetId": 0, "startRowIndex": 6, "endRowIndex": 7, "startColumnIndex": 3, "endColumnIndex": 4},
+      "roundtrip": "Cliff!D7"
+    },
+    {
+      "name": "offset_block_AS986_AS1000",
+      "a1": "Cliff!AS986:AS1000",
+      "gridrange": {"sheetId": 0, "startRowIndex": 985, "endRowIndex": 1000, "startColumnIndex": 44, "endColumnIndex": 45},
+      "roundtrip": "Cliff!AS986:AS1000"
+    },
+    {
+      "name": "whole_column",
+      "a1": "Cliff!A:A",
+      "gridrange": {"sheetId": 0, "startColumnIndex": 0, "endColumnIndex": 1},
+      "roundtrip": "Cliff!A:A"
+    },
+    {
+      "name": "whole_column_span",
+      "a1": "Cliff!A:D",
+      "gridrange": {"sheetId": 0, "startColumnIndex": 0, "endColumnIndex": 4},
+      "roundtrip": "Cliff!A:D"
+    },
+    {
+      "name": "whole_row",
+      "a1": "Cliff!2:2",
+      "gridrange": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2},
+      "roundtrip": "Cliff!2:2"
+    },
+    {
+      "name": "whole_row_span",
+      "a1": "Cliff!2:5",
+      "gridrange": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 5},
+      "roundtrip": "Cliff!2:5"
+    },
+    {
+      "name": "whole_sheet_bare",
+      "a1": "Cliff",
+      "gridrange": {"sheetId": 0},
+      "roundtrip": "Cliff"
+    },
+    {
+      "name": "two_letter_column",
+      "a1": "Plan!AA1:AB2",
+      "gridrange": {"sheetId": 17, "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 26, "endColumnIndex": 28},
+      "roundtrip": "Plan!AA1:AB2"
+    },
+    {
+      "name": "quoted_sheet_name",
+      "a1": "'My Sheet'!A1:B2",
+      "gridrange": {"sheetId": 42, "startRowIndex": 0, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 2},
+      "roundtrip": "'My Sheet'!A1:B2"
+    },
+    {
+      "name": "reversed_endpoints_normalised",
+      "a1": "Cliff!D5:A1",
+      "gridrange": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 5, "startColumnIndex": 0, "endColumnIndex": 4},
+      "roundtrip": "Cliff!A1:D5"
+    },
+    {
+      "name": "unqualified_range_first_sheet",
+      "a1": "A1:C3",
+      "gridrange": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 3},
+      "roundtrip": "Cliff!A1:C3"
+    }
+  ]
+}
