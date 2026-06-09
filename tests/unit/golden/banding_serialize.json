@@ -1,0 +1,89 @@
+{
+  "_doc": "Golden-master fixtures for serialize_banding (DESIGN §X.0e; analysis #9). Representative Google BandedRange JSON in -> exact flattened read shape + terse condformat-style line out. Each band *ColorStyle flattens to a #RRGGBB hex via colors.color_style_to_hex; rowProperties/columnProperties map to rowBanding/columnBanding; unset slots and absent groups surface as null. Includes a legacy flat *Color fallback case. No real IDs/creds — range pre-resolved to the placeholder A1 by the caller.",
+  "row_and_column": {
+    "range_a1": "Sheet1!A1:F500",
+    "google": {
+      "bandedRangeId": 7,
+      "range": {
+        "sheetId": 0,
+        "startRowIndex": 0,
+        "endRowIndex": 500,
+        "startColumnIndex": 0,
+        "endColumnIndex": 6
+      },
+      "rowProperties": {
+        "headerColorStyle": {"rgbColor": {"red": 0.25882354, "green": 0.52156866, "blue": 0.95686275}},
+        "firstBandColorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        "secondBandColorStyle": {"rgbColor": {"red": 0.9098039, "green": 0.9411765, "blue": 0.99607843}}
+      },
+      "columnProperties": {
+        "firstBandColorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        "secondBandColorStyle": {"rgbColor": {"red": 0.8509804, "green": 0.8509804, "blue": 0.8509804}}
+      }
+    },
+    "expected": {
+      "bandedRangeId": 7,
+      "range": "Sheet1!A1:F500",
+      "rowBanding": {
+        "header": "#4285F4",
+        "first": "#FFFFFF",
+        "second": "#E8F0FE",
+        "footer": null
+      },
+      "columnBanding": {
+        "header": null,
+        "first": "#FFFFFF",
+        "second": "#D9D9D9",
+        "footer": null
+      },
+      "line": "banding 7 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF / #E8F0FE | cols: #FFFFFF / #D9D9D9"
+    }
+  },
+  "row_only_with_footer": {
+    "range_a1": "Sheet1!A1:F500",
+    "google": {
+      "bandedRangeId": 9,
+      "rowProperties": {
+        "headerColorStyle": {"rgbColor": {"red": 0.25882354, "green": 0.52156866, "blue": 0.95686275}},
+        "firstBandColorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+        "secondBandColorStyle": {"rgbColor": {"red": 0.9098039, "green": 0.9411765, "blue": 0.99607843}},
+        "footerColorStyle": {"rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}}
+      }
+    },
+    "expected": {
+      "bandedRangeId": 9,
+      "range": "Sheet1!A1:F500",
+      "rowBanding": {
+        "header": "#4285F4",
+        "first": "#FFFFFF",
+        "second": "#E8F0FE",
+        "footer": "#000000"
+      },
+      "columnBanding": null,
+      "line": "banding 9 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF / #E8F0FE / ftr #000000"
+    }
+  },
+  "legacy_flat_color_and_theme": {
+    "range_a1": "Sheet1!A1:B10",
+    "google": {
+      "bandedRangeId": 3,
+      "rowProperties": {
+        "headerColorStyle": {"themeColor": "ACCENT1"},
+        "firstBandColor": {"red": 1.0, "green": 1.0, "blue": 1.0},
+        "secondBandColor": {"red": 0.91, "green": 0.91, "blue": 0.91}
+      }
+    },
+    "expected": {
+      "bandedRangeId": 3,
+      "range": "Sheet1!A1:B10",
+      "rowBanding": {
+        "header": "theme:ACCENT1",
+        "first": "#FFFFFF",
+        "second": "#E8E8E8",
+        "footer": null
+      },
+      "columnBanding": null,
+      "line": "banding 3 [Sheet1!A1:B10] rows: hdr theme:ACCENT1 / #FFFFFF / #E8E8E8"
+    }
+  }
+}

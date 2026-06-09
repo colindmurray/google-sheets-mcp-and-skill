@@ -4,7 +4,8 @@ The adapter is intentionally thin: validate args, pull the shared ``services`` h
 the lifespan context, call the matching PURE core fn, and shape the result. These tests pin the
 adapter contract WITHOUT touching Google or the core's Sheets logic:
 
-- all 15 tools register, with the §7.1 annotation table (read-only/destructive hints, tags);
+- all tools register (15 base + the 3 v0.2 extension tools), with the §7.1 annotation table
+  (read-only/destructive hints, tags);
 - ``Context`` is excluded from every tool's input schema;
 - read tools advertise a structured ``output_schema``;
 - ``ENABLED_TOOLS`` restricts which tools register (checked in a subprocess so the env var is
@@ -39,6 +40,7 @@ EXPECTED = {
     "sheets_inspect": (True, None, "read"),
     "sheets_read_values": (True, None, "read"),
     "sheets_read_conditional_formats": (True, None, "read"),
+    "sheets_comments": (True, None, "read"),
     "sheets_write_values": (False, False, "write"),
     "sheets_append_rows": (False, False, "write"),
     "sheets_clear": (False, True, "write"),
@@ -48,6 +50,8 @@ EXPECTED = {
     "sheets_structure": (False, True, "write"),
     "sheets_manage_sheets": (False, True, "write"),
     "sheets_metadata": (False, True, "write"),
+    "sheets_data_ops": (False, True, "write"),
+    "sheets_dimensions": (False, True, "write"),
     "sheets_charts": (False, True, "write"),
     "sheets_batch": (False, True, "write"),
 }
@@ -57,10 +61,10 @@ def _tools() -> dict:
     return asyncio.run(srv.mcp.get_tools())
 
 
-def test_all_fifteen_tools_register():
+def test_all_tools_register():
     tools = _tools()
     assert set(tools) == set(EXPECTED)
-    assert len(tools) == 15
+    assert len(tools) == 18
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -115,10 +119,22 @@ def test_to_tool_error_validation_shape():
 
 
 def test_call_wraps_core_dict_in_mirror_model():
-    payload = {"ok": True, "spreadsheetId": "<ID>", "title": "Demo", "sheets": [], "namedRanges": []}
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "title": "Demo",
+        "locale": "en_US",
+        "timeZone": "America/New_York",
+        "sheets": [],
+        "namedRanges": [],
+    }
     out = srv._call(srv.models.OverviewResult, lambda s, sid: payload, object(), "<ID>")
     assert isinstance(out, srv.models.OverviewResult)
-    assert out.model_dump() == payload
+    # The model may carry additional optional fields (e.g. locale/timeZone, §X.12) that default to
+    # None; the contract is that every core key round-trips faithfully.
+    dumped = out.model_dump()
+    for key, value in payload.items():
+        assert dumped[key] == value
 
 
 def test_call_maps_sheets_error_to_tool_error():
@@ -167,6 +183,50 @@ def test_lifespan_failure_writes_to_stderr_not_stdout():
     assert proc.stdout == ""  # JSON-RPC channel untouched
     assert "google-sheets-mcp" in proc.stderr
     assert "gsheets auth login" in proc.stderr
+
+
+def test_inspect_exposes_rich_text_and_pivot_flags():
+    # The v0.2 additive kwargs must surface in the tool input schema (default off).
+    props = _tools()["sheets_inspect"].parameters.get("properties", {})
+    assert "include_rich_text" in props
+    assert "include_pivot" in props
+    assert props["include_rich_text"].get("default") is False
+    assert props["include_pivot"].get("default") is False
+
+
+def test_new_extension_tools_have_expected_inputs():
+    tools = _tools()
+    # data_ops: action required, params optional.
+    data_ops = tools["sheets_data_ops"]
+    assert "action" in data_ops.parameters.get("required", [])
+    assert "params" in data_ops.parameters.get("properties", {})
+    # dimensions: action AND sheet required (every op targets one tab).
+    dims = tools["sheets_dimensions"]
+    dims_required = dims.parameters.get("required", [])
+    assert "action" in dims_required
+    assert "sheet" in dims_required
+    # comments: read-only, optional resolved/deleted filters.
+    comments = tools["sheets_comments"]
+    comments_props = comments.parameters.get("properties", {})
+    assert "include_resolved" in comments_props
+    assert "include_deleted" in comments_props
+
+
+def test_comments_tool_wraps_core_via_call():
+    # Thin-adapter contract: the tool body just wraps the core dict in its mirror model.
+    payload = {"ok": True, "spreadsheetId": "<ID>", "comments": []}
+    out = srv._call(srv.models.CommentsResult, lambda s, sid, **kw: payload, object(), "<ID>")
+    assert isinstance(out, srv.models.CommentsResult)
+    assert out.comments == []
+
+
+def test_data_ops_call_maps_unknown_action_error():
+    def boom(_s, _sid, *, action, params=None):
+        raise SheetsError("unknown_action", f"unknown data_ops action {action!r}")
+
+    with pytest.raises(ToolError) as ei:
+        srv._call(srv.models.DataOpsResult, boom, object(), "x", action="nope")
+    assert str(ei.value) == "unknown_action: unknown data_ops action 'nope'"
 
 
 def test_enabled_tools_allowlist_restricts_registration():

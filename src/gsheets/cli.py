@@ -36,11 +36,47 @@ _STRUCTURE_ACTIONS = (
     "tab_color",
     "group",
     "ungroup",
+    # v0.2 extension actions (DESIGN §X.3/§X.4/§X.12): tables / banding / filters CRUD +
+    # spreadsheet-property setter. Mirrored here for argparse; core re-validates.
+    "add_table",
+    "update_table",
+    "delete_table",
+    "add_banding",
+    "update_banding",
+    "delete_banding",
+    "set_basic_filter",
+    "clear_basic_filter",
+    "add_filter_view",
+    "update_filter_view",
+    "delete_filter_view",
+    "spreadsheet_props",
 )
 _MANAGE_ACTIONS = ("add", "delete", "duplicate", "rename", "reorder")
 _METADATA_ACTIONS = ("read", "create", "update", "delete")
 _CHARTS_ACTIONS = ("create", "update", "delete", "read")
 _SCOPES_CHOICES = ("default", "broad")
+
+# v0.2 extension action enums (DESIGN §Extensions) — mirrored from core for nice argparse
+# errors; core re-validates and raises SheetsError.
+_DATA_OPS_ACTIONS = (
+    "find_replace",
+    "delete_duplicates",
+    "trim_whitespace",
+    "sort_range",
+    "text_to_columns",
+    "auto_fill",
+    "copy_paste",
+    "cut_paste",
+)
+_DIMENSIONS_ACTIONS = (
+    "insert",
+    "delete",
+    "move",
+    "append",
+    "auto_resize",
+    "set_props",
+    "read",
+)
 
 
 # ===========================================================================================
@@ -120,6 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_manage_sheets(sub)
     _add_metadata(sub)
     _add_charts(sub)
+    # v0.2 extensions (DESIGN §Extensions): two NEW data tools + one NEW dimensions tool.
+    _add_data_ops(sub)
+    _add_dimensions(sub)
+    _add_comments(sub)
     _add_batch(sub)
     _add_auth(sub)
 
@@ -171,6 +211,20 @@ def _add_inspect(sub) -> None:
         dest="include_validation",
         action="store_false",
         help="omit data validation",
+    )
+    # v0.2 extensions (DESIGN §X.1/§X.6): opt-in rich-text runs + in-cell links, and pivot
+    # definitions. Off by default → zero added token/mask cost on the base call.
+    p.add_argument(
+        "--rich-text",
+        dest="include_rich_text",
+        action="store_true",
+        help="include per-run rich text (textFormatRuns) + in-cell hyperlinks (#1/#8)",
+    )
+    p.add_argument(
+        "--pivot",
+        dest="include_pivot",
+        action="store_true",
+        help="include pivot-table definitions on anchor cells (#6)",
     )
     p.set_defaults(func=_cmd_inspect, needs_services=True)
 
@@ -394,6 +448,63 @@ def _add_charts(sub) -> None:
     p.set_defaults(func=_cmd_charts, needs_services=True)
 
 
+def _add_data_ops(sub) -> None:
+    """NEW v0.2 tool (DESIGN §X.2/§X.11/§X.14/§X.15): the one-request batchUpdate data verbs."""
+    p = sub.add_parser(
+        "data-ops",
+        help="data verbs: find/replace, dedupe, trim, sort, split, fill, copy/cut-paste",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument("--action", choices=_DATA_OPS_ACTIONS, required=True)
+    p.add_argument(
+        "--params-json",
+        type=_json_arg,
+        default=None,
+        help='per-action params, e.g. \'{"find":"foo","replacement":"bar","allSheets":true}\'',
+    )
+    p.set_defaults(func=_cmd_data_ops, needs_services=True)
+
+
+def _add_dimensions(sub) -> None:
+    """NEW v0.2 tool (DESIGN §X.7/§X.10/§X.13): row/column dimension ops + hidden read."""
+    p = sub.add_parser(
+        "dimensions",
+        help="row/col ops: insert/delete/move/append/auto_resize/set_props, or read hidden",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument("--action", choices=_DIMENSIONS_ACTIONS, required=True)
+    p.add_argument("--sheet", default=None, help="target tab name (REQUIRED for every action)")
+    p.add_argument(
+        "--params-json",
+        type=_json_arg,
+        default=None,
+        help='per-action params, e.g. \'{"dimension":"ROWS","start":10,"end":12}\'',
+    )
+    p.set_defaults(func=_cmd_dimensions, needs_services=True)
+
+
+def _add_comments(sub) -> None:
+    """NEW v0.2 tool (DESIGN §X.5): read Drive threaded comments (read-only v1)."""
+    p = sub.add_parser(
+        "comments",
+        help="read Drive threaded comments on the spreadsheet (uses the Drive API)",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument(
+        "--no-resolved",
+        dest="include_resolved",
+        action="store_false",
+        help="omit resolved comments (default: include them)",
+    )
+    p.add_argument(
+        "--include-deleted",
+        dest="include_deleted",
+        action="store_true",
+        help="include deleted comments (Drive includeDeleted)",
+    )
+    p.set_defaults(func=_cmd_comments, needs_services=True)
+
+
 def _add_batch(sub) -> None:
     p = sub.add_parser("batch", help="power-user escape hatch: raw batchUpdate requests")
     _spreadsheet_id_arg(p)
@@ -446,6 +557,8 @@ def _cmd_inspect(services, args) -> dict:
         include_user_entered_format=args.include_user_entered_format,
         include_formulas=args.include_formulas,
         include_validation=args.include_validation,
+        include_rich_text=args.include_rich_text,
+        include_pivot=args.include_pivot,
     )
 
 
@@ -621,6 +734,34 @@ def _cmd_charts(services, args) -> dict:
     )
 
 
+def _cmd_data_ops(services, args) -> dict:
+    return core.data_ops(
+        services,
+        args.spreadsheet_id,
+        action=args.action,
+        params=args.params_json,
+    )
+
+
+def _cmd_dimensions(services, args) -> dict:
+    return core.dimensions(
+        services,
+        args.spreadsheet_id,
+        action=args.action,
+        sheet=args.sheet,
+        params=args.params_json,
+    )
+
+
+def _cmd_comments(services, args) -> dict:
+    return core.comments(
+        services,
+        args.spreadsheet_id,
+        include_resolved=args.include_resolved,
+        include_deleted=args.include_deleted,
+    )
+
+
 def _cmd_batch(services, args) -> dict:
     return core.batch(services, args.spreadsheet_id, args.requests_json)
 
@@ -669,6 +810,16 @@ def _render_text(result: dict) -> str:
             )
         for nr in result.get("namedRanges", []):
             lines.append(f"  named: {nr.get('name')} -> {nr.get('range')}")
+        return "\n".join(lines)
+
+    # comments (DESIGN §X.5): a top-level Drive-comments list. Each entry carries a terse
+    # ``line`` from serialize_comment; fall back to a constructed line if absent.
+    if "comments" in result and "sheets" not in result and "cells" not in result:
+        comments = result.get("comments", [])
+        if not comments:
+            return "(no comments)"
+        for c in comments:
+            lines.append(_render_comment(c))
         return "\n".join(lines)
 
     # read_conditional_formats / structure(read) multi-sheet envelope
@@ -730,6 +881,22 @@ def _render_text(result: dict) -> str:
                     lines.append("  " + " | ".join("" if c is None else str(c) for c in row))
         return "\n".join(lines)
 
+    # dimensions(action="read") (DESIGN §X.7): hidden row/col index lists.
+    if "hiddenRows" in result or "hiddenCols" in result:
+        sheet = result.get("sheet")
+        lines.append(f"hidden ({sheet}):" if sheet else "hidden:")
+        hidden_rows = result.get("hiddenRows") or []
+        hidden_cols = result.get("hiddenCols") or []
+        lines.append(f"  rows: {hidden_rows if hidden_rows else '(none)'}")
+        lines.append(f"  cols: {hidden_cols if hidden_cols else '(none)'}")
+        return "\n".join(lines)
+
+    # data_ops / dimensions write summary (DESIGN §X.2/§X.7): a terse one-line action summary.
+    if "action" in result and ("sheets" not in result and "cells" not in result):
+        summary = _render_action_summary(result)
+        if summary is not None:
+            return summary
+
     # Generic fallback: compact key/value lines (skip the always-present ok/spreadsheetId).
     return _render_generic(result)
 
@@ -744,6 +911,8 @@ def _render_inspect_cell(cell: dict) -> str:
         parts.append(f"[{cell['validation']}]")
     if cell.get("note"):
         parts.append(f"note={cell['note']!r}")
+    # v0.2 (DESIGN §X.1/§X.6): rich-text runs / in-cell hyperlink / pivot, present only when set.
+    parts.extend(_inspect_rich_parts(cell))
     return "  " + "  ".join(parts)
 
 
@@ -757,7 +926,83 @@ def _render_inspect_run(run: dict) -> str:
         parts.append("[validation]")
     if run.get("note"):
         parts.append(f"note={run['note']!r}")
+    parts.extend(_inspect_rich_parts(run))
     return "  " + "  ".join(parts)
+
+
+def _inspect_rich_parts(cell: dict) -> list[str]:
+    """Terse fragments for the v0.2 per-cell rich shapes (runs/hyperlink/pivot).
+
+    Each is emitted ONLY when the cell carries it (mirroring core's per-cell-only attachment),
+    so cells without rich data render exactly as before. ``runs`` summarizes the styled segments,
+    ``hyperlink`` shows the in-cell link, and ``pivot`` surfaces the serializer's terse ``line``.
+    """
+    parts: list[str] = []
+    runs = cell.get("runs")
+    if runs:
+        seg = " + ".join(
+            f"{r.get('text', '')!r}[{r.get('start', 0)}{' link ' + r['link'] if r.get('link') else ''}]"
+            for r in runs
+        )
+        parts.append(f"runs: {seg}")
+    if cell.get("hyperlink"):
+        parts.append(f"link={cell['hyperlink']}")
+    pivot = cell.get("pivot")
+    if pivot:
+        parts.append(pivot.get("line") or f"pivot <- {pivot.get('source', '?')}")
+    return parts
+
+
+def _render_comment(comment: dict) -> str:
+    """Render one serialized Drive comment as a terse line (reuses the serializer's ``line``)."""
+    line = comment.get("line")
+    if line:
+        return line
+    # Defensive fallback if a serialized comment lacks the precomputed line.
+    author = comment.get("author", "unknown")
+    content = comment.get("content", "")
+    state = "resolved" if comment.get("resolved") else "open"
+    cid = comment.get("id", "?")
+    return f'comment {cid} by {author}: "{content}" ({state})'
+
+
+# Per-action summary keys to surface for the data_ops / dimensions write returns (DESIGN
+# §X.2/§X.7). Anything not listed falls through to the generic key/value rendering.
+_ACTION_SUMMARY_KEYS = (
+    "occurrencesChanged",
+    "valuesChanged",
+    "formulasChanged",
+    "rowsChanged",
+    "sheetsChanged",
+    "duplicatesRemoved",
+    "cellsChangedCount",
+    "range",
+    "source",
+    "destination",
+    "sheet",
+    "dimension",
+    "start",
+    "end",
+    "destinationIndex",
+    "length",
+    "pixelSize",
+    "hiddenByUser",
+    "addedRows",
+    "addedColumns",
+)
+
+
+def _render_action_summary(result: dict) -> str | None:
+    """Render a data_ops / dimensions write result as ``<action>: k=v k=v`` (or None)."""
+    action = result.get("action")
+    pairs = [
+        f"{key}={result[key]}"
+        for key in _ACTION_SUMMARY_KEYS
+        if key in result
+    ]
+    if not pairs:
+        return None
+    return f"{action}: " + " ".join(pairs)
 
 
 def _render_generic(result: dict) -> str:

@@ -1,0 +1,31 @@
+{
+  "full_text": "Click here then plain",
+  "textFormatRuns": [
+    {
+      "format": {
+        "bold": true,
+        "foregroundColorStyle": {
+          "rgbColor": { "red": 0.06666667, "green": 0.33333334, "blue": 0.8 }
+        },
+        "link": { "uri": "https://x" }
+      }
+    },
+    {
+      "startIndex": 10,
+      "format": {}
+    }
+  ],
+  "expected_runs": [
+    {
+      "start": 0,
+      "text": "Click here",
+      "format": { "fg": "#1155CC", "bold": true },
+      "link": "https://x"
+    },
+    {
+      "start": 10,
+      "text": " then plain"
+    }
+  ],
+  "expected_line": "runs A1: \"Click here\"[0:10 fg #1155CC bold link https://x] + \" then plain\"[10:21]"
+}

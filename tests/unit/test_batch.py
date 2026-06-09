@@ -157,6 +157,10 @@ class TestReturnShape:
             "namedRangeIds": [],
             "protectedRangeIds": [],
             "metadataIds": [],
+            # v0.2 §X.3/§X.4/§X.9 — new add-id buckets.
+            "tableIds": [],
+            "bandedRangeIds": [],
+            "filterViewIds": [],
         }
 
     def test_null_replies_in_response_yields_empty_list(self):
@@ -205,6 +209,9 @@ class TestNewIdsCapture:
             "namedRangeIds": ["nr-9"],
             "protectedRangeIds": [5],
             "metadataIds": [123],
+            "tableIds": [],
+            "bandedRangeIds": [],
+            "filterViewIds": [],
         }
 
     def test_duplicate_sheet_id_captured_in_sheet_bucket(self):
@@ -240,6 +247,9 @@ class TestNewIdsCapture:
             "namedRangeIds": [],
             "protectedRangeIds": [],
             "metadataIds": [],
+            "tableIds": [],
+            "bandedRangeIds": [],
+            "filterViewIds": [],
         }
 
 

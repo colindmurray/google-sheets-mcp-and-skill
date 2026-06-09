@@ -13,6 +13,10 @@ from __future__ import annotations
 
 from googleapiclient.errors import HttpError
 
+from . import banding as _banding
+from . import filters as _filters
+from . import slicers as _slicers
+from . import tables as _tables
 from .addressing import a1_to_gridrange, gridrange_to_a1
 from .colors import color_style_to_hex, hex_to_color_style
 from .errors import SheetsError, classify_google_error
@@ -33,6 +37,11 @@ _REPLY_ID_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("addNamedRange", "namedRangeIds", ("namedRange", "namedRangeId")),
     ("addProtectedRange", "protectedRangeIds", ("protectedRange", "protectedRangeId")),
     ("createDeveloperMetadata", "metadataIds", ("developerMetadata", "metadataId")),
+    # v0.2 §X.3/§X.4/§X.9 — tables / banding / filter-view adds surface their new id in
+    # ``replies[]`` exactly like the base adds above.
+    ("addTable", "tableIds", ("table", "tableId")),
+    ("addBanding", "bandedRangeIds", ("bandedRange", "bandedRangeId")),
+    ("addFilterView", "filterViewIds", ("filter", "filterViewId")),
 )
 
 
@@ -51,7 +60,7 @@ def capture_new_ids(replies: list[dict]) -> dict:
         A dict of captured id lists, always carrying every bucket key (empty lists when the
         corresponding reply kind is absent), e.g.
         ``{"sheetIds": [7], "chartIds": [], "namedRangeIds": [], "protectedRangeIds": [],
-        "metadataIds": []}``.
+        "metadataIds": [], "tableIds": [], "bandedRangeIds": [], "filterViewIds": []}``.
     """
     out: dict[str, list] = {
         "sheetIds": [],
@@ -59,6 +68,9 @@ def capture_new_ids(replies: list[dict]) -> dict:
         "namedRangeIds": [],
         "protectedRangeIds": [],
         "metadataIds": [],
+        "tableIds": [],
+        "bandedRangeIds": [],
+        "filterViewIds": [],
     }
     for reply in replies or []:
         if not isinstance(reply, dict):
@@ -163,10 +175,27 @@ _STRUCTURE_ACTIONS = frozenset(
         "tab_color",
         "group",
         "ungroup",
+        # v0.2 §X.3/§X.4 — tables write CRUD.
+        "add_table",
+        "update_table",
+        "delete_table",
+        # v0.2 §X.9 — banding write CRUD.
+        "add_banding",
+        "update_banding",
+        "delete_banding",
+        # v0.2 §X.4 — basic-filter write.
+        "set_basic_filter",
+        "clear_basic_filter",
+        # v0.2 §X.4 — filter-view write CRUD.
+        "add_filter_view",
+        "update_filter_view",
+        "delete_filter_view",
+        # v0.2 §X.12 — spreadsheet-scoped properties (title/locale/timeZone); no sheet required.
+        "spreadsheet_props",
     }
 )
 
-#: Per-action allowed ``params`` keys (LOCKED — DESIGN §3.3 structure table).
+#: Per-action allowed ``params`` keys (LOCKED — DESIGN §3.3 structure table + §X.3/§X.4/§X.9/§X.12).
 _STRUCTURE_PARAMS: dict[str, set[str]] = {
     "read": set(),
     "merge": {"mergeType"},
@@ -179,6 +208,23 @@ _STRUCTURE_PARAMS: dict[str, set[str]] = {
     "tab_color": {"color"},
     "group": {"dimension", "start", "end"},
     "ungroup": {"dimension", "start", "end"},
+    # tables (#3)
+    "add_table": {"name", "columns"},
+    "update_table": {"tableId", "name", "columns", "range"},
+    "delete_table": {"tableId"},
+    # banding (#9)
+    "add_banding": {"rowBanding", "columnBanding"},
+    "update_banding": {"bandedRangeId", "rowBanding", "columnBanding", "range"},
+    "delete_banding": {"bandedRangeId"},
+    # basic filter (#4)
+    "set_basic_filter": {"sorted", "criteria"},
+    "clear_basic_filter": set(),
+    # filter views (#4)
+    "add_filter_view": {"title", "sorted", "criteria"},
+    "update_filter_view": {"filterViewId", "title", "range", "sorted", "criteria"},
+    "delete_filter_view": {"filterViewId"},
+    # spreadsheet properties (#12)
+    "spreadsheet_props": {"title", "locale", "timeZone"},
 }
 
 _MERGE_TYPES = frozenset({"MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"})
@@ -197,11 +243,20 @@ def structure(
     """Read or modify spreadsheet structure through one interface (DESIGN §3.3).
 
     ``action="read"`` returns the shape-stable envelope (``sheets`` always a list;
-    spreadsheet-scoped ``namedRanges`` at top level; ``sheet`` optional ⇒ every tab). Mutating
-    actions (``merge``/``unmerge``/``add_named``/``delete_named``/``protect``/``unprotect``/
-    ``freeze``/``tab_color``/``group``/``ungroup``) require ``sheet`` and use the matching
-    ``batchUpdate`` request with an auto fields mask where applicable. Each action consumes only
-    its documented ``params`` keys; unknown keys raise ``SheetsError("unknown_param")``.
+    spreadsheet-scoped ``namedRanges`` at top level; ``sheet`` optional ⇒ every tab). The read
+    envelope's per-sheet entries also carry ``tables``/``basicFilter``/``filterViews``/
+    ``bandedRanges``/``slicers`` (v0.2 §X.3/§X.4/§X.9/§X.16).
+
+    Mutating actions (``merge``/``unmerge``/``add_named``/``delete_named``/``protect``/
+    ``unprotect``/``freeze``/``tab_color``/``group``/``ungroup``) generally require ``sheet`` or a
+    ``range`` and use the matching ``batchUpdate`` request with an auto fields mask where
+    applicable. v0.2 adds tables/banding/filter write CRUD
+    (``add_table``/``update_table``/``delete_table``, ``add_banding``/``update_banding``/
+    ``delete_banding``, ``set_basic_filter``/``clear_basic_filter``,
+    ``add_filter_view``/``update_filter_view``/``delete_filter_view``) plus
+    ``spreadsheet_props`` (``updateSpreadsheetProperties`` for title/locale/timeZone — the one
+    mutating action that needs NEITHER ``sheet`` nor ``range``). Each action consumes only its
+    documented ``params`` keys; unknown keys raise ``SheetsError("unknown_param")``.
 
     Args:
         services: The authed handle.
@@ -238,7 +293,10 @@ def _structure_read(
         "namedRanges(name,namedRangeId,range),"
         "sheets(properties(sheetId,title,gridProperties(frozenRowCount,frozenColumnCount),"
         "tabColorStyle),merges,protectedRanges(protectedRangeId,range,description,editors,"
-        "warningOnly),rowGroups(range,depth,collapsed),columnGroups(range,depth,collapsed))"
+        "warningOnly),rowGroups(range,depth,collapsed),columnGroups(range,depth,collapsed),"
+        # v0.2 §X.3/§X.4/§X.9/§X.16 — five new sheet-scoped structural reads. Still NO grid data:
+        # only the structural metadata each feature carries (whole-rule/spec bodies, not cells).
+        "tables,basicFilter,filterViews,bandedRanges,slicers)"
     )
     try:
         resp = (
@@ -345,7 +403,72 @@ def _serialize_sheet_structure(
                 }
             )
     out["dimensionGroups"] = groups
+
+    _attach_sheet_features(out, services, spreadsheet_id, entry)
     return out
+
+
+def _attach_sheet_features(
+    out: dict, services: SheetsServices, spreadsheet_id: str, entry: dict
+) -> None:
+    """Attach the v0.2 sheet-scoped feature reads (tables/filters/banding/slicers).
+
+    Each serializer lives in its own pure-core module; this read fn resolves the Google
+    ``GridRange`` -> A1 first where the serializer expects a pre-resolved A1 string
+    (``basicFilter``/``filterViews``/``bandedRanges``), and hands ``services`` straight through
+    for the two serializers that resolve their own ranges (``tables``/``slicers``), mirroring
+    ``_serialize_sheet_structure``'s own range handling (DESIGN §X.0/§X.3).
+    """
+    # Tables (#3): serialize_table resolves its own range via services.
+    out["tables"] = [
+        _tables.serialize_table(t, services, spreadsheet_id)
+        for t in (entry.get("tables", []) or [])
+        if isinstance(t, dict)
+    ]
+
+    # Basic filter (#4): one per sheet, or null. Resolve its GridRange -> A1 first.
+    basic_filter = entry.get("basicFilter")
+    if isinstance(basic_filter, dict):
+        out["basicFilter"] = _filters.serialize_basic_filter(
+            basic_filter,
+            _feature_range_a1(services, spreadsheet_id, basic_filter.get("range")),
+        )
+    else:
+        out["basicFilter"] = None
+
+    # Filter views (#4): array per sheet; each carries its own range.
+    out["filterViews"] = [
+        _filters.serialize_filter_view(
+            fv, _feature_range_a1(services, spreadsheet_id, fv.get("range"))
+        )
+        for fv in (entry.get("filterViews", []) or [])
+        if isinstance(fv, dict)
+    ]
+
+    # Banded ranges (#9): array per sheet; each carries its own range.
+    out["bandedRanges"] = [
+        _banding.serialize_banding(
+            br, _feature_range_a1(services, spreadsheet_id, br.get("range"))
+        )
+        for br in (entry.get("bandedRanges", []) or [])
+        if isinstance(br, dict)
+    ]
+
+    # Slicers (#16): array per sheet; serialize_slicer resolves its own ranges via services.
+    out["slicers"] = [
+        _slicers.serialize_slicer(sl, services, spreadsheet_id)
+        for sl in (entry.get("slicers", []) or [])
+        if isinstance(sl, dict)
+    ]
+
+
+def _feature_range_a1(
+    services: SheetsServices, spreadsheet_id: str, gr: object
+) -> str | None:
+    """Resolve a feature's ``GridRange`` -> A1, degrading to ``None`` when absent/unresolvable."""
+    if not isinstance(gr, dict):
+        return None
+    return _safe_gridrange_to_a1(services, spreadsheet_id, gr)
 
 
 def _safe_gridrange_to_a1(
@@ -635,6 +758,213 @@ def _structure_group_op(
     }
 
 
+# --- v0.2 structure mutators: tables / banding / filters / spreadsheet props -----------
+#
+# These are DISPATCH-ONLY: the ``batchUpdate`` request bodies are built by the
+# ``tables``/``filters``/``banding`` modules (each a pure-core unit). This file resolves the
+# caller's A1 ``range`` / ``sheet`` to the GridRange / sheetId the builders need, issues the one
+# batch, captures any new id from ``replies[]`` (via the extended ``_REPLY_ID_SPECS``), and
+# returns the standard ``{"ok": True, ...}`` envelope.
+
+
+def _structure_add_table(services, spreadsheet_id, sheet, range, params) -> dict:
+    range = _require_range("add_table", range)
+    request = _tables.build_add_table_request(services, spreadsheet_id, range, params)
+    resp = _batch_update(services, spreadsheet_id, [request])
+    new_ids = capture_new_ids(resp.get("replies", []))
+    table_id = new_ids["tableIds"][0] if new_ids["tableIds"] else None
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "add_table",
+        "range": range,
+        "tableId": table_id,
+    }
+
+
+def _structure_update_table(services, spreadsheet_id, sheet, range, params) -> dict:
+    # A new ``range`` (if any) travels inside ``params`` and is resolved by the builder.
+    request = _tables.build_update_table_request(services, spreadsheet_id, params)
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "update_table",
+        "tableId": params.get("tableId"),
+    }
+
+
+def _structure_delete_table(services, spreadsheet_id, sheet, range, params) -> dict:
+    request = _tables.build_delete_table_request(params)
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "delete_table",
+        "tableId": params.get("tableId"),
+    }
+
+
+def _structure_add_banding(services, spreadsheet_id, sheet, range, params) -> dict:
+    range = _require_range("add_banding", range)
+    request = _banding.build_add_banding_request(services, spreadsheet_id, range, params)
+    resp = _batch_update(services, spreadsheet_id, [request])
+    new_ids = capture_new_ids(resp.get("replies", []))
+    banded_range_id = (
+        new_ids["bandedRangeIds"][0] if new_ids["bandedRangeIds"] else None
+    )
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "add_banding",
+        "range": range,
+        "bandedRangeId": banded_range_id,
+    }
+
+
+def _structure_update_banding(services, spreadsheet_id, sheet, range, params) -> dict:
+    request = _banding.build_update_banding_request(services, spreadsheet_id, params)
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "update_banding",
+        "bandedRangeId": params.get("bandedRangeId"),
+    }
+
+
+def _structure_delete_banding(services, spreadsheet_id, sheet, range, params) -> dict:
+    request = _banding.build_delete_banding_request(params)
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "delete_banding",
+        "bandedRangeId": params.get("bandedRangeId"),
+    }
+
+
+def _structure_set_basic_filter(services, spreadsheet_id, sheet, range, params) -> dict:
+    range = _require_range("set_basic_filter", range)
+    grid_range = a1_to_gridrange(services, spreadsheet_id, range)
+    request = _filters.build_set_basic_filter_request(
+        services, spreadsheet_id, grid_range, params
+    )
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "set_basic_filter",
+        "range": range,
+    }
+
+
+def _structure_clear_basic_filter(services, spreadsheet_id, sheet, range, params) -> dict:
+    sheet = _require_sheet("clear_basic_filter", sheet)
+    sheet_id = _sheet_id_for(services, spreadsheet_id, sheet)
+    request = _filters.build_clear_basic_filter_request(
+        services, spreadsheet_id, sheet_id
+    )
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "clear_basic_filter",
+        "sheet": sheet,
+    }
+
+
+def _structure_add_filter_view(services, spreadsheet_id, sheet, range, params) -> dict:
+    range = _require_range("add_filter_view", range)
+    grid_range = a1_to_gridrange(services, spreadsheet_id, range)
+    request = _filters.build_add_filter_view_request(
+        services, spreadsheet_id, grid_range, params
+    )
+    resp = _batch_update(services, spreadsheet_id, [request])
+    new_ids = capture_new_ids(resp.get("replies", []))
+    filter_view_id = (
+        new_ids["filterViewIds"][0] if new_ids["filterViewIds"] else None
+    )
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "add_filter_view",
+        "range": range,
+        "filterViewId": filter_view_id,
+    }
+
+
+def _structure_update_filter_view(services, spreadsheet_id, sheet, range, params) -> dict:
+    # A new ``range`` (if any) is passed pre-resolved to the builder via the ``grid_range``
+    # kwarg — the builder reads everything else off ``params`` but NOT ``range``.
+    grid_range = None
+    builder_params = params
+    if params.get("range") is not None:
+        grid_range = a1_to_gridrange(services, spreadsheet_id, params["range"])
+        builder_params = {k: v for k, v in params.items() if k != "range"}
+    request = _filters.build_update_filter_view_request(
+        services, spreadsheet_id, builder_params, grid_range=grid_range
+    )
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "update_filter_view",
+        "filterViewId": params.get("filterViewId"),
+    }
+
+
+def _structure_delete_filter_view(services, spreadsheet_id, sheet, range, params) -> dict:
+    filter_view_id = params.get("filterViewId")
+    if filter_view_id is None:
+        raise SheetsError(
+            "missing_param", "delete_filter_view requires params={'filterViewId': <int>}"
+        )
+    request = _filters.build_delete_filter_view_request(
+        services, spreadsheet_id, filter_view_id
+    )
+    _batch_update(services, spreadsheet_id, [request])
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "delete_filter_view",
+        "filterViewId": filter_view_id,
+    }
+
+
+def _structure_spreadsheet_props(services, spreadsheet_id, sheet, range, params) -> dict:
+    """Set spreadsheet-scoped properties (title/locale/timeZone); no sheet required (§X.12).
+
+    Maps to ``updateSpreadsheetProperties`` with an auto fields mask built from the supplied
+    properties, so only the given fields are written (DESIGN §5.1). An empty payload (no
+    title/locale/timeZone) is refused via ``build_fields_mask``'s ``empty_payload`` guard.
+    """
+    properties: dict = {}
+    for key in ("title", "locale", "timeZone"):
+        if params.get(key) is not None:
+            properties[key] = params[key]
+    fields = build_fields_mask(properties)  # raises empty_payload when nothing to change
+    _batch_update(
+        services,
+        spreadsheet_id,
+        [
+            {
+                "updateSpreadsheetProperties": {
+                    "properties": properties,
+                    "fields": fields,
+                }
+            }
+        ],
+    )
+    out: dict = {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "spreadsheet_props",
+    }
+    out.update(properties)
+    return out
+
+
 _STRUCTURE_HANDLERS = {
     "merge": _structure_merge,
     "unmerge": _structure_unmerge,
@@ -646,6 +976,19 @@ _STRUCTURE_HANDLERS = {
     "tab_color": _structure_tab_color,
     "group": _structure_group,
     "ungroup": _structure_ungroup,
+    # v0.2 §X.3/§X.4/§X.9/§X.12
+    "add_table": _structure_add_table,
+    "update_table": _structure_update_table,
+    "delete_table": _structure_delete_table,
+    "add_banding": _structure_add_banding,
+    "update_banding": _structure_update_banding,
+    "delete_banding": _structure_delete_banding,
+    "set_basic_filter": _structure_set_basic_filter,
+    "clear_basic_filter": _structure_clear_basic_filter,
+    "add_filter_view": _structure_add_filter_view,
+    "update_filter_view": _structure_update_filter_view,
+    "delete_filter_view": _structure_delete_filter_view,
+    "spreadsheet_props": _structure_spreadsheet_props,
 }
 
 

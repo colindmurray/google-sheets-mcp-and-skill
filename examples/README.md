@@ -1,14 +1,16 @@
 # Examples — `gsheets` recipes
 
-Three small, copy-pasteable recipes that show off the read-side richness and the safe-write
+Small, copy-pasteable recipes that show off the read-side richness and the safe-write
 defaults of the `gsheets` CLI. Each is a runnable shell script that reads the **spreadsheet id from
 the environment** (never hard-coded) and uses placeholder ids in its comments.
 
 | Recipe | What it shows |
 |---|---|
 | [`audit_conditional_formatting.sh`](audit_conditional_formatting.sh) | Audit every conditional-format rule in a sheet — the rules that color cells dynamically, which generic tooling can't read. |
+| [`audit_tables_and_filters.sh`](audit_tables_and_filters.sh) | Audit a sheet's native **tables**, **filter views**, **banding**, and **slicers** — structural objects a value read never sees — each as a terse round-trippable line with its id. |
 | [`read_column_formulas.sh`](read_column_formulas.sh) | Read the **formulas** behind a column (not just the computed values), with formula + result side by side. |
 | [`safe_value_write.sh`](safe_value_write.sh) | A safe value write: read the target first, write with `USER_ENTERED`, then read it back to verify (full CRUD symmetry). |
+| [`bulk_find_replace.sh`](bulk_find_replace.sh) | A safe bulk (regex) find/replace via `data-ops`: read the scope first, replace in one batch, then read back and check the `occurrencesChanged` count. |
 
 ## Prerequisites
 
@@ -39,8 +41,10 @@ the environment** (never hard-coded) and uses placeholder ids in its comments.
 ```sh
 chmod +x examples/*.sh          # once
 ./examples/audit_conditional_formatting.sh
+./examples/audit_tables_and_filters.sh                       # all tabs (or pass a tab name)
 ./examples/read_column_formulas.sh 'Sheet1!C1:C200'
 ./examples/safe_value_write.sh 'Sheet1!E1' '=SUM(C2:C200)'
+./examples/bulk_find_replace.sh 'Sheet1!B2:B500' '\bN/?A\b' ''   # regex blank-out of N/A, NA
 ```
 
 Each script prints the exact `gsheets` commands it runs, so you can copy individual lines.

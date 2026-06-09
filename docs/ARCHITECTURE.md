@@ -44,9 +44,12 @@ Five invariants follow from that thesis and are not negotiable:
                 ┌─────────────────────────────────────────────────────┐
                 │                  PURE CORE  (gsheets.core)           │
                 │  values · reads · formatting · rules · structure ·   │
-                │  charts · batch   +   helpers:                       │
+                │  charts · batch · data_ops · dimensions · comments   │
+                │    +   helpers:                                      │
                 │  addressing · colors · fieldsmask · flatten ·        │
-                │  condformat · errors · service                       │
+                │  condformat · errors · service   +   serializers:    │
+                │  richtext · pivot · tables · filters · banding ·     │
+                │  slicers · comments                                  │
                 │                                                      │
                 │  ZERO imports of fastmcp / mcp / argparse / pydantic │
                 └───────────────────────┬─────────────────────────────┘
@@ -90,6 +93,25 @@ Helper modules with disjoint responsibilities back the function surface:
 | `fieldsmask` | `build_fields_mask(payload)` — the minimal `fields` mask covering exactly the keys present. |
 | `flatten` | `flatten_cell_format()` — Google's nested `CellFormat` → flat shape. |
 | `condformat` | (de)serialize conditional-format rules ↔ readable lines (see grammar below). |
+
+Seven additional pure serializer modules (added in v0.2) flatten the richer read surface
+into the same terse, structured, round-trippable line style. Each takes already-resolved
+A1 strings (the owning read function resolves `GridRange → A1` first, mirroring the
+condformat boundary) and returns plain dicts carrying a `line` field:
+
+| Serializer | Responsibility |
+|---|---|
+| `richtext` | `serialize_text_runs()` — per-run styled segments (`textFormatRuns`) + in-cell links; `text_runs_line()` renders the terse `runs A1: …` line. |
+| `pivot` | `serialize_pivot()` — flatten a `PivotTable` definition (source, rows/cols/values/filters) into a flat dict + terse line. |
+| `tables` | `serialize_table()` + `build_{add,update,delete}_table_request()` — native Sheets `Table` read shape and the write requests. |
+| `filters` | `serialize_basic_filter()` / `serialize_filter_view()` + `build_*` filter requests — basic-filter and filter-view state and writes. |
+| `banding` | `serialize_banding()` + `build_{add,update,delete}_banding_request()` — alternating-color band ranges. |
+| `slicers` | `serialize_slicer()` — slicer read shape (read-only in v1). |
+| `comments` | `serialize_comment()` — flatten a Drive `Comment` (author, content, replies); the `comments` core function lives here too. |
+
+The new top-level core functions `data_ops` (`core/dataops.py`) and `dimensions`
+(`core/dimensions.py`) are single-dispatch wrappers over the one-request `batchUpdate`
+data and dimension verbs; they import only the shared helpers and stay boundary-pure.
 
 ### Auth (`gsheets.auth`) — credential resolution
 
@@ -171,14 +193,14 @@ Two write-side subtleties worth knowing:
 
 ## The function surface
 
-Fifteen core functions, each exposed as one MCP tool and one CLI subcommand. The
+Eighteen core functions, each exposed as one MCP tool and one CLI subcommand. The
 understanding path is `overview → inspect → read_conditional_formats`; the change path is
 the writers; the raw escape hatch is presented last.
 
 | Core fn | What it does | Kind |
 |---|---|---|
-| `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges. No grid data. | read |
-| `inspect` | Flagship rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs. | read |
+| `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`. No grid data. | read |
+| `inspect` | Flagship rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
 | `write_values` | Write/update one or more ranges; `USER_ENTERED` default; multi-range in one call. | write |
@@ -187,16 +209,21 @@ the writers; the raw escape hatch is presented last.
 | `format` | Apply cell formatting (background, font, number/date pattern, alignment, wrap, padding, borders, note) atomically with an auto fields mask. | write |
 | `set_conditional_format` | Add / update / delete a boolean or gradient rule by positional index; index-shift-safe batch form. | write |
 | `set_validation` | Set / clear data validation on a range (structured rule, round-trips from `inspect`). | write |
-| `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — one structural interface. | read/write |
+| `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — plus the v0.2 reads (native tables, basic filter, filter views, banding, slicers) and writes (table / banding / filter CRUD, spreadsheet `title`/`locale`/`timeZone`). One structural interface. | read/write |
 | `manage_sheets` | Add / delete / duplicate / rename / reorder tabs; returns new ids. | write |
 | `metadata` | Read / write developer metadata for durable row/column/sheet anchors. | write |
 | `charts` | Create / update / delete / read embedded charts (read returns metadata only in v1). | write |
+| `data_ops` | Single-request data verbs: `find_replace`, `delete_duplicates`, `trim_whitespace`, `sort_range`, `text_to_columns`, `auto_fill`, `copy_paste`, `cut_paste`. | write |
+| `dimensions` | Row/column ops: `insert` / `delete` / `move` / `append`, `auto_resize`, `set_props` (height/width/hide), and `read` (which rows/cols are hidden). | read/write |
+| `comments` | Read Drive threaded comments (author, content, replies, resolved state) on the spreadsheet file. Read-only in v1; uses the Drive API. | read |
 | `batch` | Power-user escape hatch: a raw ordered list of `batchUpdate` requests. | write |
 
 The structure read and the conditional-format read share a **shape-stable multi-sheet
 envelope**: top-level spreadsheet-scoped fields plus a `sheets: [...]` list that is
 always a list (one entry for one sheet, every tab when unscoped), so consumers never fork
-on object-vs-list.
+on object-vs-list. The v0.2 structural reads (`tables`, `basicFilter`, `filterViews`,
+`bandedRanges`, `slicers`) ride that same per-sheet envelope as additional sheet-scoped
+keys, emitted only when present.
 
 ---
 
@@ -267,6 +294,163 @@ gradient-slot order `min | mid | max`). A read line can be edited and written st
 back via `set_conditional_format`, with the target index passed separately. This
 round-trip is golden-mastered in the test suite for the boolean case and the canonical
 gradient case.
+
+---
+
+## v0.2 serialization grammars (richer reads)
+
+The conditional-format line style generalizes. Every richer read added in v0.2 follows the
+same discipline: **flattened hex colors**, a terse `[range] kind …` (or `kind … [range]`)
+`line` for humans/AI, the structured fields alongside the line for round-trip, and
+**omit-when-absent** so a sparse value stays token-cheap. Each serializer takes
+already-resolved A1 strings; the owning read function resolves `GridRange → A1` first.
+Per-cell rich data (runs, hyperlink, pivot) is attached **only to a cell that actually
+carries it** — never emitted as an empty placeholder.
+
+### Rich-text runs + cell hyperlink (`richtext`)
+
+`inspect(include_rich_text=True)` adds `textFormatRuns` and `hyperlink` to the per-cell
+mask. A cell with multiple styled segments gains a `runs` list; a cell with a single link
+gains a flat `hyperlink`. A run carries its 0-based `start`, the substring `text`, a
+flattened text-format subset, and a run-level `link` (which **takes precedence** over the
+cell-level `hyperlink` — multi-link cells are recoverable only through the per-run links).
+
+```jsonc
+// per run, attached to a cell only when textFormatRuns are present
+{ "start": 0, "text": "Click here", "format": { "bold": true, "fg": "#1155CC" },
+  "link": "https://example.com" }
+```
+
+```
+# terse line (one per cell with runs)
+runs A1: "Click here"[0:10 bold fg #1155CC link https://example.com] + " then plain"[11:22]
+```
+
+Each segment is `"<text>"[<start>:<end> <fmt-tokens> link <uri>]`, fmt-tokens in the same
+canonical order as the condformat format tokens. The flat `hyperlink` is omitted when a
+cell holds multiple links (those live in the runs).
+
+### Pivot-table definition (`pivot`)
+
+`inspect(include_pivot=True)` adds `pivotTable` to the mask; only the **anchor (top-left)
+cell** carries the definition, so `pivot` is attached only there. The `source` GridRange
+is resolved to A1; rows/columns/values/filters are flattened.
+
+```jsonc
+{ "source": "Data!A1:F500",
+  "rows":    [ { "field": "Region", "sourceColumnOffset": 0, "sortOrder": "ASCENDING" } ],
+  "columns": [ { "field": "Quarter", "sourceColumnOffset": 2 } ],
+  "values":  [ { "name": "Sum of Sales", "sourceColumnOffset": 4, "summarize": "SUM" } ],
+  "filters": [ { "sourceColumnOffset": 1, "visibleValues": ["X", "Y"] } ],
+  "valueLayout": "HORIZONTAL" }
+```
+
+```
+pivot <- Data!A1:F500 | rows: Region | cols: Quarter | values: SUM(Sales)
+```
+
+A value renders as `SUMMARIZE(name)` (e.g. `SUM(Sales)`); each segment is omitted when its
+slot is empty. Pivots are read-only — writing one stays in the `batch` escape hatch.
+
+### Native tables (`tables`)
+
+A `Table` (the 2024-GA native Sheets table) serializes to its name, A1 range, and typed
+columns. A `DROPDOWN` column's data-validation rule renders with the **same**
+`ValidationRule` one-liner `inspect` surfaces for cell validation.
+
+```jsonc
+{ "tableId": "abc", "name": "Sales", "range": "Sheet1!A1:F500",
+  "columns": [ { "name": "Region", "type": "TEXT" },
+               { "name": "Status", "type": "DROPDOWN", "validation": "ONE_OF_LIST(Open,Closed)" } ] }
+```
+
+```
+table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)
+```
+
+`columnType` is one of `TEXT | DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATETIME |
+DROPDOWN | CHECKBOX | SMART_CHIP | RATING`. Tables are full-CRUD via the `structure`
+actions `add_table` / `update_table` / `delete_table`.
+
+### Filter views and basic filter (`filters`)
+
+A sheet's `basicFilter` (at most one) and its `filterViews` (an array) flatten to a sort
+list plus a per-column criterion list. The column is rendered as a **letter** (`B`),
+`hidden` normalizes `hiddenValues` / `visibleValues`, and a criterion's condition reuses
+the **same** condition serializer as the condformat grammar.
+
+```jsonc
+// basicFilter (one per sheet, or null)
+{ "range": "Sheet1!A1:F500", "sorted": [ { "col": "C", "order": "ASCENDING" } ],
+  "criteria": [ { "col": "B", "hidden": ["Closed"], "condition": "NUMBER_GREATER(0)" } ] }
+// filterView (array per sheet)
+{ "filterViewId": 123, "title": "Open only", "range": "Sheet1!A1:F500",
+  "criteria": [ { "col": "B", "hidden": ["Closed"] } ] }
+```
+
+```
+basicFilter [Sheet1!A1:F500] sort C asc | B: hide Closed, NUMBER_GREATER(0)
+filterView 123 "Open only" [Sheet1!A1:F500] | B: hide Closed
+```
+
+Writable via the `structure` actions `set_basic_filter` / `clear_basic_filter` and
+`add_filter_view` / `update_filter_view` / `delete_filter_view`.
+
+### Banding (`banding`)
+
+An alternating-color `BandedRange` flattens to its id, A1 range, and per-axis band colors
+(header / first / second / footer), each as a hex string.
+
+```jsonc
+{ "bandedRangeId": 7, "range": "Sheet1!A1:F500",
+  "rowBanding": { "header": "#4285F4", "first": "#FFFFFF", "second": "#E8F0FE", "footer": null },
+  "columnBanding": null }
+```
+
+```
+banding 7 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF / #E8F0FE
+```
+
+Full-CRUD via the `structure` actions `add_banding` / `update_banding` / `delete_banding`.
+
+### Slicers (`slicers`)
+
+A `Slicer` flattens to its id, title, data range, filtered column index, dashboard anchor,
+and a terse criterion. Read-only in v1 (writes use `batch`).
+
+```jsonc
+{ "slicerId": 4, "title": "Region", "range": "Data!A1:F500", "columnIndex": 0,
+  "anchor": { "sheet": "Dash", "row": 0, "col": 8 }, "criteria": "ONE_OF_LIST(...)" }
+```
+
+```
+slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1
+```
+
+### Drive comments (`comments`)
+
+The `comments` tool reads threaded comments from the spreadsheet **file** via the Drive
+API (not the Sheets API). Each comment flattens its author display name, content,
+timestamps, `resolved` state, an optional quoted snippet, and its replies (each with an
+optional `action` such as `resolve`).
+
+```jsonc
+{ "id": "AAAA", "author": "Jane Doe", "content": "please verify Q3",
+  "created": "2026-05-01T…", "modified": "2026-05-02T…", "resolved": false,
+  "quoted": "1234",
+  "replies": [ { "author": "Bob", "content": "done", "action": "resolve" } ] }
+```
+
+```
+comment AAAA by Jane Doe: "please verify Q3" (open, 1 reply)
+```
+
+A Sheets comment `anchor` is an **opaque, document-type-specific** string with no documented
+A1 mapping, so it is surfaced raw under `anchorRaw` at the document level only — it is never
+claimed to map to a cell. The Drive `comments.list` call **requires** an explicit `fields`
+mask (omitting it errors), so core always sends one and paginates. If no Drive service is
+available (no Drive scope), core raises `SheetsError("drive_unavailable")` with a hint to
+enable a Drive scope.
 
 ---
 

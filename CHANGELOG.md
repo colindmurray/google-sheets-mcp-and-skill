@@ -10,6 +10,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.2.0] - 2026-06-09
+
+Adds 17 verified feature-gap capabilities on top of the v0.1.0 surface — all additive,
+with every base signature and test preserved. Two new tools (`data_ops`, `comments`), one
+new tool (`dimensions`), and mask/flag/action extensions to existing tools (`inspect`,
+`structure`, `overview`). Nine new boundary-pure serializer/dispatch modules. Read-side
+richness and token efficiency carry through: per-cell rich data is emitted only when
+present, complex reads are serialized into terse round-trippable lines, and writes keep
+`USER_ENTERED` defaults with auto fields masks and index-safe batches.
+
+### Added
+- **Read richness on `inspect` (per-cell, opt-in, zero cost when off):**
+  - Rich-text runs — `include_rich_text` surfaces per-character styled segments
+    (`textFormatRuns`) flattened into a `runs` list, including a run-level `link` that takes
+    precedence over the cell hyperlink (the only way to recover multi-link cells). (#1)
+  - Cell hyperlink — the read-only `hyperlink` field attaches as a flat string (folded into
+    `include_rich_text`). (#8)
+  - Pivot-table definition — `include_pivot` attaches a flattened `pivot` (source, rows /
+    columns / values / filters) to the pivot's anchor cell only. Read-only. (#6)
+- **Structural reads on `structure(action="read")` (sheet-scoped, emitted only when present):**
+  - Native Sheets tables — a `tables` key (name, A1 range, typed columns; a DROPDOWN column
+    renders the same `ValidationRule` one-liner `inspect` uses). (#3)
+  - Filter views + basic-filter state — `basicFilter` and `filterViews` keys (sort specs +
+    per-column criteria, reusing the conditional-format condition serializer). (#4)
+  - Banding — a `bandedRanges` key (per-axis header / first / second / footer hex colors). (#9)
+  - Slicers — a `slicers` key (title, data range, filtered column, dashboard anchor). (#16)
+- **Structural writes as new `structure` actions (full CRUD symmetry with the reads above):**
+  - Tables — `add_table` / `update_table` / `delete_table` (captures new `tableId`). (#3)
+  - Banding — `add_banding` / `update_banding` / `delete_banding` (captures new
+    `bandedRangeId`). (#9)
+  - Filters — `set_basic_filter` / `clear_basic_filter` and `add_filter_view` /
+    `update_filter_view` / `delete_filter_view` (captures new `filterViewId`). (#4)
+  - Spreadsheet properties — `spreadsheet_props` sets `title` / `locale` / `timeZone`
+    (spreadsheet-scoped; auto fields mask). (#12)
+- **Spreadsheet metadata read on `overview`:** top-level `locale` and `timeZone` (omitted
+  when absent) for correct interpretation of dates and numbers. (#12)
+- **New `data_ops` tool** — single-request `batchUpdate` data verbs through one dispatch:
+  `find_replace` (#2), `delete_duplicates` and `trim_whitespace` (#11), `sort_range`,
+  `text_to_columns`, and `auto_fill` (#15), and `copy_paste` / `cut_paste` (#14), each
+  returning an action-specific summary (e.g. `find_replace` surfaces
+  `occurrencesChanged`/`valuesChanged`/`formulasChanged`).
+- **New `dimensions` tool** — row/column operations: `insert` / `delete` / `move` /
+  `append` (#7), `auto_resize` (#10), `set_props` for pixel size / `hiddenByUser` (#13), and
+  a `read` that reports which rows/columns are hidden (#13).
+- **New `comments` tool (read-only v1)** — reads Drive threaded comments on the spreadsheet
+  file (author, content, timestamps, `resolved`, quoted snippet, replies) via the Drive API.
+  The opaque, non-A1 `anchor` is surfaced raw at the document level only. The required Drive
+  `fields` mask is always sent and results are paginated; raises `drive_unavailable` when no
+  Drive scope is present. (#5)
+- **New pure-core serializer / dispatch modules** (boundary-pure, golden-master tested):
+  `richtext`, `pivot`, `tables`, `filters`, `banding`, `slicers`, `comments`, `dataops`,
+  `dimensions`. Three new top-level core functions (`data_ops`, `dimensions`, `comments`)
+  are re-exported from `gsheets.core`.
+- **Adapter + model parity:** new Pydantic mirror models (`TextRun`, `Pivot*`, `Table`,
+  `BasicFilter`, `FilterView`, `Banding`, `Slicer`, `Comment`, `DataOpsResult`,
+  `DimensionsResult`, `CommentsResult`) and extensions to `Cell` / `Run` / `SheetStructure`
+  / `OverviewResult`; three new MCP tools (`sheets_data_ops`, `sheets_dimensions`,
+  `sheets_comments`) plus the `include_rich_text` / `include_pivot` kwargs on
+  `sheets_inspect`; three new CLI subcommands (`data-ops`, `dimensions`, `comments`) plus
+  `--rich-text` / `--pivot` flags on `inspect`.
+
+### Changed
+- `structure(action="read")` now requests `sheets.rowGroups` + `sheets.columnGroups` for the
+  dimension-groups read (there is no single `dimensionGroups` field on a `Sheet`); the
+  flattened `dimensionGroups` output key is unchanged.
+
+### Fixed
+- `data_ops(action="delete_duplicates")` now reports the correct count: it reads Google's real
+  `DeleteDuplicatesResponse.duplicatesRemovedCount` reply field (it previously read a
+  non-existent `duplicatesRemoved`, so the surfaced `duplicatesRemoved` was always `0`). Caught
+  by the new live round-trip; the unit fixture now mocks the real field name to guard it.
+
+### Notes
+- Connected Sheets / data sources (`dataSourceTable`, `dataSourceFormula`, spreadsheet
+  `dataSources`) are intentionally **not** given a typed tool (low signal, heavy schema);
+  they remain readable through the `batch` / raw `spreadsheets.get` escape hatch. (#17)
+- The `tests_boundary_guard` pytest marker is now registered to silence its
+  `PytestUnknownMarkWarning`.
+- The 17 v0.2 capabilities are covered by live round-trip integration tests
+  (`tests/integration/test_live_v02.py`, `@pytest.mark.live`): each new write verb is written
+  and read back, and each new read is exercised against a real spreadsheet. They are gated on
+  `GSHEETS_LIVE=1` + `GSHEETS_TEST_SPREADSHEET_ID` (never a committed/Production id) and skip in
+  a normal `pytest` run.
+
 ## [0.1.0] - 2026-06-09
 
 Initial release: a pure Google Sheets core library wrapped by two thin adapters — an
@@ -84,5 +168,6 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/releases/tag/v0.1.0

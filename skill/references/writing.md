@@ -20,7 +20,10 @@ For exact flags see `commands.md` or `gsheets <cmd> --help`. Examples use `<YOUR
   - [Batch mutations (high → low)](#batch-mutations-high--low)
 - [`set-validation` round-trip](#set-validation-round-trip)
 - [`clear` (what gets wiped)](#clear-what-gets-wiped)
+- [`data-ops` — range data operations](#data-ops--range-data-operations)
+- [`dimensions` — row & column operations](#dimensions--row--column-operations)
 - [Structure, tabs, metadata](#structure-tabs-metadata)
+  - [Tables, banding, filters, spreadsheet props (v0.2)](#tables-banding-filters-spreadsheet-props-v02)
 - [CRUD symmetry — read it back](#crud-symmetry--read-it-back)
 
 ---
@@ -200,18 +203,116 @@ through a `batchUpdate` whose fields mask covers **exactly** the requested subfi
 range — so clearing formats won't touch values unless you ask. `--no-values` clears the structural
 flags without touching values. **Destructive** — confirm and read the range first.
 
+## `data-ops` — range data operations
+
+`data-ops` groups the range-level data verbs that are each a single `batchUpdate` request — find &
+replace, dedupe, trim, sort, split-to-columns, autofill, and copy/cut-paste. One `--action` per
+call; the operands go in `--params-json` (same convention as `structure`). An unknown `params` key
+raises `unknown_param`.
+
+```sh
+# Find & replace within one sheet (scope = range | sheet | allSheets — pass exactly one):
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action find_replace \
+  --params-json '{"find":"TODO","replacement":"DONE","sheet":"Sheet1"}'
+
+# Sort a range by column B descending:
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action sort_range \
+  --params-json '{"range":"Sheet1!A2:D100","specs":[{"col":"B","order":"DESCENDING"}]}'
+
+# Remove duplicate rows, comparing only columns A and C:
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action delete_duplicates \
+  --params-json '{"range":"Sheet1!A1:D100","comparisonColumns":["A","C"]}'
+
+# Copy values only into another range (paste-type aware):
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action copy_paste \
+  --params-json '{"source":"Sheet1!A1:D10","destination":"Sheet2!A1","pasteType":"PASTE_VALUES"}'
+```
+
+The result echoes an action-specific summary from the API reply: `find_replace` →
+`occurrencesChanged` / `valuesChanged` / `formulasChanged`, `delete_duplicates` →
+`duplicatesRemoved`, `trim_whitespace` → `cellsChangedCount`, and the geometry verbs echo what they
+changed. **`find_replace`, `cut_paste`, and `delete_duplicates` are destructive** — read the range
+first and confirm. See the full `--params-json` key tables in `commands.md`.
+
+## `dimensions` — row & column operations
+
+`dimensions` is the row/column counterpart to `manage-sheets` (which is tab-level): insert / delete
+/ move / append rows or columns, auto-fit, set pixel size / hidden, and `read` the hidden rows/cols.
+**Every action targets one tab, so `--sheet` is required.** Spans are 0-based half-open (`start`
+inclusive, `end` exclusive).
+
+```sh
+# Insert 3 rows starting at row index 5 (0-based) on Sheet1:
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action insert --sheet Sheet1 \
+  --params-json '{"dimension":"ROWS","start":5,"end":8}'
+
+# Auto-fit every column to its content:
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action auto_resize --sheet Sheet1 \
+  --params-json '{"dimension":"COLUMNS"}'
+
+# Hide columns C–E (set_props with hiddenByUser):
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action set_props --sheet Sheet1 \
+  --params-json '{"dimension":"COLUMNS","start":2,"end":5,"hiddenByUser":true}'
+
+# Read which rows/cols are hidden (the "what the viewer actually sees" companion to filter views):
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1
+#   -> { "hiddenRows": [...], "hiddenCols": [...] }
+```
+
+`delete` is **destructive** — confirm first. `insert`/`append`/`move` shift the rows/cols below
+them, so re-read any A1 references you cached afterward. See `commands.md` for the per-action
+`params` keys.
+
 ## Structure, tabs, metadata
 
 - **`structure`** writes go through the same auto field-mask where applicable, and `--sheet` is
-  **required** to mutate (omit only for `read`). `unmerge`, `delete_named`, `unprotect`, and
-  `ungroup` are destructive. New `namedRangeId`/`protectedRangeId`s come back in the result so a
-  create-then-populate flow has the id immediately.
+  **required** to mutate the sheet-scoped actions (omit only for `read`, and for the
+  spreadsheet-scoped `spreadsheet_props`). `unmerge`, `delete_named`, `unprotect`, `ungroup`, and
+  the v0.2 deletes (`delete_table`, `delete_banding`, `clear_basic_filter`, `delete_filter_view`)
+  are destructive. New `namedRangeId`/`protectedRangeId`/`tableId`/`bandedRangeId`/`filterViewId`s
+  come back in the result so a create-then-populate flow has the id immediately.
 - **`manage-sheets`** returns the new `sheetId`/title/index for `add`/`duplicate`. `delete` is
-  destructive — confirm first.
+  destructive — confirm first. (Row/column ops live on `dimensions`, above, not here.)
 - **`metadata`** writes durable key/value anchors (row/column range, whole sheet, or spreadsheet)
   that survive row/column inserts — prefer them over hard-coded A1 when you need a stable reference.
 
 See the per-action `params` key tables in `commands.md`; an unknown key raises `unknown_param`.
+
+### Tables, banding, filters, spreadsheet props (v0.2)
+
+`structure` gained write CRUD for the structural reads `structure --action read` surfaces, so
+everything you can read back you can also create/edit/delete (full CRUD symmetry — slicers excepted,
+read-only in v1):
+
+```sh
+# Create a native Table over a range (a DROPDOWN column needs a ONE_OF_LIST validation):
+gsheets structure <YOUR_SPREADSHEET_ID> --action add_table --range 'Sheet1!A1:F500' \
+  --params-json '{"name":"Sales","columns":[{"name":"Region","type":"TEXT"},
+    {"name":"Status","type":"DROPDOWN","validation":{"type":"ONE_OF_LIST","values":["Open","Closed"]}}]}'
+#   -> returns the new tableId; pass it to update_table / delete_table.
+
+# Add alternating-row banding:
+gsheets structure <YOUR_SPREADSHEET_ID> --action add_banding --range 'Sheet1!A1:F500' \
+  --params-json '{"rowBanding":{"header":"#4285F4","first":"#FFFFFF","second":"#E8F0FE"}}'
+
+# Set the basic filter (sort + per-column hidden values):
+gsheets structure <YOUR_SPREADSHEET_ID> --action set_basic_filter --range 'Sheet1!A1:F500' \
+  --params-json '{"sorted":[{"col":"C","order":"ASCENDING"}],"criteria":[{"col":"B","hidden":["Closed"]}]}'
+
+# Add a named filter view (returns filterViewId):
+gsheets structure <YOUR_SPREADSHEET_ID> --action add_filter_view --range 'Sheet1!A1:F500' \
+  --params-json '{"title":"Open only","criteria":[{"col":"B","hidden":["Closed"]}]}'
+
+# Set spreadsheet-level locale / timeZone / title (spreadsheet-scoped — no --sheet):
+gsheets structure <YOUR_SPREADSHEET_ID> --action spreadsheet_props \
+  --params-json '{"locale":"en_US","timeZone":"America/New_York"}'
+```
+
+The `tableId` / `bandedRangeId` / `filterViewId` returned on create are how you address the matching
+`update_*` / `delete_*` action — read them back with `structure --action read`. `spreadsheet_props`
+is the **write side** of `overview`'s `locale` / `timeZone`. Slicer creation is out of v1 — read
+slicers via `structure --action read`, create/edit one through `batch`. See `commands.md` for every
+action's `params` keys.
 
 ## CRUD symmetry — read it back
 
@@ -228,7 +329,12 @@ gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:A10'
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!C2'
 ```
 
-The one v1 exception is **charts**: `charts --action read` returns chart *metadata only*
-(`chartId`, `title`, `type`, `anchor`), not the full spec — so a chart's spec can't be read back to
-recreate it via the typed tool. For full chart-spec fidelity, use `batch` (raw `addChart` /
-`updateChartSpec`).
+The v0.2 structural writes round-trip the same way — after `add_table` / `add_banding` /
+`set_basic_filter` / `add_filter_view` / `spreadsheet_props`, re-read with `structure --action read`
+(or `overview` for `locale`/`timeZone`) to confirm; after a `dimensions` op, `dimensions --action
+read` reports the new hidden state.
+
+The v1 exceptions are **charts** and **slicers**: `charts --action read` returns chart *metadata
+only* (`chartId`, `title`, `type`, `anchor`), not the full spec, and slicers are **read-only** (no
+typed write). For full chart-spec fidelity or slicer creation, use `batch` (raw `addChart` /
+`updateChartSpec` / `addSlicer`).

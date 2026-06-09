@@ -1,0 +1,87 @@
+{
+  "basic_filter": {
+    "range_a1": "Sheet1!A1:F500",
+    "google": {
+      "range": {
+        "sheetId": 0,
+        "startRowIndex": 0,
+        "endRowIndex": 500,
+        "startColumnIndex": 0,
+        "endColumnIndex": 6
+      },
+      "sortSpecs": [
+        {"dimensionIndex": 2, "sortOrder": "ASCENDING"}
+      ],
+      "filterSpecs": [
+        {
+          "columnIndex": 1,
+          "filterCriteria": {
+            "hiddenValues": ["Closed"],
+            "condition": {
+              "type": "NUMBER_GREATER",
+              "values": [{"userEnteredValue": "0"}]
+            }
+          }
+        }
+      ]
+    },
+    "expected": {
+      "range": "Sheet1!A1:F500",
+      "sorted": [{"col": "C", "order": "ASCENDING"}],
+      "criteria": [
+        {"col": "B", "hidden": ["Closed"], "condition": "NUMBER_GREATER(0)"}
+      ],
+      "line": "basicFilter [Sheet1!A1:F500] sort C asc | B: hide Closed, NUMBER_GREATER(0)"
+    }
+  },
+  "basic_filter_legacy_criteria": {
+    "range_a1": "Sheet1!A1:F500",
+    "google": {
+      "criteria": {
+        "1": {"hiddenValues": ["Closed"]},
+        "3": {
+          "condition": {
+            "type": "TEXT_CONTAINS",
+            "values": [{"userEnteredValue": "done"}]
+          }
+        }
+      }
+    },
+    "expected": {
+      "range": "Sheet1!A1:F500",
+      "criteria": [
+        {"col": "B", "hidden": ["Closed"]},
+        {"col": "D", "condition": "TEXT_CONTAINS(done)"}
+      ],
+      "line": "basicFilter [Sheet1!A1:F500] B: hide Closed | D: TEXT_CONTAINS(done)"
+    }
+  },
+  "filter_view": {
+    "range_a1": "Sheet1!A1:F500",
+    "google": {
+      "filterViewId": 123,
+      "title": "Open only",
+      "range": {
+        "sheetId": 0,
+        "startRowIndex": 0,
+        "endRowIndex": 500,
+        "startColumnIndex": 0,
+        "endColumnIndex": 6
+      },
+      "sortSpecs": [
+        {"dimensionIndex": 2, "sortOrder": "DESCENDING"}
+      ],
+      "filterSpecs": [
+        {"columnIndex": 1, "filterCriteria": {"hiddenValues": ["Closed"]}}
+      ]
+    },
+    "expected": {
+      "filterViewId": 123,
+      "title": "Open only",
+      "range": "Sheet1!A1:F500",
+      "sorted": [{"col": "C", "order": "DESCENDING"}],
+      "criteria": [{"col": "B", "hidden": ["Closed"]}],
+      "line": "filterView 123 \"Open only\" [Sheet1!A1:F500] sort C desc | B: hide Closed"
+    }
+  }
+}

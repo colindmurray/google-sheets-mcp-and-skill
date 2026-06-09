@@ -17,6 +17,8 @@ from . import condformat
 from .addressing import gridrange_to_a1, parse_a1
 from .errors import SheetsError, classify_google_error
 from .flatten import flatten_cell_format
+from .pivot import serialize_pivot
+from .richtext import serialize_text_runs
 from .rules import validation_to_rule
 from .service import SheetsServices
 from .values import pad_jagged
@@ -28,7 +30,7 @@ from .values import pad_jagged
 # The NARROW mask: only the cheapest length-yielding subfields of the protectedRanges /
 # conditionalFormats arrays (DESIGN §3.3). MUST NOT widen to whole rule/protected bodies.
 _OVERVIEW_FIELDS = (
-    "properties.title,"
+    "properties(title,locale,timeZone),"
     "sheets.properties("
     "sheetId,title,index,sheetType,gridProperties,tabColorStyle"
     "),"
@@ -63,7 +65,8 @@ def overview(services: SheetsServices, spreadsheet_id: str) -> dict:
     except HttpError as exc:
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
-    title = (resp.get("properties") or {}).get("title")
+    props = resp.get("properties") or {}
+    title = props.get("title")
 
     sheets_out: list[dict] = []
     for entry in resp.get("sheets", []) or []:
@@ -75,13 +78,23 @@ def overview(services: SheetsServices, spreadsheet_id: str) -> dict:
             _overview_named_range(services, spreadsheet_id, nr or {})
         )
 
-    return {
+    out: dict = {
         "ok": True,
         "spreadsheetId": spreadsheet_id,
         "title": title,
         "sheets": sheets_out,
         "namedRanges": named_ranges_out,
     }
+
+    # Spreadsheet-level locale / timeZone (§X.12) — omit when absent (token efficiency).
+    locale = props.get("locale")
+    if locale:
+        out["locale"] = locale
+    time_zone = props.get("timeZone")
+    if time_zone:
+        out["timeZone"] = time_zone
+
+    return out
 
 
 def _overview_sheet(entry: dict) -> dict:
@@ -154,6 +167,8 @@ def inspect(
     include_user_entered_format: bool = True,
     include_formulas: bool = True,
     include_validation: bool = True,
+    include_rich_text: bool = False,
+    include_pivot: bool = False,
 ) -> dict:
     """Flagship rich read: values + formulas + both formats + merges + validation (DESIGN §3.3).
 
@@ -162,6 +177,16 @@ def inspect(
     ``compact=True`` collapses identical cells into rectangular ``a1Range`` runs (carrying
     ``note`` and ``validationRule`` so compact reads do not lose them). Each cell surfaces the
     structured ``validationRule`` that round-trips into ``set_validation``.
+
+    Two OPT-IN read enrichments (off by default → base mask + base behavior unchanged, zero
+    token cost):
+    - ``include_rich_text`` (DESIGN §X.1, features #1/#8): adds ``textFormatRuns`` + ``hyperlink``
+      to the per-cell mask; a cell gains ``"runs": [TextRun, …]`` (per styled char-range
+      segment) and/or ``"hyperlink": "https://…"`` ONLY when it carries them.
+    - ``include_pivot`` (DESIGN §X.6, feature #6): adds ``pivotTable`` to the per-cell mask; the
+      pivot's anchor (top-left) cell gains ``"pivot": {…}`` ONLY when present.
+    In compact mode, two cells differing in ``runs``/``hyperlink``/``pivot`` never merge into one
+    run (``_run_key`` includes a stable repr of each).
 
     Args:
         services: The authed handle.
@@ -172,6 +197,10 @@ def inspect(
         include_user_entered_format: Include ``userEnteredFormat`` per cell.
         include_formulas: Include the cell formula when present.
         include_validation: Include validation (terse one-liner + structured rule).
+        include_rich_text: Add ``textFormatRuns`` + ``hyperlink`` to the mask; attach per-cell
+            ``runs``/``hyperlink`` only when present (§X.1). Default ``False``.
+        include_pivot: Add ``pivotTable`` to the mask; attach ``pivot`` to its anchor cell only
+            when present (§X.6). Default ``False``.
 
     Returns:
         ``{"ok": True, "spreadsheetId": ..., "sheet": ..., "range": ..., "rows": ...,
@@ -186,6 +215,8 @@ def inspect(
         include_user_entered_format=include_user_entered_format,
         include_formulas=include_formulas,
         include_validation=include_validation,
+        include_rich_text=include_rich_text,
+        include_pivot=include_pivot,
     )
 
     try:
@@ -224,6 +255,10 @@ def inspect(
         include_user_entered_format=include_user_entered_format,
         include_formulas=include_formulas,
         include_validation=include_validation,
+        include_rich_text=include_rich_text,
+        include_pivot=include_pivot,
+        services=services,
+        spreadsheet_id=spreadsheet_id,
     )
     n_rows = len(grid)
     n_cols = max((len(r) for r in grid), default=0)
@@ -259,12 +294,20 @@ def _inspect_fields(
     include_user_entered_format: bool,
     include_formulas: bool,
     include_validation: bool,
+    include_rich_text: bool = False,
+    include_pivot: bool = False,
 ) -> str:
     """Build the tight per-cell ``fields`` mask, trimmed by the include_* flags (DESIGN §3.3).
 
     ``userEnteredValue`` (the formula source) is requested only when formulas are wanted;
     ``effectiveValue``/``formattedValue`` always ride along (they carry the value), so a
     cell's value is never lost.
+
+    The OPT-IN enrichments (DESIGN §X.1 / §X.6) widen the per-cell mask ONLY when their flag is
+    set, so the base mask is unchanged (zero token cost) by default:
+    - ``include_rich_text`` → adds ``textFormatRuns`` (per-run styled segments) + ``hyperlink``
+      (cell-level link);
+    - ``include_pivot`` → adds ``pivotTable`` (the anchor cell's pivot definition).
     """
     cell_fields = ["effectiveValue", "formattedValue"]
     if include_formulas:
@@ -277,6 +320,11 @@ def _inspect_fields(
         cell_fields.append("dataValidation")
     # ``note`` is cheap and always useful (also surfaced in compact runs).
     cell_fields.append("note")
+    if include_rich_text:
+        cell_fields.append("textFormatRuns")
+        cell_fields.append("hyperlink")
+    if include_pivot:
+        cell_fields.append("pivotTable")
 
     values_mask = f"values({','.join(cell_fields)})"
     data_mask = f"data(rowData({values_mask}),startRow,startColumn)"
@@ -292,13 +340,18 @@ def _build_cell_grid(
     include_user_entered_format: bool,
     include_formulas: bool,
     include_validation: bool,
+    include_rich_text: bool = False,
+    include_pivot: bool = False,
+    services: SheetsServices | None = None,
+    spreadsheet_id: str | None = None,
 ) -> list[list[dict | None]]:
     """Build a row-major grid of per-cell structured dicts (``None`` for empty cells).
 
     Each non-empty cell carries the structured fields DESIGN §3.1 ``Cell`` defines, MINUS the
     ``a1`` key (added later, where the absolute row/col is known). An entirely-empty cell maps
     to ``None`` so the rectangle-padder and the compact run-finder can treat "absent" cells
-    uniformly.
+    uniformly. ``services``/``spreadsheet_id`` are threaded only for the pivot serializer's
+    ``source`` GridRange → A1 resolution (used solely when ``include_pivot`` is on).
     """
     grid: list[list[dict | None]] = []
     for r_row in row_data:
@@ -312,6 +365,10 @@ def _build_cell_grid(
                     include_user_entered_format=include_user_entered_format,
                     include_formulas=include_formulas,
                     include_validation=include_validation,
+                    include_rich_text=include_rich_text,
+                    include_pivot=include_pivot,
+                    services=services,
+                    spreadsheet_id=spreadsheet_id,
                 )
             )
         grid.append(row_out)
@@ -325,12 +382,17 @@ def _build_cell(
     include_user_entered_format: bool,
     include_formulas: bool,
     include_validation: bool,
+    include_rich_text: bool = False,
+    include_pivot: bool = False,
+    services: SheetsServices | None = None,
+    spreadsheet_id: str | None = None,
 ) -> dict | None:
     """Build one structured cell dict (no ``a1`` yet), or ``None`` if the cell is empty.
 
-    A cell is "empty" when it carries no value, no formula, no formatting, no note, and no
-    validation under the requested mask — those collapse to ``None`` so compact runs drop them
-    and non-compact reads pad them as blanks.
+    A cell is "empty" when it carries no value, no formula, no formatting, no note, no
+    validation, no rich-text runs, no hyperlink, and no pivot under the requested mask — those
+    collapse to ``None`` so compact runs drop them and non-compact reads pad them as blanks. The
+    rich-text/hyperlink/pivot enrichments (§X.1/§X.6) are attached ONLY when present on the cell.
     """
     out: dict = {}
 
@@ -364,6 +426,22 @@ def _build_cell(
             out["validation"] = _validation_one_liner(rule)
             out["validationRule"] = rule
 
+    if include_rich_text:
+        # textFormatRuns → per-run styled segments (attach ONLY when the cell has them, §X.1).
+        runs = serialize_text_runs(cell.get("textFormatRuns"), _cell_text(cell))
+        if runs:
+            out["runs"] = runs
+        # hyperlink is a READ-ONLY Google cell field; attach FLAT only when set (#8).
+        hyperlink = cell.get("hyperlink")
+        if isinstance(hyperlink, str) and hyperlink:
+            out["hyperlink"] = hyperlink
+
+    if include_pivot:
+        # Only the pivot's anchor (top-left) cell carries the definition (§X.6).
+        pivot = cell.get("pivotTable")
+        if isinstance(pivot, dict) and pivot:
+            out["pivot"] = serialize_pivot(pivot, services, spreadsheet_id)
+
     return out or None
 
 
@@ -386,6 +464,26 @@ def _cell_value(cell: dict) -> object | None:
         error = effective.get("errorValue")
         if isinstance(error, dict):
             return error.get("type") or error.get("message")
+    return None
+
+
+def _cell_text(cell: dict) -> str | None:
+    """The cell's plain display TEXT for slicing ``textFormatRuns`` substrings (§X.0a).
+
+    ``textFormatRuns`` index into the cell's display string, so the slicer needs the raw text
+    (not a typed number/bool). Prefers ``formattedValue`` (what the user sees); falls back to
+    ``effectiveValue.stringValue``. Returns ``None`` when the cell has no string text (the
+    serializer treats ``None`` as the empty string, yielding empty run substrings).
+    """
+    formatted = cell.get("formattedValue")
+    if isinstance(formatted, str):
+        return formatted
+
+    effective = cell.get("effectiveValue")
+    if isinstance(effective, dict):
+        string_value = effective.get("stringValue")
+        if isinstance(string_value, str):
+            return string_value
     return None
 
 
@@ -466,9 +564,11 @@ def _flatten_grid_to_cells(
 def _run_key(cell: dict | None) -> tuple:
     """A hashable identity key for a cell so two equal cells merge into one run.
 
-    Two cells merge iff their ``value``, ``formula``, ``format``, ``note``, AND
-    ``validationRule`` are all identical (DESIGN §3.3). ``None`` (empty) cells never merge
-    with a non-empty cell and are dropped entirely from runs.
+    Two cells merge iff their ``value``, ``formula``, ``format``, ``note``, ``validationRule``,
+    AND the rich-text ``runs`` / ``hyperlink`` / ``pivot`` enrichments are all identical (DESIGN
+    §3.3, §X.1). ``None`` (empty) cells never merge with a non-empty cell and are dropped
+    entirely from runs. The runs/hyperlink/pivot keys are absent on cells read without those
+    flags, so the key degenerates to the base identity (no behavior change by default).
     """
     if cell is None:
         return ("__empty__",)
@@ -478,6 +578,9 @@ def _run_key(cell: dict | None) -> tuple:
         _stable_repr(_run_format(cell)),
         cell.get("note"),
         _stable_repr(cell.get("validationRule")),
+        _stable_repr(cell.get("runs")),
+        cell.get("hyperlink"),
+        _stable_repr(cell.get("pivot")),
     )
 
 
@@ -586,7 +689,8 @@ def _make_run(
 
     The run carries ``a1Range`` (a bare ``"A1:B2"`` with no sheet prefix), ``value``,
     ``formula`` (``None`` when the cell has none), ``format`` (the §3.3 single format), and —
-    only when set — ``note`` and ``validationRule``.
+    only when set — ``note``, ``validationRule``, and the §X.1/§X.6 enrichments ``runs`` /
+    ``hyperlink`` / ``pivot``.
     """
     # A run is ALWAYS rendered as a "lo:hi" rectangle, even when it is a single cell
     # (DESIGN §3.3: a 1x1 run degenerates to e.g. "D7:D7", not "D7").
@@ -608,6 +712,18 @@ def _make_run(
     validation_rule = cell.get("validationRule")
     if validation_rule:
         run["validationRule"] = validation_rule
+    # Rich-text / hyperlink / pivot enrichments (§X.1/§X.6) ride the run only when present, so
+    # compact reads never silently lose them (cells differing here never merged in the first
+    # place, per ``_run_key``).
+    runs = cell.get("runs")
+    if runs:
+        run["runs"] = runs
+    hyperlink = cell.get("hyperlink")
+    if hyperlink:
+        run["hyperlink"] = hyperlink
+    pivot = cell.get("pivot")
+    if pivot:
+        run["pivot"] = pivot
     return run
 
 

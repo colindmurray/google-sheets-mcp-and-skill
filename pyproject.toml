@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "google-sheets-mcp-and-skill"
-version = "0.1.0"
+version = "0.2.0"
 description = "Best-in-class Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness (values + formulas, cell formatting, conditional-format rules) as the thesis."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -57,4 +57,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "live: hits the real Google Sheets API (needs creds + GSHEETS_LIVE=1)",
+    "tests_boundary_guard: selection keyword for the subprocess boundary-guard tests (not a behavioral marker)",
 ]

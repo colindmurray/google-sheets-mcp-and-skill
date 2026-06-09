@@ -125,6 +125,10 @@ class Cell(_Sub):
     note: Optional[str] = None
     validation: Optional[str] = None
     validationRule: Optional[ValidationRule] = None
+    # v0.2 rich reads (DESIGN §X.1/§X.6): present per-cell ONLY when the cell carries them.
+    runs: Optional[list[TextRun]] = None
+    hyperlink: Optional[str] = None
+    pivot: Optional[Pivot] = None
 
 
 class Run(_Sub):
@@ -141,6 +145,11 @@ class Run(_Sub):
     format: Optional[CellFormat] = None
     note: Optional[str] = None
     validationRule: Optional[ValidationRule] = None
+    # v0.2 rich reads (DESIGN §X.1/§X.6): cells differing in these never merge into one run, so a
+    # surviving run carries them ONLY when its cells all share them. Present only when set.
+    runs: Optional[list[TextRun]] = None
+    hyperlink: Optional[str] = None
+    pivot: Optional[Pivot] = None
 
 
 class OverviewSheet(_Sub):
@@ -198,6 +207,13 @@ class SheetStructure(_Sub):
     tabColor: Optional[str] = None
     protectedRanges: Optional[list[ProtectedRange]] = None
     dimensionGroups: Optional[list[DimensionGroup]] = None
+    # v0.2 sheet-scoped structural reads (DESIGN §X.3/§X.4/§X.9/§X.16); each present only when
+    # the sheet carries it. ``basicFilter`` is a single object (or null); the rest are lists.
+    tables: Optional[list["Table"]] = None
+    basicFilter: Optional["BasicFilter"] = None
+    filterViews: Optional[list["FilterView"]] = None
+    bandedRanges: Optional[list["Banding"]] = None
+    slicers: Optional[list["Slicer"]] = None
 
 
 class CFCondition(_Sub):
@@ -297,6 +313,257 @@ class NewIds(_Sub):
     metadataIds: list[int] = []
 
 
+# --- v0.2 extension sub-models (DESIGN §Extensions / §X.0) ------------------------------
+# These mirror the new pure-core serializers (richtext/pivot/tables/filters/banding/slicers/
+# comments). Each serializer emits a flat, omit-when-absent dict that ALSO carries a terse
+# ``line`` (condformat-style) for the human/AI-facing rendering; ``extra="allow"`` tolerates the
+# ``line`` key while the documented structured fields stay pinned + typed for ``outputSchema``.
+
+
+class TextRun(_Sub):
+    """One styled char-range segment of a cell's ``textFormatRuns`` (DESIGN §X.0a).
+
+    Mirrors ``core.richtext.serialize_text_runs`` per-run output: ``start`` is the 0-based char
+    offset, ``text`` is the substring ``[start..nextStart)``, ``format`` is the flattened
+    run-level ``textFormat`` subset (only when styled), ``link`` is the run-level link URI (which
+    TAKES PRECEDENCE over a cell-level ``hyperlink``). ``format``/``link`` are present only when
+    set (omit-when-absent).
+    """
+
+    start: Optional[int] = None
+    text: Optional[str] = None
+    format: Optional[CellFormat] = None
+    link: Optional[str] = None
+
+
+class PivotField(_Sub):
+    """One pivot ROW or COLUMN grouping (DESIGN §X.0b ``rows``/``columns`` entry).
+
+    Mirrors ``core.pivot``'s flattened ``PivotGroup``: ``field`` is the source column's display
+    name (resolved from a header/data-source ref when present), ``sourceColumnOffset`` is its
+    0-based offset into the pivot ``source``, ``showTotals``/``sortOrder`` are present only when
+    set.
+    """
+
+    field: Optional[str] = None
+    sourceColumnOffset: Optional[int] = None
+    showTotals: Optional[bool] = None
+    sortOrder: Optional[str] = None
+
+
+class PivotValue(_Sub):
+    """One pivot VALUE / aggregation (DESIGN §X.0b ``values`` entry).
+
+    Mirrors ``core.pivot``'s flattened ``PivotValue``: ``name`` is the value's display label,
+    ``sourceColumnOffset`` its 0-based source offset, ``summarize`` the ``summarizeFunction``
+    (e.g. ``SUM``). ``field``/``summarize`` are present only when known.
+    """
+
+    name: Optional[str] = None
+    sourceColumnOffset: Optional[int] = None
+    field: Optional[str] = None
+    summarize: Optional[str] = None
+
+
+class PivotFilter(_Sub):
+    """One flattened pivot filter criterion (DESIGN §X.0b ``filters`` entry).
+
+    Mirrors ``core.pivot``'s flattened ``criteria`` map entry: keyed by ``sourceColumnOffset``
+    with the normalized ``visibleValues`` it constrains to.
+    """
+
+    sourceColumnOffset: Optional[int] = None
+    visibleValues: Optional[list[Any]] = None
+
+
+class Pivot(_Sub):
+    """A flattened pivot-table definition, attached to the anchor cell only (DESIGN §X.0b).
+
+    Mirrors ``core.pivot.serialize_pivot``: ``source`` is the data ``GridRange`` resolved to A1,
+    ``rows``/``columns`` are :class:`PivotField` lists, ``values`` a :class:`PivotValue` list,
+    ``filters`` a :class:`PivotFilter` list, ``valueLayout`` is ``HORIZONTAL``/``VERTICAL``. The
+    serializer also carries a terse ``line`` (kept by ``extra="allow"``).
+    """
+
+    source: Optional[str] = None
+    rows: Optional[list[PivotField]] = None
+    columns: Optional[list[PivotField]] = None
+    values: Optional[list[PivotValue]] = None
+    filters: Optional[list[PivotFilter]] = None
+    valueLayout: Optional[str] = None
+    line: Optional[str] = None
+
+
+class TableColumn(_Sub):
+    """One native-table column (DESIGN §X.0c ``columns`` entry).
+
+    Mirrors ``core.tables.serialize_table``'s per-column dict: ``name``, ``type`` (the
+    ``columnType`` enum TEXT|DOUBLE|CURRENCY|PERCENT|DATE|TIME|DATETIME|DROPDOWN|CHECKBOX|
+    SMART_CHIP|RATING), and ``validation`` (a DROPDOWN column's ``ValidationRule`` one-liner,
+    present only when set).
+    """
+
+    name: Optional[str] = None
+    type: Optional[str] = None
+    validation: Optional[str] = None
+
+
+class Table(_Sub):
+    """A native Table (``Table``) read shape (DESIGN §X.0c).
+
+    Mirrors ``core.tables.serialize_table``: ``tableId``/``name``, ``range`` (the table's
+    ``GridRange`` resolved to A1), and a :class:`TableColumn` list. A terse ``line`` rides along
+    (kept by ``extra="allow"``).
+    """
+
+    tableId: Optional[str] = None
+    name: Optional[str] = None
+    range: Optional[str] = None
+    columns: Optional[list[TableColumn]] = None
+    line: Optional[str] = None
+
+
+class SortSpec(_Sub):
+    """One flattened sort spec inside a basic filter / filter view (DESIGN §X.0d).
+
+    Mirrors ``core.filters``'s flattened ``SortSpec``: ``col`` is the column LETTER (offset → A1
+    col), ``order`` is ``ASCENDING``/``DESCENDING``.
+    """
+
+    col: Optional[str] = None
+    order: Optional[str] = None
+
+
+class FilterCriterion(_Sub):
+    """One flattened per-column filter criterion (DESIGN §X.0d ``criteria`` entry).
+
+    Mirrors ``core.filters``'s flattened ``FilterCriteria``: ``col`` is the column LETTER,
+    ``hidden``/``visible`` are the normalized hidden/visible value lists (present only when set),
+    ``condition`` is the ``BooleanCondition`` serialized via the SAME condformat condition
+    serializer (present only when set).
+    """
+
+    col: Optional[str] = None
+    hidden: Optional[list[Any]] = None
+    visible: Optional[list[Any]] = None
+    condition: Optional[str] = None
+
+
+class BasicFilter(_Sub):
+    """A sheet's single basic filter, or ``null`` when none (DESIGN §X.0d).
+
+    Mirrors ``core.filters.serialize_basic_filter``: ``range`` (A1), ``sorted`` (:class:`SortSpec`
+    list), ``criteria`` (:class:`FilterCriterion` list). A terse ``line`` rides along.
+    """
+
+    range: Optional[str] = None
+    sorted: Optional[list[SortSpec]] = None
+    criteria: Optional[list[FilterCriterion]] = None
+    line: Optional[str] = None
+
+
+class FilterView(_Sub):
+    """One saved filter view (DESIGN §X.0d ``filterViews`` entry).
+
+    Mirrors ``core.filters.serialize_filter_view``: ``filterViewId``/``title``, ``range`` (A1),
+    ``sorted`` + ``criteria`` (as in :class:`BasicFilter`). A terse ``line`` rides along.
+    """
+
+    filterViewId: Optional[int] = None
+    title: Optional[str] = None
+    range: Optional[str] = None
+    sorted: Optional[list[SortSpec]] = None
+    criteria: Optional[list[FilterCriterion]] = None
+    line: Optional[str] = None
+
+
+class BandingStyle(_Sub):
+    """The per-axis band colors of a banded range (DESIGN §X.0e ``rowBanding``/``columnBanding``).
+
+    Mirrors ``core.banding``'s flattened band: each slot is a flattened hex (or ``null`` when the
+    band has no color for that slot). ``header``/``footer`` are the header/footer band colors;
+    ``first``/``second`` alternate the body rows/columns.
+    """
+
+    header: Optional[str] = None
+    first: Optional[str] = None
+    second: Optional[str] = None
+    footer: Optional[str] = None
+
+
+class Banding(_Sub):
+    """One banded range (``bandedRanges`` entry) (DESIGN §X.0e).
+
+    Mirrors ``core.banding.serialize_banding``: ``bandedRangeId``, ``range`` (A1), and the
+    per-axis :class:`BandingStyle` (``rowBanding`` and/or ``columnBanding``, each ``null`` when
+    absent). A terse ``line`` rides along.
+    """
+
+    bandedRangeId: Optional[int] = None
+    range: Optional[str] = None
+    rowBanding: Optional[BandingStyle] = None
+    columnBanding: Optional[BandingStyle] = None
+    line: Optional[str] = None
+
+
+class SlicerAnchor(_Sub):
+    """A slicer's overlay anchor cell (DESIGN §X.0f ``anchor``)."""
+
+    sheet: Optional[str] = None
+    row: Optional[int] = None
+    col: Optional[int] = None
+
+
+class Slicer(_Sub):
+    """One slicer (``slicers`` entry) (DESIGN §X.0f).
+
+    Mirrors ``core.slicers.serialize_slicer``: ``slicerId``/``title``, ``range`` (the filtered
+    data range in A1), ``columnIndex`` (the column the slicer filters), ``anchor`` (overlay
+    position), and ``criteria`` (a one-liner when set). A terse ``line`` rides along.
+    """
+
+    slicerId: Optional[int] = None
+    title: Optional[str] = None
+    range: Optional[str] = None
+    columnIndex: Optional[int] = None
+    anchor: Optional[SlicerAnchor] = None
+    criteria: Optional[str] = None
+    line: Optional[str] = None
+
+
+class CommentReply(_Sub):
+    """One reply on a Drive comment (DESIGN §X.0g ``replies`` entry).
+
+    Mirrors ``core.comments``'s flattened reply: ``author`` (display name), ``content``, and an
+    optional ``action`` (e.g. ``resolve``). All present only when set.
+    """
+
+    author: Optional[str] = None
+    content: Optional[str] = None
+    action: Optional[str] = None
+
+
+class Comment(_Sub):
+    """One Drive comment on the spreadsheet file (DESIGN §X.0g).
+
+    Mirrors ``core.comments.serialize_comment``: ``id``, ``author`` (display name), ``content``,
+    ``created``/``modified`` timestamps, ``resolved`` flag, ``quoted`` snippet (when any),
+    ``anchorRaw`` (the OPAQUE document-level anchor — NEVER an A1 range), and a
+    :class:`CommentReply` list. A terse ``line`` rides along.
+    """
+
+    id: Optional[str] = None
+    author: Optional[str] = None
+    content: Optional[str] = None
+    created: Optional[str] = None
+    modified: Optional[str] = None
+    resolved: Optional[bool] = None
+    quoted: Optional[str] = None
+    anchorRaw: Optional[str] = None
+    replies: Optional[list[CommentReply]] = None
+    line: Optional[str] = None
+
+
 # --- Per-core-function result models ---------------------------------------------------
 
 
@@ -305,6 +572,9 @@ class OverviewResult(_Result):
 
     spreadsheetId: Optional[str] = None
     title: Optional[str] = None
+    # v0.2 spreadsheet-level locale/timeZone (DESIGN §X.12); present only when set.
+    locale: Optional[str] = None
+    timeZone: Optional[str] = None
     sheets: list[OverviewSheet] = []
     namedRanges: list[NamedRange] = []
 
@@ -626,6 +896,133 @@ class BatchResult(_Result):
         return f"batch: {len(self.replies)} reply(ies){new}"
 
 
+class DataOpsResult(_Result):
+    """Mirror of ``core.data_ops`` (DESIGN §X.2/§X.11/§X.14/§X.15).
+
+    One dispatch fn over the one-request ``batchUpdate`` data verbs; the return is action-specific
+    so every summary field below is optional and ``extra="allow"`` carries any verb-specific key
+    not pinned here. ``action`` is always present; the scope (``range`` / ``source`` + ``destination``
+    / ``sheet`` / ``allSheets``) and the count summary depend on the verb:
+
+    * ``find_replace`` → ``occurrencesChanged``/``valuesChanged``/``formulasChanged``/
+      ``rowsChanged``/``sheetsChanged`` (+ the chosen scope);
+    * ``delete_duplicates`` → ``duplicatesRemoved``;
+    * ``trim_whitespace``/``text_to_columns`` → ``cellsChangedCount``;
+    * ``sort_range`` → echoed ``specs``;
+    * ``copy_paste``/``cut_paste``/``auto_fill`` → ``source``/``destination`` (or ``range``).
+    """
+
+    spreadsheetId: Optional[str] = None
+    action: Optional[str] = None
+    # scope (mutually-exclusive across verbs)
+    range: Optional[str] = None
+    sheet: Optional[str] = None
+    allSheets: Optional[bool] = None
+    source: Optional[str] = None
+    destination: Optional[str] = None
+    specs: Optional[list[dict[str, Any]]] = None
+    # action-specific count summaries (present per verb)
+    occurrencesChanged: Optional[int] = None
+    valuesChanged: Optional[int] = None
+    formulasChanged: Optional[int] = None
+    rowsChanged: Optional[int] = None
+    sheetsChanged: Optional[int] = None
+    duplicatesRemoved: Optional[int] = None
+    cellsChangedCount: Optional[int] = None
+
+    @property
+    def terse(self) -> str:
+        scope = self.range or (
+            f"{self.source} -> {self.destination}"
+            if self.source and self.destination
+            else (self.sheet or ("all sheets" if self.allSheets else None))
+        )
+        counts: list[str] = []
+        for label, val in (
+            ("occurrences", self.occurrencesChanged),
+            ("values", self.valuesChanged),
+            ("formulas", self.formulasChanged),
+            ("rows", self.rowsChanged),
+            ("sheets", self.sheetsChanged),
+            ("duplicates", self.duplicatesRemoved),
+            ("cells", self.cellsChangedCount),
+        ):
+            if val:
+                counts.append(f"{val} {label}")
+        head = f"data_ops {self.action}"
+        if scope:
+            head += f" on {scope}"
+        return f"{head}: {', '.join(counts)}" if counts else head
+
+
+class DimensionsResult(_Result):
+    """Mirror of ``core.dimensions`` (DESIGN §X.7/§X.10/§X.13).
+
+    Row/column ops on one tab. ``action``/``sheet`` are always present on a write; the echoed
+    geometry (``dimension``/``start``/``end`` + ``destinationIndex``/``length``/``pixelSize``/
+    ``hiddenByUser``) depends on the verb. The ``read`` action returns ``hiddenRows``/``hiddenCols``
+    (absolute 0-based indices) instead. All fields optional so one model mirrors every verb.
+    """
+
+    spreadsheetId: Optional[str] = None
+    action: Optional[str] = None
+    sheet: Optional[str] = None
+    dimension: Optional[str] = None
+    start: Optional[int] = None
+    end: Optional[int] = None
+    destinationIndex: Optional[int] = None
+    length: Optional[int] = None
+    pixelSize: Optional[int] = None
+    hiddenByUser: Optional[bool] = None
+    # read shape
+    hiddenRows: Optional[list[int]] = None
+    hiddenCols: Optional[list[int]] = None
+
+    @property
+    def terse(self) -> str:
+        if self.action == "read":
+            nr = len(self.hiddenRows or [])
+            nc = len(self.hiddenCols or [])
+            return f"dimensions read [{self.sheet}]: {nr} hidden row(s), {nc} hidden col(s)"
+        span = ""
+        if self.dimension is not None:
+            span = f" {self.dimension}"
+            if self.start is not None and self.end is not None:
+                span += f"[{self.start}:{self.end}]"
+            elif self.length is not None:
+                span += f" x{self.length}"
+        extra = ""
+        if self.destinationIndex is not None:
+            extra = f" -> {self.destinationIndex}"
+        return f"dimensions {self.action}{span} on {self.sheet}{extra}"
+
+
+class CommentsResult(_Result):
+    """Mirror of ``core.comments`` (DESIGN §X.5, read-only v1).
+
+    Drive-API comments on the spreadsheet file (NOT the Sheets API). ``comments`` is a flat list
+    of :class:`Comment` (each with flattened author, ``quoted`` snippet, opaque ``anchorRaw``, and
+    replies).
+    """
+
+    spreadsheetId: Optional[str] = None
+    comments: list[Comment] = []
+
+    @property
+    def terse(self) -> str:
+        if not self.comments:
+            return "no comments"
+        lines = [f"{len(self.comments)} comment(s)"]
+        for c in self.comments:
+            state = "resolved" if c.resolved else "open"
+            n = len(c.replies or [])
+            reply = f", {n} reply(ies)" if n else ""
+            lines.append(
+                f"  {c.id} by {c.author or '?'}: {(c.content or '')!r} ({state}{reply})"
+            )
+        return "\n".join(lines)
+
+
 # --- core-fn -> model registry + wrapper -----------------------------------------------
 
 #: Maps a core function NAME to its mirror result model. The MCP adapter uses this (or the
@@ -647,6 +1044,10 @@ RESULT_MODELS: dict[str, type[_Result]] = {
     "metadata": MetadataResult,
     "charts": ChartsResult,
     "batch": BatchResult,
+    # v0.2 extension top-level core fns (DESIGN §Extensions).
+    "data_ops": DataOpsResult,
+    "dimensions": DimensionsResult,
+    "comments": CommentsResult,
 }
 
 
@@ -762,6 +1163,62 @@ class CFBatchItem(TypedDict, total=False):
     rule: Any  # body line (str) OR structured rule dict
 
 
+class DataOpsParams(TypedDict, total=False):
+    """Union of all ``data_ops`` per-action ``params`` keys (DESIGN §X.2/§X.11/§X.14/§X.15).
+
+    Advisory shape (core validates strictly; an unknown key → ``unknown_param``). The valid
+    subset depends on ``action`` — e.g. ``find_replace`` uses ``find``/``replacement``/scope,
+    ``copy_paste`` uses ``source``/``destination``/``pasteType``.
+    """
+
+    find: str
+    replacement: str
+    searchByRegex: bool
+    matchCase: bool
+    matchEntireCell: bool
+    includeFormulas: bool
+    range: str
+    sheet: str
+    allSheets: bool
+    comparisonColumns: list[str]
+    specs: list[dict[str, str]]
+    delimiter: str
+    delimiterType: Literal[
+        "COMMA", "SEMICOLON", "PERIOD", "SPACE", "CUSTOM", "AUTODETECT"
+    ]
+    useAlternateSeries: bool
+    source: str
+    destination: str
+    pasteType: Literal[
+        "PASTE_NORMAL",
+        "PASTE_VALUES",
+        "PASTE_FORMAT",
+        "PASTE_FORMULA",
+        "PASTE_NO_BORDERS",
+        "PASTE_CONDITIONAL_FORMATTING",
+        "PASTE_DATA_VALIDATION",
+    ]
+    pasteOrientation: Literal["NORMAL", "TRANSPOSE"]
+
+
+class DimensionsParams(TypedDict, total=False):
+    """Union of all ``dimensions`` per-action ``params`` keys (DESIGN §X.7/§X.10/§X.13).
+
+    Advisory shape (core validates strictly). Every op targets one tab (the ``sheet`` arg);
+    indices are 0-based half-open.
+    """
+
+    dimension: Literal["ROWS", "COLUMNS"]
+    start: int
+    end: int
+    inheritFromBefore: bool
+    destinationIndex: int
+    length: int
+    pixelSize: int
+    hiddenByUser: bool
+    range: str
+
+
 __all__ = [
     # per-core-fn result models
     "OverviewResult",
@@ -779,6 +1236,10 @@ __all__ = [
     "MetadataResult",
     "ChartsResult",
     "BatchResult",
+    # v0.2 extension result models (DESIGN §Extensions)
+    "DataOpsResult",
+    "DimensionsResult",
+    "CommentsResult",
     # shared sub-models
     "CellFormat",
     "Cell",
@@ -799,6 +1260,24 @@ __all__ = [
     "ChartMeta",
     "CFMutationResult",
     "NewIds",
+    # v0.2 extension sub-models (DESIGN §X.0)
+    "TextRun",
+    "PivotField",
+    "PivotValue",
+    "PivotFilter",
+    "Pivot",
+    "TableColumn",
+    "Table",
+    "SortSpec",
+    "FilterCriterion",
+    "BasicFilter",
+    "FilterView",
+    "BandingStyle",
+    "Banding",
+    "SlicerAnchor",
+    "Slicer",
+    "CommentReply",
+    "Comment",
     # helpers + registry
     "to_model",
     "model_for",
@@ -811,4 +1290,6 @@ __all__ = [
     "ChartSpec",
     "WriteValuesItem",
     "CFBatchItem",
+    "DataOpsParams",
+    "DimensionsParams",
 ]

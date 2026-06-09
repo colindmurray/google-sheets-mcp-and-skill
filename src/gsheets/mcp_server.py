@@ -32,6 +32,9 @@ from .core import (
     batch as _batch,
     charts as _charts,
     clear as _clear,
+    comments as _comments,
+    data_ops as _data_ops,
+    dimensions as _dimensions,
     format as _format,
     inspect as _inspect,
     manage_sheets as _manage_sheets,
@@ -261,6 +264,8 @@ def sheets_inspect(
     include_user_entered_format: bool = True,
     include_formulas: bool = True,
     include_validation: bool = True,
+    include_rich_text: bool = False,
+    include_pivot: bool = False,
 ) -> models.InspectResult:
     """Read a range RICHLY: values AND formulas, both userEntered & effective formats, merges,
     notes, and structured data-validation — in one call, with a tight fields mask.
@@ -269,7 +274,10 @@ def sheets_inspect(
     result of conditional formatting); ``userEnteredFormat`` shows the author's intent.
     ``validationRule`` round-trips straight back into ``sheets_set_validation``. Set
     ``compact=True`` to collapse identical cells into rectangular runs (big token savings on
-    repetitive blocks); set the ``include_*`` flags to False to trim the payload further.
+    repetitive blocks); set the ``include_*`` flags to False to trim the payload further. Opt
+    into ``include_rich_text=True`` to surface per-cell rich-text runs + hyperlinks (segments
+    styled differently within one cell, plus the cell's link), and ``include_pivot=True`` to
+    surface a pivot-table definition on its anchor cell — both off by default (zero token cost).
 
     Args:
         spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
@@ -279,11 +287,17 @@ def sheets_inspect(
         include_user_entered_format: Include the author-intent (userEntered) format.
         include_formulas: Include each cell's ``formula`` when it has one.
         include_validation: Include the terse ``validation`` line + structured ``validationRule``.
+        include_rich_text: Attach ``runs`` (per-character styled segments) + ``hyperlink`` to a
+            cell ONLY when it has them (off by default — adds ``textFormatRuns``/``hyperlink`` to
+            the read mask).
+        include_pivot: Attach a flattened ``pivot`` definition to a pivot table's anchor cell
+            ONLY when present (off by default — adds ``pivotTable`` to the read mask).
 
     Returns:
         ``{ok, spreadsheetId, sheet, range, rows, cols, cells:[{a1,value,formula,
-        userEnteredFormat,effectiveFormat,note,validation,validationRule}], merges, compact}``
-        (``cells`` becomes ``runs`` when ``compact=True``).
+        userEnteredFormat,effectiveFormat,note,validation,validationRule,runs,hyperlink,pivot}],
+        merges, compact}`` (``cells`` becomes ``runs`` when ``compact=True``; ``runs``/
+        ``hyperlink``/``pivot`` present per-cell only when set).
     """
     return _call(
         models.InspectResult,
@@ -296,6 +310,8 @@ def sheets_inspect(
         include_user_entered_format=include_user_entered_format,
         include_formulas=include_formulas,
         include_validation=include_validation,
+        include_rich_text=include_rich_text,
+        include_pivot=include_pivot,
     )
 
 
@@ -373,6 +389,49 @@ def sheets_read_conditional_formats(
         _services(ctx),
         spreadsheet_id,
         sheet,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Read comments (Drive)",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+    tags={"read"},
+)
+def sheets_comments(
+    spreadsheet_id: str,
+    ctx: Context,
+    include_resolved: bool = True,
+    include_deleted: bool = False,
+) -> models.CommentsResult:
+    """Read the threaded COMMENTS on a spreadsheet — author, text, resolved state, and replies.
+
+    Comments live on the Drive file, not the Sheets grid, so this uses the Drive API (requires a
+    Drive scope; if none is granted you get a clear ``drive_unavailable`` error — re-run with
+    ``GSHEETS_SCOPES=broad``). Each comment flattens to author/content/created/modified, a
+    ``resolved`` flag, an optional ``quoted`` snippet, and its ``replies``. The Drive ``anchor``
+    is opaque and document-specific — surfaced raw as ``anchorRaw``, never mapped to a cell.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
+        include_resolved: Include resolved comments (default True); set False to see only open ones.
+        include_deleted: Include deleted comments (default False).
+
+    Returns:
+        ``{ok, spreadsheetId, comments:[{id, author, content, created, modified, resolved,
+        quoted, anchorRaw, replies:[{author, content, action}], line}]}``, where ``line`` looks
+        like 'comment AAAA by Jane Doe: "please verify Q3" (open, 1 reply)'.
+    """
+    return _call(
+        models.CommentsResult,
+        _comments,
+        _services(ctx),
+        spreadsheet_id,
+        include_resolved=include_resolved,
+        include_deleted=include_deleted,
     )
 
 
@@ -667,27 +726,55 @@ def sheets_structure(
     params: dict | None = None,
 ) -> models.StructureResult:
     """Read OR modify a spreadsheet's structure: merges, named/protected ranges, frozen
-    rows/cols, tab color, and row/column groups.
+    rows/cols, tab color, row/column groups, native Tables, banding, basic filter & filter
+    views, and spreadsheet-level properties (title/locale/timeZone).
 
     ``action="read"`` returns the full structural picture (``sheet`` optional — omit for every
-    tab; ``sheets`` is always a list). The mutating actions target ONE tab and REQUIRE ``sheet``.
-    Some paths are destructive (unmerge, delete_named, unprotect). Each action consumes only its
-    documented ``params`` keys; unknown keys are rejected.
+    tab; ``sheets`` is always a list). Each per-sheet entry also carries ``tables``,
+    ``basicFilter``, ``filterViews``, ``bandedRanges``, and ``slicers`` (each serialized into a
+    terse round-trippable struct). The mutating actions target ONE tab and REQUIRE ``sheet``
+    (EXCEPT ``spreadsheet_props``, which is spreadsheet-scoped and needs NEITHER ``sheet`` nor
+    ``range``). Range-scoped writes (merge/add_named/protect/add_table/add_banding/
+    set_basic_filter/add_filter_view) also REQUIRE ``range``. Some paths are destructive
+    (unmerge, delete_named, unprotect, delete_table, delete_banding, delete_filter_view,
+    clear_basic_filter). Each action consumes only its documented ``params`` keys; unknown keys
+    are rejected.
 
     Args:
         spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
         action: "read" | "merge" | "unmerge" | "add_named" | "delete_named" | "protect" |
-            "unprotect" | "freeze" | "tab_color" | "group" | "ungroup".
-        sheet: Tab name (optional for read; REQUIRED for every mutate).
-        range: An A1 range (for merge/unmerge/add_named/protect).
+            "unprotect" | "freeze" | "tab_color" | "group" | "ungroup" |
+            "add_table" | "update_table" | "delete_table" |
+            "add_banding" | "update_banding" | "delete_banding" |
+            "set_basic_filter" | "clear_basic_filter" |
+            "add_filter_view" | "update_filter_view" | "delete_filter_view" |
+            "spreadsheet_props".
+        sheet: Tab name (optional for read; REQUIRED for every mutate EXCEPT spreadsheet_props).
+        range: An A1 range (for merge/unmerge/add_named/protect and add_table/add_banding/
+            set_basic_filter/add_filter_view; also accepted by update_table/update_banding/
+            update_filter_view to re-anchor).
         params: Action-specific, e.g. merge {"mergeType": "MERGE_ALL"}; add_named {"name": "x"};
             protect {"description", "editors", "warningOnly"}; freeze {"rows": 1, "cols": 2};
-            tab_color {"color": "#4285F4"}; group/ungroup {"dimension": "ROWS", "start", "end"}.
+            tab_color {"color": "#4285F4"}; group/ungroup {"dimension": "ROWS", "start", "end"};
+            add_table {"name": "Sales", "columns": [{"name", "type", "validation"?}, ...]} (a
+            DROPDOWN column needs a "ONE_OF_LIST(...)" validation); update_table {"tableId",
+            "name"?, "columns"?, "range"?}; delete_table {"tableId"};
+            add_banding {"rowBanding"?: {"header", "first", "second", "footer"}, "columnBanding"?}
+            (hex colors); update_banding {"bandedRangeId", "rowBanding"?, "columnBanding"?,
+            "range"?}; delete_banding {"bandedRangeId"};
+            set_basic_filter {"sorted"?: [{"col": "C", "order": "ASCENDING"}], "criteria"?:
+            [{"col": "B", "hidden"?, "condition"?}]}; clear_basic_filter {};
+            add_filter_view {"title", "sorted"?, "criteria"?}; update_filter_view {"filterViewId",
+            "title"?, "range"?, "sorted"?, "criteria"?}; delete_filter_view {"filterViewId"};
+            spreadsheet_props {"title"?, "locale"?, "timeZone"?} (no sheet/range — auto fields
+            mask from the keys you set).
 
     Returns:
         read -> ``{ok, spreadsheetId, namedRanges, sheets:[{sheet, sheetId, merges, frozenRows,
-        frozenCols, tabColor, protectedRanges, dimensionGroups}]}``; mutate -> ``{ok, ...
-        affected ids/ranges}``.
+        frozenCols, tabColor, protectedRanges, dimensionGroups, tables, basicFilter, filterViews,
+        bandedRanges, slicers}]}``; mutate -> ``{ok, spreadsheetId, action, ...affected
+        ids/ranges}`` — create actions surface the new id (``tableId``/``bandedRangeId``/
+        ``filterViewId``), spreadsheet_props echoes the updated properties.
     """
     return _call(
         models.StructureResult,
@@ -797,6 +884,107 @@ def sheets_metadata(
         location=location,
         visibility=visibility,
         metadata_id=metadata_id,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Data operations",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    tags={"write"},
+)
+def sheets_data_ops(
+    spreadsheet_id: str,
+    action: str,
+    ctx: Context,
+    params: dict | None = None,
+) -> models.DataOpsResult:
+    """Run a single bulk DATA operation: find/replace, dedupe, trim, sort, split, fill, or paste.
+
+    One typed entry for the high-value ``batchUpdate`` data verbs (so you needn't drop to
+    ``sheets_batch``). Some are destructive: ``delete_duplicates`` removes rows, ``cut_paste``
+    moves data, and ``find_replace`` rewrites cells in bulk — confirm scope before running. NOT
+    idempotent (each call re-applies). Each action consumes only its documented ``params`` keys;
+    unknown keys are rejected. All ranges are A1.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
+        action: "find_replace" | "delete_duplicates" | "trim_whitespace" | "sort_range" |
+            "text_to_columns" | "auto_fill" | "copy_paste" | "cut_paste".
+        params: Action-specific, e.g. find_replace {"find": "old", "replacement": "new",
+            "range": "Sheet1!A:A"} (exactly one scope of range/sheet/allSheets);
+            delete_duplicates {"range": "Sheet1!A1:F100", "comparisonColumns": ["A", "B"]};
+            sort_range {"range": "Sheet1!A2:F100", "specs": [{"col": "B", "order": "ASCENDING"}]};
+            copy_paste {"source": "Sheet1!A1:B2", "destination": "Sheet1!D1", "pasteType":
+            "PASTE_VALUES"}.
+
+    Returns:
+        ``{ok, spreadsheetId, action, ...verb-specific summary...}`` — e.g. find_replace ->
+        ``occurrencesChanged``/``valuesChanged``/``formulasChanged``; delete_duplicates ->
+        ``duplicatesRemoved``; trim_whitespace -> ``cellsChangedCount``.
+    """
+    return _call(
+        models.DataOpsResult,
+        _data_ops,
+        _services(ctx),
+        spreadsheet_id,
+        action=action,
+        params=params,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Row/column dimensions",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+        openWorldHint=True,
+    ),
+    tags={"write"},
+)
+def sheets_dimensions(
+    spreadsheet_id: str,
+    action: str,
+    sheet: str,
+    ctx: Context,
+    params: dict | None = None,
+) -> models.DimensionsResult:
+    """Insert, delete, move, append, auto-resize, or set props on ROWS/COLUMNS — or read hidden ones.
+
+    Distinct from ``sheets_manage_sheets`` (which is tab-level); this is the row/column dimension
+    surface. ``delete`` is destructive (drops rows/cols and their data). ``read`` is a cheap,
+    safe query that returns which rows/cols are hidden. Every action targets ONE tab, so ``sheet``
+    is required. All start/end indices are 0-based half-open. Each action consumes only its
+    documented ``params`` keys; unknown keys are rejected.
+
+    Args:
+        spreadsheet_id: The spreadsheet ID, e.g. "<YOUR_SPREADSHEET_ID>".
+        action: "insert" | "delete" | "move" | "append" | "auto_resize" | "set_props" | "read".
+        sheet: Target tab name (required for every action).
+        params: Action-specific, e.g. insert {"dimension": "ROWS", "start": 5, "end": 8,
+            "inheritFromBefore": true}; delete {"dimension": "COLUMNS", "start": 2, "end": 3};
+            move {"dimension": "ROWS", "start": 10, "end": 12, "destinationIndex": 4};
+            append {"dimension": "ROWS", "length": 100}; auto_resize {"dimension": "COLUMNS"}
+            (omit start/end for the whole sheet); set_props {"dimension": "ROWS", "start": 0,
+            "end": 1, "pixelSize": 40, "hiddenByUser": true}; read {"range": "Sheet1!A1:F100"}.
+
+    Returns:
+        write -> ``{ok, spreadsheetId, action, sheet, ...echoed geometry...}``; read ->
+        ``{ok, spreadsheetId, action, sheet, hiddenRows:[idx,...], hiddenCols:[idx,...]}``.
+    """
+    return _call(
+        models.DimensionsResult,
+        _dimensions,
+        _services(ctx),
+        spreadsheet_id,
+        action=action,
+        sheet=sheet,
+        params=params,
     )
 
 

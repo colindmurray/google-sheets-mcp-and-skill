@@ -387,6 +387,299 @@ def test_batch_result_new_ids():
 
 
 # --------------------------------------------------------------------------------------
+# v0.2 extensions (DESIGN §Extensions): rich reads, new structure keys, new result models.
+# --------------------------------------------------------------------------------------
+
+
+def test_inspect_cell_rich_text_hyperlink_pivot():
+    # A cell carrying textFormatRuns + hyperlink + a pivot anchor (all per-cell-only).
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "sheet": "Dash",
+        "range": "Dash!A1:A1",
+        "rows": 1,
+        "cols": 1,
+        "merges": [],
+        "compact": False,
+        "cells": [
+            {
+                "a1": "A1",
+                "value": "Click here then plain",
+                "runs": [
+                    {
+                        "start": 0,
+                        "text": "Click here",
+                        "format": {"bold": True, "fg": "#1155CC"},
+                        "link": "https://x",
+                    },
+                    {"start": 11, "text": "then plain"},
+                ],
+                "hyperlink": "https://x",
+                "pivot": {
+                    "source": "Data!A1:F500",
+                    "rows": [
+                        {"field": "Region", "sourceColumnOffset": 0, "showTotals": True}
+                    ],
+                    "columns": [{"field": "Quarter", "sourceColumnOffset": 2}],
+                    "values": [
+                        {"name": "Sum of Sales", "sourceColumnOffset": 4, "summarize": "SUM"}
+                    ],
+                    "filters": [{"sourceColumnOffset": 1, "visibleValues": ["X", "Y"]}],
+                    "valueLayout": "HORIZONTAL",
+                    "line": "pivot A1 <- Data!A1:F500",
+                },
+            },
+            {"a1": "A2"},
+        ],
+    }
+    m = models.InspectResult.model_validate(data)
+    cell = m.cells[0]
+    assert cell.runs[0].text == "Click here"
+    assert cell.runs[0].format.bold is True and cell.runs[0].link == "https://x"
+    assert cell.runs[1].start == 11 and cell.runs[1].format is None
+    assert cell.hyperlink == "https://x"
+    assert cell.pivot.source == "Data!A1:F500"
+    assert cell.pivot.rows[0].field == "Region"
+    assert cell.pivot.values[0].summarize == "SUM"
+    assert cell.pivot.filters[0].visibleValues == ["X", "Y"]
+    # A cell with no rich data leaves the new fields unset (per-cell-only emission).
+    assert m.cells[1].runs is None and m.cells[1].hyperlink is None
+
+
+def test_run_carries_rich_text_in_compact_mode():
+    data = {
+        "a1Range": "A1:A1",
+        "value": "Click here",
+        "runs": [{"start": 0, "text": "Click here", "link": "https://x"}],
+        "hyperlink": "https://x",
+    }
+    r = models.Run.model_validate(data)
+    assert r.runs[0].link == "https://x" and r.hyperlink == "https://x"
+
+
+def test_structure_read_new_sheet_scoped_keys():
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "namedRanges": [],
+        "sheets": [
+            {
+                "sheet": "Sheet1",
+                "sheetId": 0,
+                "merges": [],
+                "frozenRows": 1,
+                "frozenCols": 0,
+                "tables": [
+                    {
+                        "tableId": "abc",
+                        "name": "Sales",
+                        "range": "Sheet1!A1:F500",
+                        "columns": [
+                            {"name": "Region", "type": "TEXT"},
+                            {
+                                "name": "Status",
+                                "type": "DROPDOWN",
+                                "validation": "ONE_OF_LIST(Open,Closed)",
+                            },
+                        ],
+                        "line": 'table "Sales" [Sheet1!A1:F500]',
+                    }
+                ],
+                "basicFilter": {
+                    "range": "Sheet1!A1:F500",
+                    "sorted": [{"col": "C", "order": "ASCENDING"}],
+                    "criteria": [
+                        {"col": "B", "hidden": ["Closed"], "condition": "NUMBER_GREATER(0)"}
+                    ],
+                    "line": "basicFilter [Sheet1!A1:F500]",
+                },
+                "filterViews": [
+                    {
+                        "filterViewId": 123,
+                        "title": "Open only",
+                        "range": "Sheet1!A1:F500",
+                        "criteria": [{"col": "B", "hidden": ["Closed"]}],
+                        "line": 'filterView 123 "Open only"',
+                    }
+                ],
+                "bandedRanges": [
+                    {
+                        "bandedRangeId": 7,
+                        "range": "Sheet1!A1:F500",
+                        "rowBanding": {
+                            "header": "#4285F4",
+                            "first": "#FFFFFF",
+                            "second": "#E8F0FE",
+                            "footer": None,
+                        },
+                        "columnBanding": None,
+                        "line": "banding 7 [Sheet1!A1:F500]",
+                    }
+                ],
+                "slicers": [
+                    {
+                        "slicerId": 4,
+                        "title": "Region",
+                        "range": "Data!A1:F500",
+                        "columnIndex": 0,
+                        "anchor": {"sheet": "Dash", "row": 0, "col": 8},
+                        "criteria": "ONE_OF_LIST(X,Y)",
+                        "line": 'slicer 4 "Region" col 0',
+                    }
+                ],
+            }
+        ],
+    }
+    m = models.StructureResult.model_validate(data)
+    s = m.sheets[0]
+    assert s.tables[0].columns[1].validation == "ONE_OF_LIST(Open,Closed)"
+    assert s.basicFilter.sorted[0].col == "C"
+    assert s.basicFilter.criteria[0].condition == "NUMBER_GREATER(0)"
+    assert s.filterViews[0].filterViewId == 123
+    assert s.bandedRanges[0].rowBanding.header == "#4285F4"
+    assert s.bandedRanges[0].columnBanding is None
+    assert s.slicers[0].anchor.col == 8 and s.slicers[0].columnIndex == 0
+    # extra "line" keys survive the round-trip (extra="allow").
+    assert m.sheets[0].tables[0].model_dump()["line"] == 'table "Sales" [Sheet1!A1:F500]'
+
+
+def test_overview_gains_locale_and_timezone():
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "title": "Budget",
+        "locale": "en_US",
+        "timeZone": "America/New_York",
+        "sheets": [],
+        "namedRanges": [],
+    }
+    _roundtrips(models.OverviewResult, data)
+    m = models.OverviewResult.model_validate(data)
+    assert m.locale == "en_US" and m.timeZone == "America/New_York"
+
+
+def test_data_ops_find_replace_result():
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "find_replace",
+        "sheet": "Sheet1",
+        "valuesChanged": 3,
+        "formulasChanged": 0,
+        "rowsChanged": 2,
+        "sheetsChanged": 1,
+        "occurrencesChanged": 3,
+    }
+    _roundtrips(models.DataOpsResult, data)
+    m = models.DataOpsResult.model_validate(data)
+    assert "find_replace" in m.terse and "3 occurrences" in m.terse
+
+
+def test_data_ops_copy_paste_and_delete_duplicates():
+    cp = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "copy_paste",
+        "source": "Sheet1!A1:B2",
+        "destination": "Sheet1!D1:E2",
+    }
+    m1 = models.DataOpsResult.model_validate(cp)
+    assert "A1:B2 -> Sheet1!D1:E2" in m1.terse
+
+    dd = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "delete_duplicates",
+        "range": "Sheet1!A1:A100",
+        "duplicatesRemoved": 5,
+    }
+    _roundtrips(models.DataOpsResult, dd)
+    assert "5 duplicates" in models.DataOpsResult.model_validate(dd).terse
+
+
+def test_dimensions_write_and_read():
+    write = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "insert",
+        "sheet": "Sheet1",
+        "dimension": "ROWS",
+        "start": 0,
+        "end": 3,
+    }
+    _roundtrips(models.DimensionsResult, write)
+    assert "insert ROWS[0:3] on Sheet1" in models.DimensionsResult.model_validate(write).terse
+
+    read = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "read",
+        "sheet": "Sheet1",
+        "hiddenRows": [3, 4, 5],
+        "hiddenCols": [],
+    }
+    _roundtrips(models.DimensionsResult, read)
+    m = models.DimensionsResult.model_validate(read)
+    assert m.hiddenRows == [3, 4, 5] and "3 hidden row" in m.terse
+
+
+def test_dimensions_move_echoes_destination():
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "move",
+        "sheet": "Sheet1",
+        "dimension": "COLUMNS",
+        "start": 2,
+        "end": 4,
+        "destinationIndex": 0,
+    }
+    m = models.DimensionsResult.model_validate(data)
+    assert "-> 0" in m.terse
+
+
+def test_comments_result():
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "comments": [
+            {
+                "id": "AAAA",
+                "author": "Jane Doe",
+                "content": "please verify Q3",
+                "created": "2026-05-01T00:00:00Z",
+                "modified": "2026-05-02T00:00:00Z",
+                "resolved": False,
+                "quoted": "1234",
+                "anchorRaw": "kix.opaque",
+                "replies": [{"author": "Bob", "content": "done", "action": "resolve"}],
+                "line": 'comment AAAA by Jane Doe',
+            }
+        ],
+    }
+    m = models.CommentsResult.model_validate(data)
+    c = m.comments[0]
+    assert c.author == "Jane Doe" and c.quoted == "1234"
+    assert c.anchorRaw == "kix.opaque"
+    assert c.replies[0].action == "resolve"
+    assert "1 comment" in m.terse and "AAAA by Jane Doe" in m.terse
+    # empty comments → terse fallback
+    assert "no comments" in models.CommentsResult.model_validate(
+        {"ok": True, "comments": []}
+    ).terse
+
+
+def test_model_for_wraps_new_extension_fns():
+    for name, cls in (
+        ("data_ops", models.DataOpsResult),
+        ("dimensions", models.DimensionsResult),
+        ("comments", models.CommentsResult),
+    ):
+        assert isinstance(models.model_for(name, {"ok": True, "action": "x"}), cls)
+
+
+# --------------------------------------------------------------------------------------
 # Helpers + registry
 # --------------------------------------------------------------------------------------
 
@@ -408,6 +701,10 @@ def test_to_model_and_registry_cover_every_core_fn():
         "metadata",
         "charts",
         "batch",
+        # v0.2 extension top-level core fns (DESIGN §Extensions)
+        "data_ops",
+        "dimensions",
+        "comments",
     }
     assert set(models.RESULT_MODELS) == expected
 

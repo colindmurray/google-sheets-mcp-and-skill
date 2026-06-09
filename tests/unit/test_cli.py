@@ -68,6 +68,58 @@ def patched(monkeypatch):
         "set_conditional_format",
         _make("set_conditional_format", {"ok": True, "spreadsheetId": "X", "action": "add", "index": 0}),
     )
+    # v0.2 extensions (DESIGN §Extensions): the three NEW core fns the CLI now dispatches to.
+    monkeypatch.setattr(
+        cli.core,
+        "data_ops",
+        _make(
+            "data_ops",
+            {
+                "ok": True,
+                "spreadsheetId": "X",
+                "action": "find_replace",
+                "allSheets": True,
+                "occurrencesChanged": 3,
+                "valuesChanged": 3,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        cli.core,
+        "dimensions",
+        _make(
+            "dimensions",
+            {
+                "ok": True,
+                "spreadsheetId": "X",
+                "action": "insert",
+                "sheet": "S",
+                "dimension": "ROWS",
+                "start": 10,
+                "end": 12,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        cli.core,
+        "comments",
+        _make(
+            "comments",
+            {
+                "ok": True,
+                "spreadsheetId": "X",
+                "comments": [
+                    {
+                        "id": "AAAA",
+                        "author": "Jane Doe",
+                        "content": "please verify Q3",
+                        "resolved": False,
+                        "line": 'comment AAAA by Jane Doe: "please verify Q3" (open)',
+                    }
+                ],
+            },
+        ),
+    )
     return calls
 
 
@@ -222,5 +274,179 @@ def test_build_parser_registers_every_subcommand():
         "write-values", "append-rows", "clear", "format", "set-conditional-format",
         "set-validation", "structure", "manage-sheets", "metadata", "charts",
         "batch", "auth",
+        # v0.2 extensions (DESIGN §Extensions): three NEW subcommands.
+        "data-ops", "dimensions", "comments",
     }
     assert expected <= set(choices)
+
+
+# ===========================================================================================
+# v0.2 extension subcommands (DESIGN §Extensions): data-ops / dimensions / comments + the
+# inspect --rich-text/--pivot flags. Each asserts the THIN 1:1 mapping into core.
+# ===========================================================================================
+
+
+def test_inspect_rich_text_and_pivot_flags_map_one_to_one(patched):
+    _run(["inspect", "ID", "S!A1:B2", "--rich-text", "--pivot"])
+    kw = patched["kwargs"]
+    assert kw["include_rich_text"] is True
+    assert kw["include_pivot"] is True
+    # Base include_* defaults stay untouched.
+    assert kw["include_effective_format"] is True
+    assert kw["include_formulas"] is True
+
+
+def test_inspect_rich_flags_default_false(patched):
+    _run(["inspect", "ID", "S!A1:B2"])
+    kw = patched["kwargs"]
+    assert kw["include_rich_text"] is False
+    assert kw["include_pivot"] is False
+
+
+def test_data_ops_dispatches_with_action_and_params(patched):
+    _run(
+        [
+            "data-ops",
+            "ID",
+            "--action",
+            "find_replace",
+            "--params-json",
+            '{"find":"foo","replacement":"bar","allSheets":true}',
+        ]
+    )
+    assert patched["name"] == "data_ops"
+    kw = patched["kwargs"]
+    assert kw["action"] == "find_replace"
+    assert kw["params"] == {"find": "foo", "replacement": "bar", "allSheets": True}
+
+
+def test_data_ops_requires_action(patched, capsys):
+    with pytest.raises(SystemExit):
+        _run(["data-ops", "ID", "--params-json", "{}"])
+    assert "--action" in capsys.readouterr().err
+
+
+def test_data_ops_terse_summary_render(patched, capsys):
+    rc = _run(["data-ops", "ID", "--action", "find_replace", "--params-json", '{"find":"x","replacement":"y","allSheets":true}'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "find_replace" in out
+    assert "occurrencesChanged=3" in out
+
+
+def test_dimensions_dispatches_with_sheet_and_params(patched):
+    _run(
+        [
+            "dimensions",
+            "ID",
+            "--action",
+            "insert",
+            "--sheet",
+            "S",
+            "--params-json",
+            '{"dimension":"ROWS","start":10,"end":12}',
+        ]
+    )
+    assert patched["name"] == "dimensions"
+    kw = patched["kwargs"]
+    assert kw["action"] == "insert"
+    assert kw["sheet"] == "S"
+    assert kw["params"] == {"dimension": "ROWS", "start": 10, "end": 12}
+
+
+def test_dimensions_read_renders_hidden(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "dimensions",
+        lambda services, sid, *, action, sheet=None, params=None: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "action": "read",
+            "sheet": sheet,
+            "hiddenRows": [3, 4],
+            "hiddenCols": [],
+        },
+    )
+    rc = _run(["dimensions", "ID", "--action", "read", "--sheet", "S"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "rows: [3, 4]" in out
+    assert "cols: (none)" in out
+
+
+def test_dimensions_write_summary_render(patched, capsys):
+    rc = _run(["dimensions", "ID", "--action", "insert", "--sheet", "S", "--params-json", '{"dimension":"ROWS","start":10,"end":12}'])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "insert" in out
+    assert "dimension=ROWS" in out and "start=10" in out and "end=12" in out
+
+
+def test_comments_flags_map_one_to_one(patched):
+    _run(["comments", "ID", "--no-resolved", "--include-deleted"])
+    assert patched["name"] == "comments"
+    kw = patched["kwargs"]
+    assert kw["include_resolved"] is False
+    assert kw["include_deleted"] is True
+
+
+def test_comments_defaults(patched):
+    _run(["comments", "ID"])
+    kw = patched["kwargs"]
+    assert kw["include_resolved"] is True
+    assert kw["include_deleted"] is False
+
+
+def test_comments_terse_render_uses_line(patched, capsys):
+    rc = _run(["comments", "ID"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'comment AAAA by Jane Doe: "please verify Q3" (open)' in out
+
+
+def test_comments_empty_render(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "comments",
+        lambda services, sid, *, include_resolved=True, include_deleted=False: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "comments": [],
+        },
+    )
+    rc = _run(["comments", "ID"])
+    assert rc == 0
+    assert "(no comments)" in capsys.readouterr().out
+
+
+def test_inspect_runs_hyperlink_pivot_render(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "inspect",
+        lambda services, sid, rng, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "sheet": "S",
+            "range": "A1:A1",
+            "rows": 1,
+            "cols": 1,
+            "merges": [],
+            "cells": [
+                {
+                    "a1": "A1",
+                    "value": "Click here",
+                    "runs": [
+                        {"start": 0, "text": "Click here", "link": "https://x"},
+                    ],
+                    "hyperlink": "https://x",
+                    "pivot": {"line": "pivot A1 <- Data!A1:F500 | rows: Region"},
+                }
+            ],
+        },
+    )
+    rc = _run(["inspect", "ID", "S!A1:A1", "--rich-text", "--pivot"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "runs:" in out and "link https://x" in out
+    assert "link=https://x" in out
+    assert "pivot A1 <- Data!A1:F500" in out

@@ -201,6 +201,43 @@ the two entrypoints stay in lockstep.
 A good PR for a new tool is reviewable as: *one core function + its test + its model +
 its MCP registration + its CLI subcommand + its docs*, all with matching field names.
 
+### Adding a capability without a new top-level tool
+
+Not every new capability needs a new core function. Several tools are **multi-action
+dispatchers** (`structure`, `data_ops`, `dimensions`, `metadata`, `manage_sheets`,
+`charts`), and the cheaper, more cohesive way to add a single-request capability is often a
+**new action on an existing tool** rather than a whole new tool. Prefer this when the
+capability is a natural sibling of what the tool already does:
+
+- A new structural read/write (tables, banding, filters, slicers, spreadsheet properties)
+  belongs on `structure` as a new action and/or a new sheet-scoped read key — not a new
+  tool.
+- A new single-request `batchUpdate` data verb belongs on `data_ops`; a new row/column op
+  belongs on `dimensions`.
+
+To add an action: register it in the tool's `_*_ACTIONS` set, add its allowed `params` keys
+to the `_*_PARAMS` table (unknown keys must raise `SheetsError("unknown_param")`), add its
+handler to the dispatch table, and — if it creates an object whose id is returned in
+`replies[]` — extend the reply-id capture spec. The MCP docstring and Pydantic input schema
+enumerate the new action and its `params`; the CLI passes `--params-json`. No new
+subcommand/tool is needed.
+
+### Where serialization logic lives
+
+If your capability **reads** a complex Google object (a table, a filter, a banded range, a
+pivot, rich-text runs, a comment), put the flatten/serialize logic in a **new, single-purpose
+pure-core serializer module** under `src/gsheets/core/` (see `richtext`, `pivot`, `tables`,
+`filters`, `banding`, `slicers`, `comments` for the pattern), not inline in the read
+function. A serializer takes **already-resolved A1 strings** (the owning read function
+resolves `GridRange → A1` first, mirroring the condformat boundary), returns a plain dict
+that carries a terse `line` field in the established style, **flattens colors to hex**, and
+**omits absent keys**. Golden-master its output (and its round-trip, if it round-trips). Keep
+per-cell rich data attached **only to cells that carry it** — never an empty placeholder.
+
+Keeping new logic in its own module keeps the boundary-guard green and keeps each PR's edits
+non-overlapping: ideally one new capability touches one new module plus the one existing file
+that registers it.
+
 ---
 
 ## Code style

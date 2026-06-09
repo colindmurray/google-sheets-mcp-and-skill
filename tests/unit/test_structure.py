@@ -123,6 +123,10 @@ class TestCaptureNewIds:
             "namedRangeIds": [],
             "protectedRangeIds": [],
             "metadataIds": [],
+            # v0.2 §X.3/§X.4/§X.9 — new add-id buckets.
+            "tableIds": [],
+            "bandedRangeIds": [],
+            "filterViewIds": [],
         }
 
     def test_add_sheet_nested_under_properties(self):
@@ -166,6 +170,9 @@ class TestCaptureNewIds:
             "namedRangeIds": [],
             "protectedRangeIds": [],
             "metadataIds": [],
+            "tableIds": [],
+            "bandedRangeIds": [],
+            "filterViewIds": [],
         }
 
 
@@ -1143,6 +1150,487 @@ class TestMetadata:
         with pytest.raises(SheetsError) as exc:
             metadata(services, SHEET_ID, action="read")
         assert exc.value.code == "google_api_error"
+
+
+# =========================================================================== v0.2 read (features)
+
+
+def _patch_addressing_everywhere(monkeypatch, *, sheet_id: int = 0, title: str = "Cliff") -> None:
+    """Patch the addressing layer in ``structure`` AND in every serializer/builder module that
+    imports ``a1_to_gridrange`` / ``gridrange_to_a1`` into its own namespace.
+
+    The new feature serializers (``tables``/``slicers``) and write builders
+    (``tables``/``banding``/``filters``) resolve ranges via addressing functions bound at THEIR
+    module import time, so isolating from the real addressing layer means patching each of those
+    bound names too (the base ``_patch_addressing`` only covers ``structure`` itself)."""
+    _patch_addressing(monkeypatch, sheet_id=sheet_id, title=title)
+
+    def fake_a1_to_gridrange(services, spreadsheet_id, a1):
+        return {"sheetId": sheet_id, "_a1": a1}
+
+    def fake_gridrange_to_a1(services, spreadsheet_id, gr):
+        if set(gr.keys()) == {"sheetId"}:
+            return title
+        return f"{title}!GR"
+
+    from gsheets.core import banding as banding_mod
+    from gsheets.core import filters as filters_mod
+    from gsheets.core import slicers as slicers_mod
+    from gsheets.core import tables as tables_mod
+
+    # tables: imports both a1_to_gridrange and gridrange_to_a1.
+    monkeypatch.setattr(tables_mod, "a1_to_gridrange", fake_a1_to_gridrange)
+    monkeypatch.setattr(tables_mod, "gridrange_to_a1", fake_gridrange_to_a1)
+    # banding: imports a1_to_gridrange.
+    monkeypatch.setattr(banding_mod, "a1_to_gridrange", fake_a1_to_gridrange)
+    # slicers: imports gridrange_to_a1 directly AND uses addressing.* for anchor resolution.
+    monkeypatch.setattr(slicers_mod, "gridrange_to_a1", fake_gridrange_to_a1)
+    # filters builders resolve via the structure handler (already patched); its serializers take
+    # a pre-resolved A1 string, so no addressing import to patch there.
+    _ = filters_mod  # imported for symmetry/clarity; nothing to patch.
+
+
+# A representative whole-spreadsheet payload exercising the five new sheet-scoped feature reads.
+_FEATURE_READ_PAYLOAD = {
+    "namedRanges": [],
+    "sheets": [
+        {
+            "properties": {"sheetId": 0, "title": "Cliff", "gridProperties": {}},
+            "tables": [
+                {
+                    "tableId": "t1",
+                    "name": "Sales",
+                    "range": {"sheetId": 0},
+                    "columnProperties": [
+                        {"columnIndex": 0, "columnName": "Region", "columnType": "TEXT"},
+                    ],
+                }
+            ],
+            "basicFilter": {
+                "range": {"sheetId": 0},
+                "criteria": {"1": {"hiddenValues": ["Closed"]}},
+            },
+            "filterViews": [
+                {"filterViewId": 123, "title": "Open only", "range": {"sheetId": 0}}
+            ],
+            "bandedRanges": [
+                {
+                    "bandedRangeId": 7,
+                    "range": {"sheetId": 0},
+                    "rowProperties": {
+                        "firstBandColorStyle": {
+                            "rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+                        }
+                    },
+                }
+            ],
+            "slicers": [
+                {
+                    "slicerId": 4,
+                    "spec": {
+                        "title": "Region",
+                        "dataRange": {"sheetId": 0},
+                        "columnIndex": 0,
+                    },
+                }
+            ],
+        }
+    ],
+}
+
+
+class TestStructureReadFeatures:
+    def test_read_mask_includes_new_feature_fields(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing_everywhere(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "get", [_FEATURE_READ_PAYLOAD])
+        structure(services, SHEET_ID, action="read")
+        fields = rec.calls[0]["fields"]
+        for token in (
+            "tables",
+            "basicFilter",
+            "filterViews",
+            "bandedRanges",
+            "slicers",
+        ):
+            assert token in fields
+        # Still no grid data.
+        assert "rowData" not in fields
+        assert "includeGridData" not in rec.calls[0]
+
+    def test_tables_attached_and_serialized(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing_everywhere(monkeypatch)
+        _wire_spreadsheets_method(services, "get", [_FEATURE_READ_PAYLOAD])
+        cliff = structure(services, SHEET_ID, action="read")["sheets"][0]
+        assert len(cliff["tables"]) == 1
+        table = cliff["tables"][0]
+        assert table["tableId"] == "t1"
+        assert table["name"] == "Sales"
+        assert table["range"] == "Cliff"  # bare-sheetId GridRange resolves to title
+        assert "line" in table
+
+    def test_basic_filter_single_or_null(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing_everywhere(monkeypatch)
+        _wire_spreadsheets_method(services, "get", [_FEATURE_READ_PAYLOAD])
+        cliff = structure(services, SHEET_ID, action="read")["sheets"][0]
+        assert cliff["basicFilter"] is not None
+        assert cliff["basicFilter"]["range"] == "Cliff"
+        assert "line" in cliff["basicFilter"]
+
+    def test_filter_views_banding_slicers_attached(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing_everywhere(monkeypatch)
+        _wire_spreadsheets_method(services, "get", [_FEATURE_READ_PAYLOAD])
+        cliff = structure(services, SHEET_ID, action="read")["sheets"][0]
+        assert cliff["filterViews"][0]["filterViewId"] == 123
+        assert cliff["bandedRanges"][0]["bandedRangeId"] == 7
+        assert cliff["bandedRanges"][0]["rowBanding"]["first"] == "#FFFFFF"
+        assert cliff["slicers"][0]["slicerId"] == 4
+
+    def test_absent_features_default_to_empty_or_null(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        payload = {
+            "sheets": [
+                {"properties": {"sheetId": 0, "title": "Cliff", "gridProperties": {}}}
+            ]
+        }
+        _wire_spreadsheets_method(services, "get", [payload])
+        cliff = structure(services, SHEET_ID, action="read")["sheets"][0]
+        assert cliff["tables"] == []
+        assert cliff["basicFilter"] is None
+        assert cliff["filterViews"] == []
+        assert cliff["bandedRanges"] == []
+        assert cliff["slicers"] == []
+
+
+# =========================================================================== v0.2 tables write
+
+
+class TestStructureTables:
+    def test_add_table_captures_id(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing_everywhere(monkeypatch)
+        rec = _wire_spreadsheets_method(
+            services,
+            "batchUpdate",
+            [{"replies": [{"addTable": {"table": {"tableId": "tNEW"}}}]}],
+        )
+        out = structure(
+            services,
+            SHEET_ID,
+            action="add_table",
+            range="Cliff!A1:B10",
+            params={"name": "Sales", "columns": [{"name": "Region", "type": "TEXT"}]},
+        )
+        assert "addTable" in rec.calls[0]["body"]["requests"][0]
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "add_table",
+            "range": "Cliff!A1:B10",
+            "tableId": "tNEW",
+        }
+
+    def test_add_table_requires_range(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="add_table", params={"name": "X"})
+        assert exc.value.code == "bad_range"
+
+    def test_update_table_dispatches(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services,
+            SHEET_ID,
+            action="update_table",
+            params={"tableId": "t1", "name": "Renamed"},
+        )
+        req = rec.calls[0]["body"]["requests"][0]["updateTable"]
+        assert req["table"]["tableId"] == "t1"
+        assert "fields" in req  # auto mask
+        assert out["action"] == "update_table"
+        assert out["tableId"] == "t1"
+
+    def test_delete_table_dispatches(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services, SHEET_ID, action="delete_table", params={"tableId": "t1"}
+        )
+        assert rec.calls[0]["body"]["requests"][0] == {"deleteTable": {"tableId": "t1"}}
+        assert out["tableId"] == "t1"
+
+
+# =========================================================================== v0.2 banding write
+
+
+class TestStructureBanding:
+    def test_add_banding_captures_id(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing_everywhere(monkeypatch)
+        rec = _wire_spreadsheets_method(
+            services,
+            "batchUpdate",
+            [{"replies": [{"addBanding": {"bandedRange": {"bandedRangeId": 7}}}]}],
+        )
+        out = structure(
+            services,
+            SHEET_ID,
+            action="add_banding",
+            range="Cliff!A1:F500",
+            params={"rowBanding": {"first": "#FFFFFF", "second": "#E8F0FE"}},
+        )
+        assert "addBanding" in rec.calls[0]["body"]["requests"][0]
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "add_banding",
+            "range": "Cliff!A1:F500",
+            "bandedRangeId": 7,
+        }
+
+    def test_add_banding_requires_range(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(
+                services,
+                SHEET_ID,
+                action="add_banding",
+                params={"rowBanding": {"first": "#FFFFFF"}},
+            )
+        assert exc.value.code == "bad_range"
+
+    def test_update_banding_auto_mask(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services,
+            SHEET_ID,
+            action="update_banding",
+            params={"bandedRangeId": 7, "rowBanding": {"first": "#000000"}},
+        )
+        req = rec.calls[0]["body"]["requests"][0]["updateBanding"]
+        assert req["bandedRange"]["bandedRangeId"] == 7
+        assert "fields" in req
+        assert out["bandedRangeId"] == 7
+
+    def test_delete_banding(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services, SHEET_ID, action="delete_banding", params={"bandedRangeId": 7}
+        )
+        assert rec.calls[0]["body"]["requests"][0] == {
+            "deleteBanding": {"bandedRangeId": 7}
+        }
+        assert out["bandedRangeId"] == 7
+
+
+# =========================================================================== v0.2 filters write
+
+
+class TestStructureFilters:
+    def test_set_basic_filter(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services,
+            SHEET_ID,
+            action="set_basic_filter",
+            range="Cliff!A1:F500",
+            params={"sorted": [{"col": "C", "order": "ASCENDING"}]},
+        )
+        req = rec.calls[0]["body"]["requests"][0]["setBasicFilter"]["filter"]
+        assert req["range"]["sheetId"] == 0
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "set_basic_filter",
+            "range": "Cliff!A1:F500",
+        }
+
+    def test_set_basic_filter_requires_range(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="set_basic_filter")
+        assert exc.value.code == "bad_range"
+
+    def test_clear_basic_filter_requires_sheet(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="clear_basic_filter")
+        assert exc.value.code == "missing_sheet"
+
+    def test_clear_basic_filter(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services, SHEET_ID, action="clear_basic_filter", sheet="Cliff"
+        )
+        assert rec.calls[0]["body"]["requests"][0] == {
+            "clearBasicFilter": {"sheetId": 0}
+        }
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "clear_basic_filter",
+            "sheet": "Cliff",
+        }
+
+    def test_add_filter_view_captures_id(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(
+            services,
+            "batchUpdate",
+            [{"replies": [{"addFilterView": {"filter": {"filterViewId": 55}}}]}],
+        )
+        out = structure(
+            services,
+            SHEET_ID,
+            action="add_filter_view",
+            range="Cliff!A1:F500",
+            params={"title": "Open only"},
+        )
+        req = rec.calls[0]["body"]["requests"][0]["addFilterView"]["filter"]
+        assert req["title"] == "Open only"
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "add_filter_view",
+            "range": "Cliff!A1:F500",
+            "filterViewId": 55,
+        }
+
+    def test_update_filter_view_resolves_range_to_grid(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services,
+            SHEET_ID,
+            action="update_filter_view",
+            params={
+                "filterViewId": 55,
+                "title": "Renamed",
+                "range": "Cliff!A1:G900",
+            },
+        )
+        req = rec.calls[0]["body"]["requests"][0]["updateFilterView"]
+        assert req["filter"]["filterViewId"] == 55
+        # The range was resolved to a GridRange and folded into the mask.
+        assert req["filter"]["range"]["sheetId"] == 0
+        assert "range" in req["fields"]
+        assert out["filterViewId"] == 55
+
+    def test_delete_filter_view(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services, SHEET_ID, action="delete_filter_view", params={"filterViewId": 55}
+        )
+        assert rec.calls[0]["body"]["requests"][0] == {
+            "deleteFilterView": {"filterId": 55}
+        }
+        assert out["filterViewId"] == 55
+
+    def test_delete_filter_view_requires_id(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="delete_filter_view", params={})
+        assert exc.value.code == "missing_param"
+
+
+# =========================================================================== v0.2 spreadsheet_props
+
+
+class TestStructureSpreadsheetProps:
+    def test_set_title_locale_timezone_no_sheet(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = structure(
+            services,
+            SHEET_ID,
+            action="spreadsheet_props",
+            params={
+                "title": "Budget",
+                "locale": "en_US",
+                "timeZone": "America/New_York",
+            },
+        )
+        req = rec.calls[0]["body"]["requests"][0]["updateSpreadsheetProperties"]
+        assert req["properties"] == {
+            "title": "Budget",
+            "locale": "en_US",
+            "timeZone": "America/New_York",
+        }
+        # Auto fields mask covers exactly the three set properties.
+        for token in ("title", "locale", "timeZone"):
+            assert token in req["fields"]
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "action": "spreadsheet_props",
+            "title": "Budget",
+            "locale": "en_US",
+            "timeZone": "America/New_York",
+        }
+
+    def test_partial_props_masks_only_given(self, monkeypatch):
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        structure(
+            services, SHEET_ID, action="spreadsheet_props", params={"title": "Only"}
+        )
+        req = rec.calls[0]["body"]["requests"][0]["updateSpreadsheetProperties"]
+        assert req["properties"] == {"title": "Only"}
+        assert req["fields"] == "title"
+
+    def test_empty_props_refused(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(services, SHEET_ID, action="spreadsheet_props", params={})
+        assert exc.value.code == "empty_payload"
+
+    def test_unknown_prop_rejected(self):
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(
+                services,
+                SHEET_ID,
+                action="spreadsheet_props",
+                params={"title": "X", "bogus": 1},
+            )
+        assert exc.value.code == "unknown_param"
+
+
+# =========================================================================== v0.2 capture ids
+
+
+class TestCaptureNewIdsV02:
+    def test_table_banding_filter_view_ids(self):
+        replies = [
+            {"addTable": {"table": {"tableId": "tABC"}}},
+            {"addBanding": {"bandedRange": {"bandedRangeId": 7}}},
+            {"addFilterView": {"filter": {"filterViewId": 55}}},
+        ]
+        out = capture_new_ids(replies)
+        assert out["tableIds"] == ["tABC"]
+        assert out["bandedRangeIds"] == [7]
+        assert out["filterViewIds"] == [55]
 
 
 # =========================================================================== boundary

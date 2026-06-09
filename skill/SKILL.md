@@ -70,13 +70,20 @@ Conventions:
 Understand (read-only):
 
 - `overview <ID>` — cheap orientation: title, tabs, sizes, frozen panes, per-sheet
-  protected/conditional-format **counts**, named ranges. No grid data. Start here.
+  protected/conditional-format **counts**, named ranges, and the spreadsheet `locale` / `timeZone`
+  (date/number interpretation signal). No grid data. Start here.
 - `inspect <ID> <RANGE>` — flagship rich read: per-cell values + formulas + userEntered &
   effective formats + merges + validation. `--compact` collapses repeats into rectangular runs.
+  `--rich-text` adds per-run rich text (styled segments + in-cell links) and the cell `hyperlink`;
+  `--pivot` adds pivot-table definitions (both attached only to the cells that have them).
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
   (`all` returns formulas and computed values side by side).
 - `read-conditional-formats <ID> [--sheet NAME]` — conditional-format rules as terse, readable,
   round-trippable lines with their positional `index`.
+- `comments <ID>` — Drive **threaded comments** on the spreadsheet (author, text, resolved state,
+  replies, quoted snippet). Read-only. Needs a Drive scope: `drive.file` (the default) covers
+  files the app created/opened; **cross-file access needs `GSHEETS_SCOPES=broad`** (the comments
+  live in the Drive API, not the Sheets API).
 
 Change (writes):
 
@@ -89,8 +96,17 @@ Change (writes):
   gradient rule by positional `index` (array order = priority).
 - `set-validation <ID> <RANGE> ...` — set or clear data validation (dropdowns, number ranges,
   custom formulas).
-- `structure <ID> --action {read,merge,unmerge,add_named,delete_named,protect,unprotect,freeze,tab_color,group,ungroup}` —
-  one interface for merges, named/protected ranges, frozen panes, tab color, row/col groups.
+- `structure <ID> --action {read,merge,unmerge,add_named,delete_named,protect,unprotect,freeze,tab_color,group,ungroup,add_table,update_table,delete_table,add_banding,update_banding,delete_banding,set_basic_filter,clear_basic_filter,add_filter_view,update_filter_view,delete_filter_view,spreadsheet_props}` —
+  one interface for merges, named/protected ranges, frozen panes, tab color, row/col groups, plus
+  native **tables**, **banding**, **basic filter / filter views**, and spreadsheet props
+  (`title`/`locale`/`timeZone`). `--action read` now also surfaces
+  `tables`/`basicFilter`/`filterViews`/`bandedRanges`/`slicers` per sheet (see `reading.md`).
+- `data-ops <ID> --action {find_replace,delete_duplicates,trim_whitespace,sort_range,text_to_columns,auto_fill,copy_paste,cut_paste}` —
+  range-level data operations in one batch request each (find/replace, dedupe, trim, sort,
+  split-to-columns, autofill, copy/cut-paste). Mirrors `structure`'s `--params-json` shape.
+- `dimensions <ID> --action {insert,delete,move,append,auto_resize,set_props,read}` — row/column
+  operations: insert/delete/move/append rows or columns, auto-fit, set height/width/hidden, and
+  `read` the hidden rows/cols a viewer doesn't see. Every action targets one tab (`--sheet`).
 - `manage-sheets <ID> --action {add,delete,duplicate,rename,reorder}` — manage tabs.
 - `metadata <ID> --action {read,create,update,delete}` — developer metadata (durable anchors).
 - `charts <ID> --action {create,update,delete,read}` — embedded charts (read = metadata only).
@@ -122,6 +138,17 @@ gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --render all
 # 4. Read the conditional-format rules that color cells dynamically (a key differentiator):
 gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 #    -> [Sheet1!A2:A100] if CUSTOM_FORMULA(=$B2>10) -> bg #FFCDD2 bold      (index 0)
+
+# 5. Richer reads when you need them:
+#    --rich-text recovers per-run styling + in-cell links (the only way to read a multi-link cell);
+#    --pivot recovers a pivot-table's definition (so you don't overwrite generated output).
+gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --rich-text --pivot
+
+#    structure --action read now also surfaces tables, filters, filter views, banding, slicers:
+gsheets --json structure <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1
+
+#    Human review intent lives in Drive comments, not the grid (needs a Drive scope):
+gsheets comments <YOUR_SPREADSHEET_ID>
 ```
 
 ## Workflow: changing a sheet
@@ -167,6 +194,11 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   subfields you specify and never wipe the rest — so a partial format update is safe.
 - **CRUD is symmetric: anything you write, you can read back** (charts excepted in v1 — `read`
   returns chart metadata only). Read a rule/validation/format, edit the line/JSON, write it back.
+- **Comments use the Drive API, so they need a Drive scope.** `comments` reads through Drive, not
+  Sheets: `drive.file` (the default scope) reaches files this tool created or opened, but for a
+  spreadsheet shared with you by someone else you must run with `GSHEETS_SCOPES=broad` (or
+  `--scopes broad`). The comment `anchor` is opaque (not an A1 range) — comments are surfaced at
+  the document level, never mapped to a cell.
 
 ## Full reference
 

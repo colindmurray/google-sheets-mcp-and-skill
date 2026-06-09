@@ -14,6 +14,8 @@ For exact flags see `commands.md` or `gsheets <cmd> --help`. Examples use `<YOUR
 - [`inspect` — the rich per-cell read](#inspect--the-rich-per-cell-read)
   - [Cell shape](#cell-shape)
   - [Trimming the read](#trimming-the-read)
+  - [`--rich-text` — per-run rich text & in-cell links](#--rich-text--per-run-rich-text--in-cell-links)
+  - [`--pivot` — pivot-table definitions](#--pivot--pivot-table-definitions)
   - [`--compact` rectangular runs](#--compact-rectangular-runs)
 - [`read-values` & render modes](#read-values--render-modes)
   - [`--render all` alignment & literal passthrough](#--render-all-alignment--literal-passthrough)
@@ -21,6 +23,8 @@ For exact flags see `commands.md` or `gsheets <cmd> --help`. Examples use `<YOUR
   - [Boolean rules](#boolean-rules)
   - [Gradient rules](#gradient-rules)
   - [Index is the only addressing source of truth](#index-is-the-only-addressing-source-of-truth)
+- [`structure --action read` — the structural picture](#structure--action-read--the-structural-picture)
+- [`comments` — Drive threaded comments](#comments--drive-threaded-comments)
 - [Token efficiency notes](#token-efficiency-notes)
 
 ---
@@ -46,7 +50,13 @@ gsheets --json overview <YOUR_SPREADSHEET_ID>   # --json is GLOBAL: it goes befo
 
 Returns the spreadsheet title; per tab the `sheetId`, title, index, type, row/column counts,
 frozen rows/cols, tab color, and the **counts** `protectedRangeCount` / `conditionalFormatCount`;
-plus spreadsheet-level `namedRanges` (name, range, id).
+plus spreadsheet-level `namedRanges` (name, range, id) and the spreadsheet `locale` / `timeZone`.
+
+**`locale` / `timeZone`** (e.g. `"en_US"` / `"America/New_York"`, omitted when unset) are the
+interpretation signal for the whole sheet: they tell you how dates and numbers are parsed and
+displayed (decimal vs. comma separators, date order, the timezone `NOW()`/`TODAY()` resolve in).
+Read them before reasoning about any date or number column. (The write side is
+`structure --action spreadsheet_props`; see `writing.md`.)
 
 **Why it stays cheap:** a Google field mask cannot return an array length, so the counts are
 `len()`-ed in core from the *cheapest length-yielding subfield* of each array
@@ -101,6 +111,63 @@ gsheets inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --no-effective --no-user-e
 
 `--no-effective`, `--no-user-entered`, `--no-formulas`, `--no-validation` each remove their slice.
 
+### `--rich-text` — per-run rich text & in-cell links
+
+A single cell can hold **multiple styled segments** and **multiple links** (e.g. `"See A then B"`
+where `A` and `B` link to different URLs). A plain read flattens that to one value and loses the
+per-segment styling and the individual links. `--rich-text` recovers it — and it is the **only** way
+to read a multi-link cell:
+
+```sh
+gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:A20' --rich-text
+```
+
+Each cell that carries `textFormatRuns` gains a `runs` array, and a cell with a single whole-cell
+link gains a flat `hyperlink`. Emitted **per-cell only when present** (cells without runs/links are
+unchanged, so the flag costs tokens only where there is rich text to report):
+
+```jsonc
+{ "a1": "A2", "value": "Click here then plain",
+  "runs": [ { "start": 0, "text": "Click here", "bold": true, "fg": "#1155CC", "link": "https://x" },
+            { "start": 11, "text": " then plain" } ],
+  "hyperlink": "https://x" }            // present only for a single whole-cell link
+```
+
+- `start` is the 0-based character offset where the run begins; `text` is the substring up to the
+  next run. The run's own `bold`/`italic`/`fg`/… are the flattened run-level text format.
+- A **run-level `link` takes precedence over the cell `hyperlink`.** For a multi-link cell the flat
+  `hyperlink` is absent (Google leaves it empty) and each link lives on its run — so iterate `runs`
+  to recover every link.
+- The terse rendering is one condformat-style line per cell with runs:
+  `runs A1: "Click here"[0:10 bold fg #1155CC link https://x] + " then plain"[11:22]`.
+
+`hyperlink` is a **read-only** Google field — you set an in-cell link by writing a `=HYPERLINK(...)`
+formula (via `write-values`), not by writing `hyperlink` back.
+
+### `--pivot` — pivot-table definitions
+
+A pivot table's definition lives on its **anchor (top-left) cell only**. `--pivot` surfaces it so
+you can see what a generated block is (and avoid overwriting it):
+
+```sh
+gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:H40' --pivot
+```
+
+The anchor cell gains a `pivot` object (read-only; per-cell only when present):
+
+```jsonc
+{ "a1": "A1",
+  "pivot": { "source": "Data!A1:F500",
+             "rows":    [ { "field": "Region",  "sourceColumnOffset": 0, "showTotals": true, "sortOrder": "ASCENDING" } ],
+             "columns": [ { "field": "Quarter", "sourceColumnOffset": 2, "showTotals": true } ],
+             "values":  [ { "name": "Sum of Sales", "sourceColumnOffset": 4, "summarize": "SUM" } ],
+             "filters": [ { "sourceColumnOffset": 1, "visibleValues": ["X","Y"] } ],
+             "valueLayout": "HORIZONTAL" } }
+```
+
+Terse line: `pivot A1 <- Data!A1:F500 | rows: Region | cols: Quarter | values: SUM(Sales)`. Pivot
+**write** stays in the `batch` escape hatch (read-only here).
+
 ### `--compact` rectangular runs
 
 For large or repetitive blocks, `--compact` replaces `cells` with `runs` and drops empty cells:
@@ -122,7 +189,9 @@ degenerates to a 1×1 range (`"D7:D7"`).
 **Compact does NOT silently drop notes or validation** — two cells with differing notes or
 validation never merge into one run, so a run still carries `note`/`validationRule` when present.
 If you want the absolute minimum tokens and don't care about notes/validation, ignore those keys
-(they're omitted when unset).
+(they're omitted when unset). The same holds for the rich-text/pivot reads: when `--rich-text` /
+`--pivot` are on, a run also carries `runs`/`hyperlink`/`pivot` when present, and cells with
+differing runs/links/pivots never merge into one run.
 
 ## `read-values` & render modes
 
@@ -226,6 +295,74 @@ There is **no `priority` field** on a Sheets conditional-format rule — array o
 When you edit a read `line` and write it back via `set-conditional-format --action update --index
 N`, the target is the `--index` kwarg alone; the parsed line never supplies one. See `writing.md`.
 
+## `structure --action read` — the structural picture
+
+`structure --action read` (omit `--sheet` for every tab, or name one) returns a shape-stable
+envelope: spreadsheet-scoped `namedRanges` at the top level, and per sheet `merges`, `frozenRows`,
+`frozenCols`, `tabColor`, `protectedRanges`, `dimensionGroups`, plus the **v0.2 structural reads**
+that close the "reason over a partial/filtered table and edit the wrong row" gap. Each new key is
+serialized in the same flattened/terse style as everything else:
+
+```sh
+gsheets --json structure <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1
+```
+
+- **`tables`** — native Sheets Tables (2024 GA): the table's `name`, `range`, and typed columns.
+  Tells you the *schema* of a range and where it ends (so you append safely).
+  Terse: `table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)`.
+  ```jsonc
+  { "tableId": "abc", "name": "Sales", "range": "Sheet1!A1:F500",
+    "columns": [ { "name": "Region", "type": "TEXT" },
+                 { "name": "Status", "type": "DROPDOWN", "validation": "ONE_OF_LIST(Open,Closed)" } ] }
+  ```
+- **`basicFilter`** (one per sheet or `null`) and **`filterViews`** (array) — the active filter
+  state. A filtered table can *hide rows*; reading this prevents editing the wrong row.
+  Terse: `basicFilter [Sheet1!A1:F500] sort C asc | B: hide Closed, NUMBER_GREATER(0)` and
+  `filterView 123 "Open only" [Sheet1!A1:F500] | B: hide Closed`. `col` is the column letter; the
+  per-column `condition` reuses the same condition serializer as conditional formats.
+- **`bandedRanges`** — alternating-color (banded) ranges; a cheap "this rectangle is a deliberate
+  table" hint, with the header/first/second/footer hexes.
+  Terse: `banding 7 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF / #E8F0FE`.
+- **`slicers`** — slicer controls (id, title, source range, filtered column, anchor). Read-only.
+  Terse: `slicer 4 "Region" col 0 [Data!A1:F500] @ Dash!I1`.
+
+`dimensionGroups` is the flattened row/column-group output (the read mask requests Google's
+`rowGroups` + `columnGroups` under the hood). All of these are read with a tight field mask — never
+grid data.
+
+## `comments` — Drive threaded comments
+
+Human review intent often lives in **comments**, not the grid — and a value read never sees it.
+`comments` surfaces the spreadsheet's Drive comment threads (read-only in v1):
+
+```sh
+gsheets comments <YOUR_SPREADSHEET_ID>                  # all comments (resolved included)
+gsheets comments <YOUR_SPREADSHEET_ID> --no-resolved    # only open threads
+```
+
+Each comment flattens to author, content, timestamps, resolved state, any quoted snippet, and its
+replies:
+
+```jsonc
+{ "id": "AAAA", "author": "Jane Doe", "content": "please verify Q3",
+  "created": "2026-05-01T...", "modified": "2026-05-02T...", "resolved": false,
+  "quoted": "1234",
+  "replies": [ { "author": "Bob", "content": "done", "action": "resolve" } ],
+  "anchorRaw": "<opaque>" }
+```
+
+Terse line: `comment AAAA by Jane Doe: "please verify Q3" (open, 1 reply)`.
+
+Two things to know:
+
+- **It uses the Drive API, so it needs a Drive scope.** `drive.file` (the default) reaches files
+  this tool created or opened; for a spreadsheet someone else shared with you, run with
+  `GSHEETS_SCOPES=broad` (or `--scopes broad`) — otherwise the call raises `drive_unavailable`.
+- **The `anchor` is opaque**, not an A1 range — Google encodes it as a document-type-specific blob
+  with no documented cell mapping. The raw value is surfaced as `anchorRaw` for reference, but
+  comments are document-level here and are **never** mapped to a cell. (Resolve/reply/create are
+  out of v1 — read-only.)
+
 ## Token efficiency notes
 
 - **Start with `overview`** before any grid read — it tells you which tab/range is worth a closer
@@ -233,6 +370,9 @@ N`, the target is the `--index` kwarg alone; the parsed line never supplies one.
 - **Use `--compact`** on large or repetitive ranges; it collapses vertical/horizontal runs and
   drops empties.
 - **Trim `inspect`** with the `--no-*` flags when you only need part of the picture.
+- **`--rich-text` / `--pivot` are opt-in and per-cell-only** — off by default (zero cost), and even
+  when on they attach data only to the cells that actually carry runs/links/pivots, so you never pay
+  for cells that don't.
 - **`--render unformatted`** is cheaper than re-deriving numbers from formatted strings when you
   need raw values for computation.
 - Unset format keys are always omitted, and reads never use `includeGridData` — the field mask is

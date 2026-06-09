@@ -15,6 +15,7 @@ placeholder — the real ID comes from the user, the URL they paste (the token b
   - [`inspect`](#inspect)
   - [`read-values`](#read-values)
   - [`read-conditional-formats`](#read-conditional-formats)
+  - [`comments`](#comments)
 - [Writing](#writing)
   - [`write-values`](#write-values)
   - [`append-rows`](#append-rows)
@@ -22,8 +23,10 @@ placeholder — the real ID comes from the user, the URL they paste (the token b
   - [`format`](#format)
   - [`set-conditional-format`](#set-conditional-format)
   - [`set-validation`](#set-validation)
+  - [`data-ops`](#data-ops)
 - [Structure & tabs](#structure--tabs)
   - [`structure`](#structure)
+  - [`dimensions`](#dimensions)
   - [`manage-sheets`](#manage-sheets)
   - [`metadata`](#metadata)
   - [`charts`](#charts)
@@ -78,9 +81,10 @@ gsheets overview <YOUR_SPREADSHEET_ID>
 
 No flags beyond the positional id. Returns the title; per-tab `sheetId`/title/index/type, row &
 column counts, frozen rows/cols, tab color, and **counts** of protected ranges and
-conditional-format rules; plus spreadsheet-level named ranges. The counts are computed in core
-(`len()` of length-yielding subfields) — overview never pulls full rule/protected-range bodies.
-See `reading.md`.
+conditional-format rules; plus spreadsheet-level named ranges and the spreadsheet `locale` /
+`timeZone` (e.g. `"en_US"` / `"America/New_York"`, omitted when unset — the signal for how dates
+and numbers are interpreted). The counts are computed in core (`len()` of length-yielding
+subfields) — overview never pulls full rule/protected-range bodies. See `reading.md`.
 
 ### `inspect`
 
@@ -89,20 +93,25 @@ validation**, with a tight field mask (never the whole grid).
 
 ```
 gsheets inspect <YOUR_SPREADSHEET_ID> <RANGE> [--compact] \
-  [--no-effective] [--no-user-entered] [--no-formulas] [--no-validation]
+  [--no-effective] [--no-user-entered] [--no-formulas] [--no-validation] \
+  [--rich-text] [--pivot]
 ```
 
 | Flag | Effect |
 |---|---|
 | `RANGE` (positional) | A1 range, e.g. `'Sheet1!A1:D20'` or `'Sheet1'`. |
-| `--compact` | Collapse identical adjacent cells into rectangular `a1Range` runs; drop empty cells. Big token win on repetitive blocks. Runs still carry `note`/`validationRule`. |
+| `--compact` | Collapse identical adjacent cells into rectangular `a1Range` runs; drop empty cells. Big token win on repetitive blocks. Runs still carry `note`/`validationRule` (and `runs`/`hyperlink`/`pivot` when present). |
 | `--no-effective` | Omit `effectiveFormat` (what actually renders, incl. conditional-format results). |
 | `--no-user-entered` | Omit `userEnteredFormat` (the format you set, i.e. intent). |
 | `--no-formulas` | Omit formulas (values only). |
 | `--no-validation` | Omit data validation (both the terse string and the structured `validationRule`). |
+| `--rich-text` | Add per-run rich text and links: each cell with `textFormatRuns` gains `runs` (styled segments with their own `bold`/`fg`/… and a per-run `link`), plus the cell-level `hyperlink`. Off by default (zero token cost). The only way to read a multi-link cell. |
+| `--pivot` | Add pivot-table definitions: a pivot's anchor (top-left) cell gains a `pivot` object (source, rows, columns, values, filters). Read-only. Off by default. |
 
-Trim with the `--no-*` flags to cut tokens when you only need part of the picture. See
-`reading.md` for the cell/run shape and the compact RLE semantics.
+Trim with the `--no-*` flags to cut tokens when you only need part of the picture; `--rich-text`
+and `--pivot` are opt-in additive reads (per-cell only when present, so the cost is paid only for
+cells that actually carry runs/links/pivots). See `reading.md` for the cell/run shape, the rich-text
+run grammar, the pivot shape, and the compact RLE semantics.
 
 ### `read-values`
 
@@ -139,6 +148,28 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> [--sheet NAME]
 Each rule prints as `[<ranges>] <body>` plus structured fields. The `line` is **body-only** (no
 index token) — the index lives in the structured `index` field and is the sole write-addressing
 source of truth. See `reading.md` for the full line grammar.
+
+### `comments`
+
+Read the spreadsheet's Drive **threaded comments** — author, text, resolved state, replies, and any
+quoted snippet. Read-only in v1. Uses the **Drive API** (not the Sheets API).
+
+```
+gsheets comments <YOUR_SPREADSHEET_ID> [--no-resolved] [--include-deleted]
+```
+
+| Flag | Effect |
+|---|---|
+| `--no-resolved` | Hide comments that have been resolved (show only open ones). Resolved are shown by default. |
+| `--include-deleted` | Also include deleted comments (passes Drive's `includeDeleted`). Off by default. |
+
+**Drive scope is required.** `drive.file` (the default scope) covers files this tool created or
+opened; a spreadsheet shared with you by someone else needs `GSHEETS_SCOPES=broad` (or
+`--scopes broad`) — otherwise the call raises `drive_unavailable`. The comment **`anchor` is opaque**
+(document-type-specific, not an A1 range), so comments are surfaced at the document level only and
+are never mapped to a cell. Each comment prints as
+`comment <id> by <author>: "<content>" (open|resolved, N replies)` plus structured fields (`author`,
+`content`, `created`, `modified`, `resolved`, `quoted`, `replies[]`, `anchorRaw`). See `reading.md`.
 
 ---
 
@@ -295,22 +326,64 @@ gsheets set-validation <YOUR_SPREADSHEET_ID> <RANGE> [--rule-json '{...}'] [--no
 `strict`/`showDropdown` may also be carried inside `--rule-json` (`"strict"`/`"showDropdown"`); the
 kwargs (`--no-strict`/`--no-dropdown`) win on conflict.
 
+### `data-ops`
+
+Range-level data operations, each a single `batchUpdate` request. One `--action` per call; the
+operands go in `--params-json` (same shape convention as `structure`/`manage-sheets`). An unknown
+`params` key raises `unknown_param`.
+
+```
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action <ACTION> --params-json '{...}'
+```
+
+| `--action` | What it does | `--params-json` keys |
+|---|---|---|
+| `find_replace` | Find/replace across a range, a sheet, or all sheets | `{"find": str, "replacement": str, "searchByRegex"?: bool, "matchCase"?: bool, "matchEntireCell"?: bool, "includeFormulas"?: bool, "range"?: A1, "sheet"?: str, "allSheets"?: bool}` (exactly one scope: `range` / `sheet` / `allSheets`) |
+| `delete_duplicates` | Remove duplicate rows in a range | `{"range": A1, "comparisonColumns"?: ["A","C",...]}` |
+| `trim_whitespace` | Trim leading/trailing whitespace in cells | `{"range": A1}` |
+| `sort_range` | Sort a range by one or more columns | `{"range": A1, "specs": [{"col":"B","order":"ASCENDING"|"DESCENDING"}, ...]}` |
+| `text_to_columns` | Split a column on a delimiter | `{"range": A1, "delimiter"?: str, "delimiterType"?: "COMMA"|"SEMICOLON"|"PERIOD"|"SPACE"|"CUSTOM"|"AUTODETECT"}` |
+| `auto_fill` | Extend a series into adjacent cells | `{"range": A1, "useAlternateSeries"?: bool}` **or** `{"source": A1, "destination": A1}` |
+| `copy_paste` | Copy a range to a destination (paste-type aware) | `{"source": A1, "destination": A1, "pasteType"?: "PASTE_NORMAL"|"PASTE_VALUES"|"PASTE_FORMAT"|"PASTE_FORMULA"|"PASTE_NO_BORDERS"|"PASTE_CONDITIONAL_FORMATTING"|"PASTE_DATA_VALIDATION", "pasteOrientation"?: "NORMAL"|"TRANSPOSE"}` |
+| `cut_paste` | Move a range to a destination top-left cell | `{"source": A1, "destination": A1, "pasteType"?: ...}` |
+
+The result echoes an action-specific summary from the API reply — e.g. `find_replace` returns
+`occurrencesChanged` / `valuesChanged` / `formulasChanged`, `delete_duplicates` returns
+`duplicatesRemoved`, `trim_whitespace` returns `cellsChangedCount`. `find_replace`, `cut_paste`, and
+`delete_duplicates` are **destructive** — read the range first and confirm. See `writing.md`.
+
+```sh
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action find_replace \
+  --params-json '{"find":"TODO","replacement":"DONE","sheet":"Sheet1"}'
+gsheets data-ops <YOUR_SPREADSHEET_ID> --action sort_range \
+  --params-json '{"range":"Sheet1!A2:D100","specs":[{"col":"B","order":"DESCENDING"}]}'
+```
+
 ---
 
 ## Structure & tabs
 
 ### `structure`
 
-One interface for merges, named ranges, protected ranges, frozen rows/cols, tab color, and
-row/column groups. Read or modify.
+One interface for merges, named ranges, protected ranges, frozen rows/cols, tab color, row/column
+groups, native **tables**, **banding**, **basic filter / filter views**, and spreadsheet-level
+properties. Read or modify.
 
 ```
 gsheets structure <YOUR_SPREADSHEET_ID> --action <ACTION> [--sheet NAME] [--range A1] [--params-json '{...}']
 ```
 
 `--action` is **required**. `--sheet` is optional for `read` (omit ⇒ every tab) and **required**
-for every mutating action (→ `missing_sheet` otherwise). Each action consumes only its listed
-`params` keys; an unknown key raises `unknown_param`.
+for the sheet-scoped mutating actions (→ `missing_sheet` otherwise); `spreadsheet_props` is
+spreadsheet-scoped and needs no `--sheet`. Each action consumes only its listed `params` keys; an
+unknown key raises `unknown_param`.
+
+**`--action read`** returns the full structural picture with a shape-stable envelope: top-level
+`namedRanges`, and per-sheet `merges`, `frozenRows`, `frozenCols`, `tabColor`, `protectedRanges`,
+`dimensionGroups`, **and the v0.2 additions** `tables`, `basicFilter`, `filterViews`,
+`bandedRanges`, `slicers`. See `reading.md` for those shapes and terse lines.
+
+Base / structural actions:
 
 | `--action` | Needs | `--params-json` keys |
 |---|---|---|
@@ -326,8 +399,61 @@ for every mutating action (→ `missing_sheet` otherwise). Each action consumes 
 | `group` | `--sheet` | `{"dimension":"ROWS"|"COLUMNS", "start": int, "end": int}` (0-based half-open) |
 | `ungroup` | `--sheet` | `{"dimension":"ROWS"|"COLUMNS", "start": int, "end": int}` |
 
-`unmerge`, `delete_named`, `unprotect`, and `ungroup` are **destructive** — confirm first. New
-`namedRangeId`/`protectedRangeId`s are returned in the result.
+Tables / banding / filters / spreadsheet props (v0.2):
+
+| `--action` | Needs | `--params-json` keys |
+|---|---|---|
+| `add_table` | `--range` | `{"name": str, "columns": [{"name": str, "type": "TEXT"|"DOUBLE"|"CURRENCY"|"PERCENT"|"DATE"|"TIME"|"DATETIME"|"DROPDOWN"|"CHECKBOX"|"SMART_CHIP"|"RATING", "validation"?: {ValidationRule}}, ...]}` (a `DROPDOWN` column needs a `ONE_OF_LIST` `validation`). Returns the new `tableId`. |
+| `update_table` | — | `{"tableId": str, "name"?: str, "columns"?: [...], "range"?: A1}` |
+| `delete_table` | — | `{"tableId": str}` (**destructive**) |
+| `add_banding` | `--range` | `{"rowBanding"?: {"header"?,"first"?,"second"?,"footer"? hex}, "columnBanding"?: {...}}`. Returns the new `bandedRangeId`. |
+| `update_banding` | — | `{"bandedRangeId": int, "rowBanding"?, "columnBanding"?, "range"?: A1}` |
+| `delete_banding` | — | `{"bandedRangeId": int}` (**destructive**) |
+| `set_basic_filter` | `--range` | `{"sorted"?: [{"col": "C", "order": "ASCENDING"|"DESCENDING"}], "criteria"?: [{"col": "B", "hidden"?: [...], "condition"?: "NUMBER_GREATER(0)"}]}` |
+| `clear_basic_filter` | `--sheet` | — (**destructive**) |
+| `add_filter_view` | `--range` | `{"title": str, "sorted"?: [...], "criteria"?: [...]}`. Returns the new `filterViewId`. |
+| `update_filter_view` | — | `{"filterViewId": int, "title"?, "range"?: A1, "sorted"?, "criteria"?}` |
+| `delete_filter_view` | — | `{"filterViewId": int}` (**destructive**) |
+| `spreadsheet_props` | — (spreadsheet-scoped) | `{"title"?: str, "locale"?: str, "timeZone"?: str}` (the write side of `overview`'s `locale`/`timeZone`) |
+
+`unmerge`, `delete_named`, `unprotect`, `ungroup`, `delete_table`, `delete_banding`,
+`clear_basic_filter`, and `delete_filter_view` are **destructive** — confirm first. New
+`namedRangeId`/`protectedRangeId`/`tableId`/`bandedRangeId`/`filterViewId`s are returned in the
+result. Slicer **write** is out of v1 (slicers are readable via `--action read`; create/edit one
+through `batch`).
+
+### `dimensions`
+
+Row and column operations on one tab: insert / delete / move / append rows or columns, auto-fit,
+set height/width/hidden, and read which rows/cols are hidden from a viewer.
+
+```
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action <ACTION> --sheet NAME --params-json '{...}'
+```
+
+`--action` required; **every action targets one tab, so `--sheet` is required.** Spans are 0-based
+half-open (`start` inclusive, `end` exclusive). Unknown `params` key → `unknown_param`.
+
+| `--action` | What it does | `--params-json` keys |
+|---|---|---|
+| `insert` | Insert rows/columns | `{"dimension": "ROWS"|"COLUMNS", "start": int, "end": int, "inheritFromBefore"?: bool}` |
+| `delete` | Delete rows/columns (**destructive**) | `{"dimension", "start", "end"}` |
+| `move` | Move a band of rows/columns | `{"dimension", "start", "end", "destinationIndex": int}` |
+| `append` | Append rows/columns at the end | `{"dimension", "length": int}` |
+| `auto_resize` | Auto-fit to content | `{"dimension", "start"?: int, "end"?: int}` (omit `start`/`end` ⇒ whole sheet) |
+| `set_props` | Set pixel size / hide | `{"dimension", "start", "end", "pixelSize"?: int, "hiddenByUser"?: bool}` |
+| `read` | Report hidden rows/cols | `{"range"?: A1}` (omit ⇒ whole sheet); returns `{"hiddenRows": [...], "hiddenCols": [...]}` |
+
+`read` is the "what is the viewer actually seeing" companion to filter-view reads — it surfaces
+rows/cols hidden via `hiddenByUser`. See `writing.md`.
+
+```sh
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action insert --sheet Sheet1 \
+  --params-json '{"dimension":"ROWS","start":5,"end":8}'
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action auto_resize --sheet Sheet1 \
+  --params-json '{"dimension":"COLUMNS"}'
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1
+```
 
 ### `manage-sheets`
 

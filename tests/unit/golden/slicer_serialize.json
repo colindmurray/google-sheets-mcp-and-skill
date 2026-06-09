@@ -1,0 +1,48 @@
+{
+  "_doc": "Golden-master fixture for serialize_slicer (DESIGN §X.0f; analysis #16). Representative Google Slicer JSON in -> exact flattened read shape + terse condformat-style line out. The slicer points at a data range on 'Data' (sheetId 0) and is anchored on a different tab 'Dash' (sheetId 1); its filterCriteria condition reuses the shared condition serializer. Read-only v1 (write stays in batch). No real IDs/creds.",
+  "slicer": {
+    "slicerId": 4,
+    "spec": {
+      "title": "Region",
+      "dataRange": {
+        "sheetId": 0,
+        "startRowIndex": 0,
+        "endRowIndex": 500,
+        "startColumnIndex": 0,
+        "endColumnIndex": 6
+      },
+      "columnIndex": 0,
+      "filterCriteria": {
+        "condition": {
+          "type": "ONE_OF_LIST",
+          "values": [
+            {"userEnteredValue": "West"},
+            {"userEnteredValue": "East"}
+          ]
+        }
+      },
+      "position": {
+        "overlayPosition": {
+          "anchorCell": {
+            "sheetId": 1,
+            "rowIndex": 0,
+            "columnIndex": 8
+          }
+        }
+      }
+    }
+  },
+  "sheets_index": [
+    {"properties": {"sheetId": 0, "title": "Data", "index": 0}},
+    {"properties": {"sheetId": 1, "title": "Dash", "index": 1}}
+  ],
+  "expected": {
+    "slicerId": 4,
+    "title": "Region",
+    "range": "Data!A1:F500",
+    "columnIndex": 0,
+    "anchor": {"sheet": "Dash", "row": 0, "col": 8},
+    "criteria": "ONE_OF_LIST(West,East)",
+    "line": "slicer 4 \"Region\" col 0 [Data!A1:F500] @ Dash!I1 -> ONE_OF_LIST(West,East)"
+  }
+}

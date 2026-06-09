@@ -1,0 +1,45 @@
+{
+  "_doc": "Golden-master fixtures for serialize_table (DESIGN §X.0c). Representative Google Table JSON -> exact flattened read shape + terse line. A DROPDOWN column's dataValidationRule reuses the ValidationRule one-liner (matching inspect). No real IDs/creds.",
+  "table": {
+    "tableId": "abc123",
+    "name": "Sales",
+    "range": {
+      "sheetId": 0,
+      "startRowIndex": 0,
+      "endRowIndex": 500,
+      "startColumnIndex": 0,
+      "endColumnIndex": 6
+    },
+    "columnProperties": [
+      {"columnIndex": 0, "columnName": "Region", "columnType": "TEXT"},
+      {"columnIndex": 1, "columnName": "Units", "columnType": "DOUBLE"},
+      {"columnIndex": 2, "columnName": "Price", "columnType": "CURRENCY"},
+      {
+        "columnIndex": 3,
+        "columnName": "Status",
+        "columnType": "DROPDOWN",
+        "dataValidationRule": {
+          "condition": {
+            "type": "ONE_OF_LIST",
+            "values": [
+              {"userEnteredValue": "Open"},
+              {"userEnteredValue": "Closed"}
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "expected": {
+    "tableId": "abc123",
+    "name": "Sales",
+    "range": "Sheet1!A1:F500",
+    "columns": [
+      {"name": "Region", "type": "TEXT"},
+      {"name": "Units", "type": "DOUBLE"},
+      {"name": "Price", "type": "CURRENCY"},
+      {"name": "Status", "type": "DROPDOWN", "validation": "ONE_OF_LIST(Open,Closed)"}
+    ],
+    "line": "table \"Sales\" [Sheet1!A1:F500] cols: Region:TEXT, Units:DOUBLE, Price:CURRENCY, Status:DROPDOWN(Open,Closed)"
+  }
+}

@@ -1074,6 +1074,241 @@ class TestReadConditionalFormats:
         assert ei.value.status == 403
 
 
+# ==================================================== overview locale / timeZone (§X.12)
+
+
+class TestOverviewLocaleTimeZone:
+    def test_mask_requests_locale_and_time_zone(self):
+        services, rec = _make_service(data_responses=[{"properties": {"title": "T"}}])
+        overview(services, SHEET_ID)
+        fields = rec.data_calls[0]["fields"]
+        # The widened properties mask now pulls title + locale + timeZone (§X.12).
+        assert "properties(title,locale,timeZone)" in fields
+
+    def test_locale_and_time_zone_surfaced_when_present(self):
+        payload = {
+            "properties": {
+                "title": "T",
+                "locale": "en_US",
+                "timeZone": "America/New_York",
+            }
+        }
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        assert out["locale"] == "en_US"
+        assert out["timeZone"] == "America/New_York"
+
+    def test_locale_and_time_zone_omitted_when_absent(self):
+        services, _ = _make_service(data_responses=[{"properties": {"title": "T"}}])
+        out = overview(services, SHEET_ID)
+        assert "locale" not in out
+        assert "timeZone" not in out
+
+
+# ==================================================== inspect rich-text / hyperlink (§X.1)
+
+
+class TestInspectRichTextMask:
+    def _run(self, **flags):
+        services, rec = _make_service(
+            data_responses=[{"sheets": [{"properties": {"title": "Cliff"}, "data": [{}]}]}],
+            sheet_index=_CLIFF_INDEX,
+        )
+        inspect(services, SHEET_ID, "Cliff!A1:B2", **flags)
+        return rec.data_calls[0]["fields"]
+
+    def test_base_mask_omits_rich_text_and_pivot_by_default(self):
+        fields = self._run()
+        assert "textFormatRuns" not in fields
+        assert "hyperlink" not in fields
+        assert "pivotTable" not in fields
+
+    def test_include_rich_text_adds_runs_and_hyperlink(self):
+        fields = self._run(include_rich_text=True)
+        assert "textFormatRuns" in fields
+        assert "hyperlink" in fields
+        # Still tight — never the heavy grid blob.
+        assert "includeGridData" not in fields
+
+    def test_include_pivot_adds_pivot_table(self):
+        fields = self._run(include_pivot=True)
+        assert "pivotTable" in fields
+
+
+class TestInspectRichText:
+    def _inspect_cell(self, cell, *, flags=None, sheet_index=_CLIFF_INDEX):
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(
+            data_responses=[payload], sheet_index=sheet_index
+        )
+        return inspect(services, SHEET_ID, "Cliff!A1", **(flags or {}))
+
+    def test_runs_attached_only_when_present(self):
+        cell = {
+            "formattedValue": "Click here then plain",
+            "textFormatRuns": [
+                {"startIndex": 0, "format": {"bold": True, "link": {"uri": "https://x"}}},
+                {"startIndex": 10, "format": {}},
+            ],
+        }
+        out = self._inspect_cell(cell, flags={"include_rich_text": True})
+        c = out["cells"][0]
+        assert c["runs"] == [
+            {"start": 0, "text": "Click here", "format": {"bold": True}, "link": "https://x"},
+            {"start": 10, "text": " then plain"},
+        ]
+
+    def test_runs_not_emitted_when_flag_off(self):
+        cell = {
+            "formattedValue": "abc",
+            "textFormatRuns": [{"startIndex": 0, "format": {"bold": True}}],
+        }
+        out = self._inspect_cell(cell)  # flag off
+        assert "runs" not in out["cells"][0]
+
+    def test_hyperlink_attached_flat_only_when_set(self):
+        cell = {"formattedValue": "link", "hyperlink": "https://example.com"}
+        out = self._inspect_cell(cell, flags={"include_rich_text": True})
+        assert out["cells"][0]["hyperlink"] == "https://example.com"
+
+    def test_hyperlink_omitted_when_absent(self):
+        cell = {"formattedValue": "plain"}
+        out = self._inspect_cell(cell, flags={"include_rich_text": True})
+        assert "hyperlink" not in out["cells"][0]
+
+    def test_cell_with_only_runs_is_not_empty(self):
+        # A cell carrying ONLY rich-text runs (no scalar value distinct from text) still emits.
+        cell = {
+            "formattedValue": "x",
+            "textFormatRuns": [{"startIndex": 0, "format": {"italic": True}}],
+        }
+        out = self._inspect_cell(cell, flags={"include_rich_text": True})
+        c = out["cells"][0]
+        assert c["value"] == "x"
+        assert c["runs"][0]["format"] == {"italic": True}
+
+
+# ==================================================== inspect pivot (§X.6)
+
+
+class TestInspectPivot:
+    def test_pivot_attached_on_anchor_cell_with_source_resolved(self):
+        pivot = {
+            "source": {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 500,
+                "startColumnIndex": 0,
+                "endColumnIndex": 6,
+            },
+            "rows": [{"sourceColumnOffset": 0, "showTotals": True}],
+            "values": [{"summarizeFunction": "SUM", "sourceColumnOffset": 4, "name": "Sales"}],
+            "valueLayout": "HORIZONTAL",
+        }
+        cell = {"formattedValue": "Region", "pivotTable": pivot}
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(
+            data_responses=[payload], sheet_index=_CLIFF_INDEX
+        )
+        out = inspect(services, SHEET_ID, "Cliff!A1", include_pivot=True)
+        piv = out["cells"][0]["pivot"]
+        # source GridRange resolved to A1 via the addressing layer.
+        assert piv["source"] == "Cliff!A1:F500"
+        assert piv["values"][0]["summarize"] == "SUM"
+        assert "line" in piv
+
+    def test_pivot_not_emitted_when_flag_off(self):
+        cell = {"formattedValue": "x", "pivotTable": {"source": {"sheetId": 0}}}
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(
+            data_responses=[payload], sheet_index=_CLIFF_INDEX
+        )
+        out = inspect(services, SHEET_ID, "Cliff!A1")
+        assert "pivot" not in out["cells"][0]
+
+
+# ============================== compact runs do not merge on rich-text differences (§X.1)
+
+
+class TestCompactRichTextNeverMerges:
+    def test_differing_hyperlinks_never_merge(self):
+        a = {"formattedValue": "x", "hyperlink": "https://a"}
+        b = {"formattedValue": "x", "hyperlink": "https://b"}
+        rowdata = [{"values": [a, b]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(
+            data_responses=[payload], sheet_index=_CLIFF_INDEX
+        )
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1", compact=True, include_rich_text=True)
+        assert len(out["runs"]) == 2
+        assert out["runs"][0]["hyperlink"] == "https://a"
+        assert out["runs"][1]["hyperlink"] == "https://b"
+
+    def test_differing_runs_never_merge(self):
+        a = {
+            "formattedValue": "x",
+            "textFormatRuns": [{"startIndex": 0, "format": {"bold": True}}],
+        }
+        b = {
+            "formattedValue": "x",
+            "textFormatRuns": [{"startIndex": 0, "format": {"italic": True}}],
+        }
+        rowdata = [{"values": [a, b]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(
+            data_responses=[payload], sheet_index=_CLIFF_INDEX
+        )
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1", compact=True, include_rich_text=True)
+        assert len(out["runs"]) == 2
+        assert out["runs"][0]["runs"][0]["format"] == {"bold": True}
+        assert out["runs"][1]["runs"][0]["format"] == {"italic": True}
+
+    def test_identical_plain_cells_still_merge_with_flags_on(self):
+        # Two plain cells (no runs/hyperlink/pivot) still merge even with the flags ON — the
+        # extended _run_key degenerates to the base identity when those keys are absent.
+        a = _cell(value="x")
+        b = _cell(value="x")
+        rowdata = [{"values": [a, b]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(
+            data_responses=[payload], sheet_index=_CLIFF_INDEX
+        )
+        out = inspect(
+            services, SHEET_ID, "Cliff!A1:B1", compact=True,
+            include_rich_text=True, include_pivot=True,
+        )
+        assert out["runs"] == [
+            {"a1Range": "A1:B1", "value": "x", "formula": None, "format": {}}
+        ]
+
+
 # =========================================================== boundary: no transport imports
 
 
