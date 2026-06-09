@@ -44,7 +44,7 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action add_slicer --sheet Data --range
    ```
 
 2. Bootstrap credentials once (OAuth desktop consent, or point at a service account / ADC — see the
-   repo README and `skill/references/commands.md`):
+   repo README's Authentication section):
 
    ```sh
    gsheets auth login

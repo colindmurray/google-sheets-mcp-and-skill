@@ -50,7 +50,7 @@ gsheets auth login      # OAuth desktop consent (or refresh/validate an existing
 gsheets auth status     # report resolved auth mode, scopes, token path, expiry; non-zero if unusable
 ```
 
-Auth is controlled by env vars (see `gsheets auth status` and `references/commands.md`):
+Auth is controlled by env vars (see `gsheets auth status`):
 
 - `GSHEETS_AUTH_MODE` — `service_account` | `oauth` | `adc` | `auto` (default `auto`).
 - `GSHEETS_SERVICE_ACCOUNT_FILE`, `GSHEETS_OAUTH_CLIENT_FILE`, `GSHEETS_TOKEN_FILE` — credential
@@ -111,7 +111,7 @@ Change (writes):
   one interface for merges, named/protected ranges, frozen panes, tab color, row/col groups, plus
   native tables, banding, basic filter / filter views, slicers, and spreadsheet props
   (`title`/`locale`/`timeZone`). `--action read` also surfaces
-  `tables`/`basicFilter`/`filterViews`/`bandedRanges`/`slicers` per sheet (see `reading.md`).
+  `tables`/`basicFilter`/`filterViews`/`bandedRanges`/`slicers` per sheet (see `intermediate.md`).
 - `data-ops <ID> --action {find_replace,delete_duplicates,trim_whitespace,sort_range,text_to_columns,auto_fill,copy_paste,cut_paste}` —
   range-level data operations in one batch request each (find/replace, dedupe, trim, sort,
   split-to-columns, autofill, copy/cut-paste). Mirrors `structure`'s `--params-json` shape.
@@ -226,13 +226,27 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 - A slicer's anchor reads back as `{sheet,row,col}` and renders in the terse line as `@ Sheet!E1`;
   a row-0/top-left anchor still renders (an absent 0-valued index just means 0).
 
-## Full reference
+## Detailed references — read on demand
 
-- `references/commands.md` — the complete per-subcommand flag surface (with a table of contents).
-- `references/reading.md` — render modes, compact/RLE runs, and the conditional-format line grammar.
-- `references/writing.md` — USER_ENTERED, the auto field-mask, index-safe CF mutation, validation
-  round-trips, and structure/tabs.
-- `gsheets <cmd> --help` — authoritative, always-current exact flags for any single command.
+The command map above summarizes the whole surface. Full per-command details live in three tiers,
+split by how often a task needs them and each organized Reading / Writing / Operations. Read only
+the tier the task calls for (pull in a lower tier first if you haven't):
+
+- **`references/basic.md`** — ~80% of tasks, the everyday loop. `overview`, `inspect` (core flags),
+  `read-values`, `read-conditional-formats`; `write-values`, `append-rows`, `clear`, `format`;
+  `manage-sheets`. Also the core concepts: A1 addressing, the global `--json`/`--scopes` placement,
+  `USER_ENTERED`, effective-vs-userEntered format, and the conditional-format line grammar. Start
+  here for any ordinary read or edit.
+- **`references/intermediate.md`** — ~15%, when the task needs more than the basics: writing
+  conditional-format rules (`set-conditional-format`) or data validation (`set-validation`);
+  reading or posting Drive `comments`; `export` to a file; `read-many` across spreadsheets; bulk
+  `data-ops` (find/replace, dedupe, sort, split, …); row/column `dimensions`; and the common
+  `structure` edits (merges, named/protected ranges, freeze, groups) plus `structure --action read`.
+- **`references/advanced.md`** — ~5%, the niche surface you rarely need: `inspect --rich-text` /
+  `--pivot`; `structure`'s native Tables, banding, filter views, and slicer CRUD plus
+  `spreadsheet_props`; developer `metadata`; `charts`; and the raw `batch` escape hatch.
+
+`gsheets <cmd> --help` is the authoritative, always-current flag reference for any single command.
 
 ## Safety
 

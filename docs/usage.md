@@ -36,7 +36,7 @@ Supported sources, in precedence order: a service account (`GSHEETS_SERVICE_ACCO
 (`spreadsheets` + `drive.file`); `--scopes broad` (or `GSHEETS_SCOPES=broad`) adds full `drive`.
 The config dir defaults to `~/.config/google-sheets-mcp/` (override with `GSHEETS_CONFIG_DIR`).
 
-See `skill/references/commands.md` (§Auth) for the full env-var table.
+See the README's Authentication section for the full env-var table.
 
 ## Global flags (placement matters)
 
