@@ -35,6 +35,11 @@ from gsheets.core.filters import (
     serialize_basic_filter,
     serialize_filter_view,
 )
+from gsheets.core.filters import (
+    _build_condition,
+    _build_filter_specs,
+    _build_sort_specs,
+)
 
 GOLDEN_DIR = Path(__file__).parent / "golden"
 
@@ -428,3 +433,152 @@ class TestSerializeBuildParity:
         filt = rebuilt["setBasicFilter"]["filter"]
         assert filt["sortSpecs"] == google["sortSpecs"]
         assert filt["filterSpecs"] == google["filterSpecs"]
+
+
+# =========================================================================== serialize: malformed input is skipped, not crashed
+
+
+class TestSerializeMalformedInputSkipped:
+    """The serializers read live Google payloads; a malformed sub-entry is SKIPPED (never
+    raised) so one bad spec can't blank an entire inspect read."""
+
+    def test_non_dict_sort_spec_skipped(self):
+        # A non-dict entry in ``sortSpecs`` is ignored; only the valid one survives.
+        bf = {"sortSpecs": ["garbage", {"dimensionIndex": 2, "sortOrder": "ASCENDING"}]}
+        out = serialize_basic_filter(bf, "S!A1:F9")
+        assert out["sorted"] == [{"col": "C", "order": "ASCENDING"}]
+
+    def test_all_sort_specs_malformed_omits_sorted(self):
+        out = serialize_basic_filter({"sortSpecs": ["x", 3, None]}, "S!A1:F9")
+        assert "sorted" not in out
+
+    def test_non_dict_filter_spec_skipped(self):
+        bf = {
+            "filterSpecs": [
+                "garbage",
+                {"columnIndex": 1, "filterCriteria": {"hiddenValues": ["Closed"]}},
+            ]
+        }
+        out = serialize_basic_filter(bf, "S!A1:F9")
+        assert out["criteria"] == [{"col": "B", "hidden": ["Closed"]}]
+
+    def test_filter_spec_missing_column_index_skipped(self):
+        # ``columnIndex`` is the addressing key; without it the spec is not addressable.
+        bf = {"filterSpecs": [{"filterCriteria": {"hiddenValues": ["x"]}}]}
+        out = serialize_basic_filter(bf, "S!A1:F9")
+        assert "criteria" not in out
+
+    def test_filter_spec_non_dict_criteria_skipped(self):
+        bf = {"filterSpecs": [{"columnIndex": 0, "filterCriteria": "nope"}]}
+        out = serialize_basic_filter(bf, "S!A1:F9")
+        assert "criteria" not in out
+
+    def test_legacy_criteria_non_dict_value_skipped(self):
+        # In the legacy map, a non-dict value for a column is ignored.
+        bf = {"criteria": {"0": "garbage", "1": {"hiddenValues": ["Closed"]}}}
+        out = serialize_basic_filter(bf, "S!A1:F9")
+        assert out["criteria"] == [{"col": "B", "hidden": ["Closed"]}]
+
+    def test_legacy_criteria_non_int_key_skipped(self):
+        # A legacy map key that won't parse to an int (a stray label) is skipped, not crashed.
+        bf = {"criteria": {"notanint": {"hiddenValues": ["x"]}, "2": {"hiddenValues": ["y"]}}}
+        out = serialize_basic_filter(bf, "S!A1:F9")
+        assert out["criteria"] == [{"col": "C", "hidden": ["y"]}]
+
+    def test_legacy_criteria_all_bad_keys_omits_criteria(self):
+        out = serialize_basic_filter({"criteria": {"foo": {"hiddenValues": ["x"]}}}, "S!A1:F9")
+        assert "criteria" not in out
+
+
+# =========================================================================== build: sort-spec / filter-spec input validation
+
+
+class TestBuildSortSpecsValidation:
+    def test_none_yields_empty_list(self):
+        assert _build_sort_specs(None) == []
+
+    def test_non_list_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_sort_specs({"col": "A"})  # a single dict, not a list
+        assert exc.value.code == "bad_filter"
+
+    def test_non_dict_element_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_sort_specs(["A"])
+        assert exc.value.code == "bad_filter"
+
+    def test_tuple_of_specs_accepted(self):
+        out = _build_sort_specs(({"col": "B", "order": "DESCENDING"},))
+        assert out == [{"dimensionIndex": 1, "sortOrder": "DESCENDING"}]
+
+    def test_order_omitted_when_absent(self):
+        # No ``order`` -> no ``sortOrder`` key (Sheets defaults ascending); stays token-cheap.
+        out = _build_sort_specs([{"col": "A"}])
+        assert out == [{"dimensionIndex": 0}]
+
+
+class TestBuildFilterSpecsValidation:
+    def test_none_yields_empty_list(self):
+        assert _build_filter_specs(None) == []
+
+    def test_non_list_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_filter_specs({"col": "A", "hidden": ["x"]})  # single dict, not a list
+        assert exc.value.code == "bad_filter"
+
+    def test_non_dict_element_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_filter_specs(["A"])
+        assert exc.value.code == "bad_filter"
+
+    def test_missing_col_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_filter_specs([{"hidden": ["x"]}])
+        assert exc.value.code == "bad_filter"
+
+    def test_visible_values_built_into_visibleValues(self):
+        # The ``visible`` shorthand maps to Google's ``visibleValues`` (the inverse filter).
+        out = _build_filter_specs([{"col": "B", "visible": ["Open", "Pending"]}])
+        assert out == [
+            {
+                "columnIndex": 1,
+                "filterCriteria": {"visibleValues": ["Open", "Pending"]},
+            }
+        ]
+
+    def test_hidden_and_visible_and_condition_combined(self):
+        out = _build_filter_specs(
+            [{"col": "A", "hidden": ["Closed"], "visible": ["Open"], "condition": "BLANK"}]
+        )
+        crit = out[0]["filterCriteria"]
+        assert crit["hiddenValues"] == ["Closed"]
+        assert crit["visibleValues"] == ["Open"]
+        assert crit["condition"] == {"type": "BLANK"}
+
+
+class TestBuildConditionValidation:
+    def test_terse_string_parsed_via_condformat(self):
+        # A terse string reuses the SAME condformat parser as CF conditions.
+        assert _build_condition("NUMBER_GREATER(0)") == {
+            "type": "NUMBER_GREATER",
+            "values": [{"userEnteredValue": "0"}],
+        }
+
+    def test_no_arg_terse_string(self):
+        assert _build_condition("BLANK") == {"type": "BLANK"}
+
+    def test_structured_dict_passed_through_builder(self):
+        assert _build_condition({"type": "TEXT_CONTAINS", "values": ["done"]}) == {
+            "type": "TEXT_CONTAINS",
+            "values": [{"userEnteredValue": "done"}],
+        }
+
+    def test_non_str_non_dict_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_condition(["NUMBER_GREATER", 0])  # type: ignore[arg-type]
+        assert exc.value.code == "bad_filter"
+
+    def test_none_condition_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_condition(None)  # type: ignore[arg-type]
+        assert exc.value.code == "bad_filter"

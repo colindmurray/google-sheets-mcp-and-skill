@@ -180,6 +180,20 @@ def test_serialize_banding_malformed_color_degrades_to_none():
     assert out["rowBanding"]["first"] == "#FFFFFF"
 
 
+def test_serialize_banding_no_groups_line_is_bare_head():
+    """A BandedRange with neither row nor column properties renders only the head (no segments).
+
+    Both groups serialize to ``None`` (absent axis), so ``_serialize_banding_line`` appends no
+    ``rows:``/``cols:`` segment — the line is exactly ``banding <id> [<range>]`` with no trailing
+    space or pipe.
+    """
+    google = {"bandedRangeId": 3}
+    out = serialize_banding(google, "Sheet1!A1:F500")
+    assert out["rowBanding"] is None
+    assert out["columnBanding"] is None
+    assert out["line"] == "banding 3 [Sheet1!A1:F500]"
+
+
 def test_serialize_banding_rejects_non_dict():
     with pytest.raises(SheetsError) as exc:
         serialize_banding(["not", "a", "dict"], "Sheet1!A1:A5")
@@ -331,6 +345,30 @@ def test_build_add_banding_request_bad_color_rejected():
         )
     assert exc.value.code == "bad_color"
     assert "rowBanding.first" in exc.value.message
+
+
+def test_build_add_banding_request_non_dict_params_rejected():
+    """A non-dict ``params`` (e.g. a list) raises ``bad_banding`` — the group builder is strict."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_banding_request(
+            services, SPREADSHEET_ID, "Sheet1!A1:F500", ["rowBanding"]
+        )
+    assert exc.value.code == "bad_banding"
+
+
+def test_build_add_banding_request_non_dict_band_group_rejected():
+    """A band group whose value is not a dict (e.g. a list of hexes) raises ``bad_banding``."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_banding_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:F500",
+            {"rowBanding": ["#FFFFFF", "#000000"]},
+        )
+    assert exc.value.code == "bad_banding"
+    assert "rowBanding" in exc.value.message
 
 
 # =========================================================================== update_banding

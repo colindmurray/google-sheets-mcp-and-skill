@@ -2,8 +2,10 @@
 
 All tests run against a MOCKED Sheets service — no network. The headline is a GOLDEN-MASTER
 for :func:`serialize_slicer`: representative Google ``Slicer`` JSON in, assert the EXACT
-flattened read shape + terse condformat-style line out. Slicers are READ-ONLY in v1 (write stays
-in the ``batch`` escape hatch), so there are no ``build_*`` request builders to assert.
+flattened read shape + terse condformat-style line out. Slicer WRITE is covered too: the
+``build_add_slicer_request`` / ``build_update_slicer_request`` / ``build_delete_slicer_request``
+builders (wired into the ``structure`` add_slicer/update_slicer/delete_slicer actions) are
+shape-asserted below.
 
 Addressing (GridRange/GridCoordinate -> A1) is the real implemented layer; its sheet-name
 resolution is driven by wiring a ``spreadsheets().get`` recorder that returns a TWO-sheet index
@@ -282,6 +284,41 @@ def test_serialize_slicer_dangling_anchor_sheet_id_falls_back_to_raw_id():
     assert out["line"].endswith("@ '999'!A1")
 
 
+def test_serialize_slicer_position_without_overlay_omits_anchor():
+    """A ``position`` lacking ``overlayPosition`` yields no anchor (and no '@' on the line)."""
+    services = _service_with_sheet_index()
+    slicer = {"slicerId": 20, "spec": {"title": "T"}, "position": {"sheetId": 1}}
+    out = serialize_slicer(slicer, services, SPREADSHEET_ID)
+    assert "anchor" not in out
+    assert "@" not in out["line"]
+
+
+def test_serialize_slicer_overlay_without_anchor_cell_omits_anchor():
+    """An ``overlayPosition`` with no ``anchorCell`` yields no anchor (degrades, never raises)."""
+    services = _service_with_sheet_index()
+    slicer = {
+        "slicerId": 21,
+        "spec": {"title": "T"},
+        "position": {"overlayPosition": {"offsetXPixels": 5}},
+    }
+    out = serialize_slicer(slicer, services, SPREADSHEET_ID)
+    assert "anchor" not in out
+    assert "@" not in out["line"]
+
+
+def test_anchor_a1_returns_none_without_row_or_col():
+    """``_anchor_a1`` returns ``None`` for an anchor dict missing row/col (defensive guard).
+
+    The serializer always fills row/col (defaulting to 0), so this branch only fires when the
+    helper is handed a partial anchor directly — it must return ``None`` (line simply drops the
+    ``@ ...`` segment) rather than raise.
+    """
+    services = _service_with_sheet_index()
+    assert slicers._anchor_a1({"sheet": "Dash"}, services, SPREADSHEET_ID) is None
+    assert slicers._anchor_a1({"row": 0}, services, SPREADSHEET_ID) is None
+    assert slicers._anchor_a1(None, services, SPREADSHEET_ID) is None
+
+
 def test_serialize_slicer_no_anchor_omits_anchor_and_at_segment():
     """No position/overlay/anchorCell -> no ``anchor`` key and no '@ ...' on the line."""
     services = _service_with_sheet_index()
@@ -438,6 +475,128 @@ def test_build_add_slicer_request_rejects_non_dict_spec():
     assert exc.value.code == "bad_slicer"
 
 
+def test_build_add_slicer_request_non_string_anchor_rejected():
+    """A truthy-but-non-string ``anchor`` (e.g. a list) raises ``bad_slicer`` at the cell resolver.
+
+    The ``if not anchor`` presence check passes for a non-empty list, so the failure must come
+    from ``_anchor_to_grid_coordinate`` which requires a single A1 *cell string*.
+    """
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {"dataRange": "Data!A1:C10", "anchor": ["Dash!I1"]},
+        )
+    assert exc.value.code == "bad_slicer"
+    assert "single A1 cell string" in exc.value.message
+
+
+def test_build_add_slicer_request_unbounded_anchor_rejected():
+    """A whole-column anchor (``Dash!A:A``) has no bounded row -> ``bad_slicer`` (must be a cell).
+
+    A bare-column A1 ref resolves to a GridRange with no ``startRowIndex``, so the anchor cannot
+    collapse to a single ``GridCoordinate`` — the builder must reject it as not a bounded cell.
+    """
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {"dataRange": "Data!A1:C10", "anchor": "Dash!A:A"},
+        )
+    assert exc.value.code == "bad_slicer"
+    assert "bounded A1 cell" in exc.value.message
+
+
+def test_build_add_slicer_request_visible_values_criteria():
+    """A ``criteria`` with visible values builds ``FilterCriteria.visibleValues`` (the show facet)."""
+    services = _service_with_sheet_index()
+    request = build_add_slicer_request(
+        services,
+        SPREADSHEET_ID,
+        {
+            "dataRange": "Data!A1:C10",
+            "anchor": "Dash!A1",
+            "criteria": {"visible": ["Open", "Pending"]},
+        },
+    )
+    fc = request["addSlicer"]["slicer"]["spec"]["filterCriteria"]
+    assert fc == {"visibleValues": ["Open", "Pending"]}
+
+
+def test_build_add_slicer_request_non_dict_criteria_rejected():
+    """A non-dict ``criteria`` (e.g. a list) raises ``bad_slicer``."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {"dataRange": "Data!A1:C10", "anchor": "Dash!A1", "criteria": ["Open"]},
+        )
+    assert exc.value.code == "bad_slicer"
+    assert "hidden?, visible?, condition?" in exc.value.message
+
+
+def test_build_add_slicer_request_empty_criteria_rejected():
+    """A ``criteria`` dict with no hidden/visible/condition facet raises ``bad_slicer``.
+
+    A slicer must never be given an empty criterion — an all-keys-absent (or all-empty) criteria
+    object yields nothing to filter and is refused.
+    """
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {"dataRange": "Data!A1:C10", "anchor": "Dash!A1", "criteria": {"hidden": []}},
+        )
+    assert exc.value.code == "bad_slicer"
+    assert "no hidden/visible/condition" in exc.value.message
+
+
+def test_build_add_slicer_request_bad_condition_type_rejected():
+    """A ``criteria.condition`` that is neither a terse string nor a structured dict is rejected.
+
+    The condition grammar accepts a terse string (``NUMBER_GREATER(0)``) or a ``{type, values}``
+    dict; an int (or any other type) raises ``bad_slicer`` from ``_build_condition``.
+    """
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {
+                "dataRange": "Data!A1:C10",
+                "anchor": "Dash!A1",
+                "criteria": {"condition": 42},
+            },
+        )
+    assert exc.value.code == "bad_slicer"
+    assert "terse string" in exc.value.message
+
+
+def test_build_add_slicer_request_structured_condition_dict_passed_through():
+    """A pre-structured ``{type, values}`` condition (scalar values) builds a Google condition.
+
+    The structured-dict branch skips the terse-string parse and feeds the dict straight to the
+    shared condformat condition builder, which wraps each bare scalar value as
+    ``{"userEnteredValue": "<v>"}``.
+    """
+    services = _service_with_sheet_index()
+    request = build_add_slicer_request(
+        services,
+        SPREADSHEET_ID,
+        {
+            "dataRange": "Data!A1:C10",
+            "anchor": "Dash!A1",
+            "criteria": {"condition": {"type": "NUMBER_GREATER", "values": ["0"]}},
+        },
+    )
+    cond = request["addSlicer"]["slicer"]["spec"]["filterCriteria"]["condition"]
+    assert cond == {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}]}
+
+
 # =========================================================================== build: update
 
 
@@ -494,6 +653,23 @@ def test_build_update_slicer_request_empty_spec_refused():
     with pytest.raises(SheetsError) as exc:
         build_update_slicer_request(services, SPREADSHEET_ID, 4, {})
     assert exc.value.code == "empty_payload"
+
+
+def test_build_update_slicer_request_rejects_non_dict_spec():
+    """A non-dict update spec raises ``bad_slicer`` (the spec must be a dict of settable keys)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_update_slicer_request(services, SPREADSHEET_ID, 4, ["title"])
+    assert exc.value.code == "bad_slicer"
+    assert "must be a dict" in exc.value.message
+
+
+def test_build_update_slicer_request_slicer_id_zero_is_valid():
+    """A ``slicerId`` of 0 is a valid id (the guard checks ``is None``, not falsiness)."""
+    services = _service_with_sheet_index()
+    request = build_update_slicer_request(services, SPREADSHEET_ID, 0, {"title": "Z"})
+    assert request["updateSlicerSpec"]["slicerId"] == 0
+    assert request["updateSlicerSpec"]["fields"] == "title"
 
 
 # =========================================================================== build: delete

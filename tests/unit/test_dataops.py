@@ -952,6 +952,112 @@ class TestCutPaste:
         assert "pasteType" not in out
 
 
+# =========================================================================== reply/parse degradations
+
+
+class TestReplyDegradations:
+    def test_find_replace_non_dict_reply_defaults_counts_to_zero(self):
+        """If ``replies[0]`` is not a dict, the summary reader returns {} and every count
+        defaults to 0 (dataops.py:220) rather than raising."""
+        services, _, _ = _make_service(batch_replies=[{"replies": ["not-a-dict"]}])
+        out = data_ops(
+            services,
+            SPREADSHEET_ID,
+            action="find_replace",
+            params={"find": "x", "replacement": "y", "allSheets": True},
+        )
+        assert out["occurrencesChanged"] == 0
+        assert out["valuesChanged"] == 0
+
+    def test_delete_duplicates_comparison_columns_must_be_a_list(self):
+        """A scalar (non-list) comparisonColumns is rejected with bad_param (dataops.py:346)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            data_ops(
+                services,
+                SPREADSHEET_ID,
+                action="delete_duplicates",
+                params={"range": "Sheet1!A1:D100", "comparisonColumns": "A"},
+            )
+        assert exc.value.code == "bad_param"
+        assert "list" in exc.value.message
+
+    def test_delete_duplicates_negative_int_column_rejected(self):
+        """A negative integer column offset is rejected (dataops.py:370)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            data_ops(
+                services,
+                SPREADSHEET_ID,
+                action="delete_duplicates",
+                params={"range": "Sheet1!A1:D100", "comparisonColumns": [-1]},
+            )
+        assert exc.value.code == "bad_param"
+        assert ">= 0" in exc.value.message
+
+    def test_delete_duplicates_non_letter_non_int_column_rejected(self):
+        """A column neither a non-blank letter string nor an int (e.g. None or "") is rejected
+        (dataops.py:382)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            data_ops(
+                services,
+                SPREADSHEET_ID,
+                action="delete_duplicates",
+                params={"range": "Sheet1!A1:D100", "comparisonColumns": [None]},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_delete_duplicates_blank_string_column_rejected(self):
+        """A blank/whitespace string column falls through to the catch-all reject
+        (dataops.py:382)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            data_ops(
+                services,
+                SPREADSHEET_ID,
+                action="delete_duplicates",
+                params={"range": "Sheet1!A1:D100", "comparisonColumns": ["   "]},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_sort_range_spec_must_be_a_dict(self):
+        """Each sort spec must be a dict; a scalar spec is rejected (dataops.py:432)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            data_ops(
+                services,
+                SPREADSHEET_ID,
+                action="sort_range",
+                params={"range": "Sheet1!A1:B10", "specs": ["B"]},
+            )
+        assert exc.value.code == "bad_param"
+        assert "dict" in exc.value.message
+
+
+# =========================================================================== auto_fill span inference
+
+
+class TestAutoFillSpanInference:
+    def test_unbounded_destination_yields_zero_fill_length(self):
+        """When the destination is a whole-column range (no row bounds), the row span is
+        indeterminable, so fillLength degrades to 0 — no-op safe (dataops.py:609 via _span:618).
+
+        The ROWS dimension is still inferred (columns don't grow), and the unbounded dest row
+        span makes ``_fill_length`` return 0 instead of crashing on a None span.
+        """
+        services, _, batch_rec = _make_service()
+        data_ops(
+            services,
+            SPREADSHEET_ID,
+            action="auto_fill",
+            params={"source": "Sheet1!A1:A2", "destination": "Sheet1!A:A"},
+        )
+        sad = _only_request(batch_rec)["autoFill"]["sourceAndDestination"]
+        assert sad["dimension"] == "ROWS"
+        assert sad["fillLength"] == 0
+
+
 # =========================================================================== public symbol
 
 

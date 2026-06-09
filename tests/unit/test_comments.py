@@ -1,4 +1,4 @@
-"""Unit tests for ``gsheets.core.comments`` (DESIGN §X.0g, §X.5 — Feature #5, read-only v1).
+"""Unit tests for ``gsheets.core.comments`` (DESIGN §X.0g, §X.5 — Feature #5, full CRUD).
 
 Two halves, both against a MOCKED Drive service (NO network):
 
@@ -6,7 +6,9 @@ Two halves, both against a MOCKED Drive service (NO network):
   in -> the EXACT terse, flattened, condformat-style dict out (``author/displayName`` flattened,
   ``quotedFileContent/value`` -> ``quoted``, replies flattened, opaque ``anchor`` -> ``anchorRaw``,
   terse ``line`` summary). Sparse comments emit only the present sub-keys (token-safe).
-* :func:`comments` — the top-level core fn. A ``_DriveCommentsRecorder`` stands in for
+* :func:`comments` — the top-level core fn (action dispatch: read/create/reply/resolve/delete;
+  the create/reply/resolve/delete write paths are asserted separately below). A
+  ``_DriveCommentsRecorder`` stands in for
   ``services.drive.comments().list(...)`` and asserts: the REQUIRED ``fields`` mask is ALWAYS sent,
   pagination follows ``nextPageToken`` across pages, ``include_resolved=False`` filters resolved
   comments, ``include_deleted`` rides through, ``services.drive is None`` -> ``drive_unavailable``,

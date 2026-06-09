@@ -839,6 +839,130 @@ class TestRead:
         assert exc.value.status == 403
 
 
+# =========================================================================== read serializer edges
+
+
+class TestReadSerializerEdges:
+    def test_unknown_chart_body_type_is_none(self):
+        """A chart spec with neither a dict basicChart nor a pieChart yields type=None
+        (charts.py:222) — the metadata view degrades instead of guessing."""
+        svc = _make_service()
+        _wire_spreadsheets_method(
+            svc,
+            "get",
+            [
+                {
+                    "sheets": [
+                        {
+                            "properties": {"sheetId": 0, "title": "Cliff"},
+                            "charts": [
+                                # No basicChart / pieChart at all (e.g. an org/histogram chart
+                                # outside the v1 flat surface).
+                                {"chartId": 8, "spec": {"title": "Mystery"}},
+                            ],
+                        }
+                    ]
+                }
+            ],
+        )
+        out = charts(svc, SHEET_ID, action="read")
+        assert out["charts"] == [
+            {"chartId": 8, "title": "Mystery", "type": None, "anchor": None}
+        ]
+
+    def test_basic_chart_without_chart_type_is_none(self):
+        """A basicChart dict lacking a chartType surfaces type=None (charts.py:219)."""
+        svc = _make_service()
+        _wire_spreadsheets_method(
+            svc,
+            "get",
+            [
+                {
+                    "sheets": [
+                        {
+                            "properties": {"sheetId": 0, "title": "Cliff"},
+                            "charts": [{"chartId": 9, "spec": {"basicChart": {}}}],
+                        }
+                    ]
+                }
+            ],
+        )
+        out = charts(svc, SHEET_ID, action="read")
+        assert out["charts"][0]["type"] is None
+
+    def test_position_with_empty_anchor_cell_is_none(self):
+        """A position whose overlayPosition carries an EMPTY anchorCell yields anchor=None
+        (charts.py:234) — distinct from a totally absent position."""
+        svc = _make_service()
+        _wire_spreadsheets_method(
+            svc,
+            "get",
+            [
+                {
+                    "sheets": [
+                        {
+                            "properties": {"sheetId": 0, "title": "Cliff"},
+                            "charts": [
+                                {
+                                    "chartId": 10,
+                                    "spec": {"basicChart": {"chartType": "BAR"}},
+                                    "position": {"overlayPosition": {"anchorCell": {}}},
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ],
+        )
+        out = charts(svc, SHEET_ID, action="read")
+        assert out["charts"][0]["anchor"] is None
+
+    def test_read_anchor_helper_empty_cell_returns_none(self):
+        """Direct unit check of the empty-anchorCell branch (charts.py:233-234)."""
+        assert (
+            charts_mod._read_anchor({"overlayPosition": {}}, {0: "Cliff"}) is None
+        )
+
+
+# =========================================================================== create validation edges
+
+
+class TestCreateValidationEdges:
+    def test_series_must_be_a_list_not_a_bare_string(self, patch_addressing):
+        """A bare (non-empty) string ``series`` passes the truthiness guard but is rejected as
+        not-a-list with bad_series (charts.py:286) — guards against silent single-range coercion."""
+        svc = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            charts(
+                svc,
+                SHEET_ID,
+                action="create",
+                spec={
+                    "type": "LINE",
+                    "series": "Cliff!B1:B10",  # should be ["Cliff!B1:B10"]
+                    "anchor": {"sheet": "Cliff"},
+                },
+            )
+        assert exc.value.code == "bad_series"
+
+    def test_non_dict_anchor_rejected(self, patch_addressing):
+        """A non-dict ``anchor`` (e.g. a bare A1 string) is rejected with bad_anchor
+        (charts.py:371) — the anchor must be the flat {sheet,row,col} dict."""
+        svc = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            charts(
+                svc,
+                SHEET_ID,
+                action="create",
+                spec={
+                    "type": "LINE",
+                    "series": ["Cliff!B1:B10"],
+                    "anchor": "Cliff!F1",
+                },
+            )
+        assert exc.value.code == "bad_anchor"
+
+
 # =========================================================================== round-trip-ish
 
 

@@ -193,6 +193,93 @@ def test_serialize_table_rejects_non_dict():
     assert exc.value.code == "bad_table"
 
 
+def test_serialize_table_rejects_non_dict_column():
+    """A non-dict entry inside ``columnProperties`` raises ``bad_table`` (per-column guard)."""
+    services = _service_with_sheet_index()
+    table = {
+        "name": "T",
+        "columnProperties": [{"columnName": "Region", "columnType": "TEXT"}, "nope"],
+    }
+    with pytest.raises(SheetsError) as exc:
+        serialize_table(table, services, SPREADSHEET_ID)
+    assert exc.value.code == "bad_table"
+    assert "column must be a dict" in exc.value.message
+
+
+def test_serialize_table_boolean_validation_renders_bare_type_no_parens():
+    """A BOOLEAN-validated column reads as a bare ``Name:CHECKBOX`` — no empty parens appended.
+
+    The validation one-liner for a no-value condition is the bare type (``BOOLEAN``); the column
+    line token must NOT append ``()`` for a no-arg one-liner, so the column reads ``Flag:CHECKBOX``
+    and the structured ``validation`` carries the bare ``BOOLEAN``.
+    """
+    services = _service_with_sheet_index()
+    table = {
+        "name": "T",
+        "columnProperties": [
+            {
+                "columnName": "Flag",
+                "columnType": "CHECKBOX",
+                "dataValidationRule": {"condition": {"type": "BOOLEAN"}},
+            }
+        ],
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert out["columns"][0]["validation"] == "BOOLEAN"
+    # No empty parens in the terse line — the no-arg one-liner collapses to ``Flag:CHECKBOX``.
+    assert out["line"] == 'table "T" [] cols: Flag:CHECKBOX'
+
+
+def test_serialize_table_dropdown_integral_float_value_renders_without_dot_zero():
+    """An integral-float validation value (``5.0``) stringifies bare (``5``), not ``5.0``."""
+    services = _service_with_sheet_index()
+    table = {
+        "name": "T",
+        "columnProperties": [
+            {
+                "columnName": "Size",
+                "columnType": "DROPDOWN",
+                "dataValidationRule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        # A literal numeric userEnteredValue passes through to the scalar
+                        # stringifier; an integral float must drop the trailing ``.0``.
+                        "values": [{"userEnteredValue": 5.0}, {"userEnteredValue": 10.0}],
+                    }
+                },
+            }
+        ],
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert out["columns"][0]["validation"] == "ONE_OF_LIST(5,10)"
+    assert "Size:DROPDOWN(5,10)" in out["line"]
+
+
+def test_serialize_table_dropdown_bool_value_renders_true_false():
+    """A literal bool validation value renders as ``TRUE``/``FALSE`` (not ``True``/``False``)."""
+    services = _service_with_sheet_index()
+    table = {
+        "name": "T",
+        "columnProperties": [
+            {
+                "columnName": "Active",
+                "columnType": "DROPDOWN",
+                "dataValidationRule": {
+                    "condition": {
+                        "type": "ONE_OF_LIST",
+                        "values": [
+                            {"userEnteredValue": True},
+                            {"userEnteredValue": False},
+                        ],
+                    }
+                },
+            }
+        ],
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert out["columns"][0]["validation"] == "ONE_OF_LIST(TRUE,FALSE)"
+
+
 # =========================================================================== add_table
 
 
@@ -302,6 +389,118 @@ def test_build_add_table_request_without_columns_omits_column_properties():
         services, SPREADSHEET_ID, "Sheet1!A1:F500", {"name": "T"}
     )
     assert "columnProperties" not in req["addTable"]["table"]
+
+
+def test_build_add_table_request_non_list_columns_rejected():
+    """``columns`` that is not a list/tuple raises ``bad_table`` (a dict is NOT a column list)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:F500",
+            {"name": "T", "columns": {"name": "Region", "type": "TEXT"}},
+        )
+    assert exc.value.code == "bad_table"
+    assert "columns must be a list" in exc.value.message
+
+
+def test_build_add_table_request_non_dict_column_entry_rejected():
+    """A non-dict entry in ``columns`` raises ``bad_table`` naming the offending index."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:F500",
+            {"name": "T", "columns": [{"name": "Region", "type": "TEXT"}, "nope"]},
+        )
+    assert exc.value.code == "bad_table"
+    assert "columns[1]" in exc.value.message
+
+
+def test_build_add_table_request_column_missing_name_rejected():
+    """A column with no ``name`` raises ``bad_table`` (every column needs a name)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:F500",
+            {"name": "T", "columns": [{"type": "TEXT"}]},
+        )
+    assert exc.value.code == "bad_table"
+    assert "requires a 'name'" in exc.value.message
+
+
+def test_build_add_table_request_column_missing_type_rejected():
+    """A column with no ``type`` raises ``bad_table`` (every column needs a type)."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:F500",
+            {"name": "T", "columns": [{"name": "Region"}]},
+        )
+    assert exc.value.code == "bad_table"
+    assert "requires a 'type'" in exc.value.message
+
+
+def test_build_add_table_request_validation_must_be_dict():
+    """A non-dict ``validation`` payload raises ``bad_table`` (must be a structured rule dict).
+
+    Uses a non-DROPDOWN column so the DROPDOWN-requires-validation guard is not the trigger —
+    the failure must come from the validation-shape check inside ``_build_column_validation``.
+    """
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:A10",
+            {
+                "name": "T",
+                "columns": [
+                    {"name": "X", "type": "TEXT", "validation": "ONE_OF_LIST(A,B)"}
+                ],
+            },
+        )
+    assert exc.value.code == "bad_table"
+    assert "structured ValidationRule dict" in exc.value.message
+
+
+def test_build_column_validation_non_dict_validation_rejected():
+    """``_build_column_validation`` rejects a non-dict validation directly (defensive guard).
+
+    The public ``build_add_table_request`` path also hits this, but exercising the helper pins
+    the exact ``bad_table`` raised when the structured validation is not a dict at all.
+    """
+    with pytest.raises(SheetsError) as exc:
+        tables._build_column_validation(2, "ONE_OF_LIST(A,B)")
+    assert exc.value.code == "bad_table"
+    assert "columns[2]" in exc.value.message
+    assert "structured ValidationRule dict" in exc.value.message
+
+
+def test_build_column_validation_no_condition_rejected():
+    """A converter result lacking a ``condition`` dict raises ``bad_table`` (no-condition guard).
+
+    ``rule_to_validation`` normally always emits a ``condition``; this pins the defensive branch
+    that protects the Table-column path — a column ``dataValidationRule`` MUST carry a condition —
+    by handing the helper a (monkeypatched) converter that returns no condition.
+    """
+    import gsheets.core.tables as tables_mod
+
+    orig = tables_mod.rule_to_validation
+    tables_mod.rule_to_validation = lambda rule: {"strict": True}  # no ``condition`` key
+    try:
+        with pytest.raises(SheetsError) as exc:
+            tables_mod._build_column_validation(0, {"type": "ONE_OF_LIST", "values": ["A"]})
+    finally:
+        tables_mod.rule_to_validation = orig
+    assert exc.value.code == "bad_table"
+    assert "produced no condition" in exc.value.message
 
 
 # =========================================================================== update_table

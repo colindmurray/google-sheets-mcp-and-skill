@@ -130,6 +130,19 @@ def test_empty_link_dict_or_blank_uri_omits_link():
     assert all("link" not in r for r in runs)
 
 
+def test_run_link_non_dict_format_returns_none():
+    # ``_run_link`` is the defensive link extractor: handed a non-dict (a degenerate run whose
+    # ``format`` was a scalar/list), it must return ``None`` rather than raise, so a malformed
+    # run never crashes the surrounding read.
+    assert richtext._run_link("not-a-dict") is None
+    assert richtext._run_link(None) is None
+
+
+def test_run_link_non_dict_link_value_returns_none():
+    # ``format.link`` present but not a dict (e.g. Google handed back a bare string) -> None.
+    assert richtext._run_link({"link": "https://x"}) is None
+
+
 # ---------------------------------------------------------------------------
 # Run-level link takes precedence over cell hyperlink (the headline contract).
 # ---------------------------------------------------------------------------
@@ -177,6 +190,28 @@ def test_start_beyond_text_length_yields_empty_substring():
 def test_none_full_text_yields_empty_substrings():
     runs = serialize_text_runs([{"startIndex": 0, "format": {"bold": True}}], None)
     assert runs == [{"start": 0, "text": "", "format": {"bold": True}}]
+
+
+def test_explicit_null_start_index_coerced_to_zero():
+    # Google may emit ``"startIndex": null`` on the first run (the field is present-but-null,
+    # not absent). The serializer must coerce an explicit ``None`` to 0 (not crash, not treat
+    # it as a negative/invalid offset) so run 0 still starts at the head of the text.
+    runs = serialize_text_runs([{"startIndex": None, "format": {"italic": True}}], "hello")
+    assert runs == [{"start": 0, "text": "hello", "format": {"italic": True}}]
+
+
+def test_explicit_null_start_index_only_first_run_slices_whole_text():
+    # Two runs where the leading run carries an explicit null startIndex: it must behave exactly
+    # like an omitted startIndex (start 0), so the slice boundary to the next run is unchanged.
+    runs = serialize_text_runs(
+        [
+            {"startIndex": None, "format": {"bold": True}},
+            {"startIndex": 5, "format": {"italic": True}},
+        ],
+        "ABCDEFGH",
+    )
+    assert [r["start"] for r in runs] == [0, 5]
+    assert [r["text"] for r in runs] == ["ABCDE", "FGH"]
 
 
 # ---------------------------------------------------------------------------

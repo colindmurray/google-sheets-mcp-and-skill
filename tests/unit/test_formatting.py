@@ -527,6 +527,102 @@ class TestValidationAndErrors:
             core_format(services, SHEET_ID, "Cliff!A1:A10", {"padding": "2px"})
         assert exc.value.code == "bad_format"
 
+    def test_padding_empty_dict_rejected(self):
+        # An empty padding dict is a no-op leaf -> bad_format (not silently dropped).
+        services = _make_service()
+        _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"padding": {}})
+        assert exc.value.code == "bad_format"
+        assert "padding" in exc.value.message
+
+    def test_text_rotation_must_be_non_empty_dict(self):
+        # textRotation is an atomic leaf: a non-dict value is rejected (formatting.py:186).
+        services = _make_service()
+        _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"textRotation": 45})
+        assert exc.value.code == "bad_format"
+        assert "textRotation" in exc.value.message
+
+    def test_text_rotation_empty_dict_rejected(self):
+        services = _make_service()
+        _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"textRotation": {}})
+        assert exc.value.code == "bad_format"
+
+    def test_borders_non_dict_rejected(self):
+        # ``borders`` must be a {side: spec} dict; a non-dict (e.g. a string) -> bad_format
+        # (formatting.py:229) and NO batchUpdate is issued.
+        services = _make_service()
+        rec = _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"borders": "SOLID #000000"})
+        assert exc.value.code == "bad_format"
+        assert "non-empty" in exc.value.message
+        assert rec.calls == []
+
+    def test_borders_empty_dict_rejected(self):
+        # An empty borders dict is a no-op -> bad_format (formatting.py:229).
+        services = _make_service()
+        _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"borders": {}})
+        assert exc.value.code == "bad_format"
+
+    def test_borders_all_sides_none_is_a_noop_payload(self):
+        # A borders dict whose every recognized side is None sets no edge: the request collapses
+        # to {"range": ...} -> _build_borders_request returns None (formatting.py:247-248), so
+        # with no userEnteredFormat/note either, the whole write is an empty_payload no-op.
+        services = _make_service()
+        rec = _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(
+                services,
+                SHEET_ID,
+                "Cliff!A1:A10",
+                {"borders": {"top": None, "bottom": None}},
+            )
+        assert exc.value.code == "empty_payload"
+        # No batchUpdate may be issued for a payload that yields no writable field.
+        assert rec.calls == []
+
+    def test_borders_all_none_alongside_real_format_drops_borders(self):
+        # The all-None borders contribute nothing, but a real fill still writes: exactly ONE
+        # repeatCell request, NO updateBorders (the None-only borders were dropped).
+        services = _make_service()
+        rec = _wire_batch_update(services)
+        out = core_format(
+            services,
+            SHEET_ID,
+            "Cliff!A1:A10",
+            {"bg": "#FFCDD2", "borders": {"top": None}},
+        )
+        reqs = _single_request(rec)
+        kinds = [next(iter(r)) for r in reqs]
+        assert kinds == ["repeatCell"]
+        assert out["appliedFields"] == "userEnteredFormat.backgroundColorStyle"
+
+    def test_border_side_non_string_spec_rejected(self):
+        # A side mapped to a non-string (e.g. an int) -> _parse_border rejects it
+        # (formatting.py:261) with bad_format and the offending side named.
+        services = _make_service()
+        _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"borders": {"top": 5}})
+        assert exc.value.code == "bad_format"
+        assert "top" in exc.value.message
+
+    def test_border_side_blank_string_rejected(self):
+        # A whitespace-only border spec is not a non-empty string -> bad_format
+        # (formatting.py:261).
+        services = _make_service()
+        _wire_batch_update(services)
+        with pytest.raises(SheetsError) as exc:
+            core_format(services, SHEET_ID, "Cliff!A1:A10", {"borders": {"bottom": "   "}})
+        assert exc.value.code == "bad_format"
+
     def test_http_error_classified(self):
         services = _make_service(account_email="op@example.com")
         rec = _Recorder()

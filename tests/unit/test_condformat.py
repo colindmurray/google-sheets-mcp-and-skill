@@ -718,3 +718,550 @@ def test_module_exposes_public_symbols():
     assert hasattr(condformat, "serialize_rule")
     assert hasattr(condformat, "parse_rule_line")
     assert hasattr(condformat, "build_google_rule")
+
+
+# ===========================================================================
+# Below: branch-pinning tests for uncovered paths. Each asserts a concrete
+# behavior (exact line out, exact error CODE, or boundary result), not just
+# "an exception was raised". Error codes are split: serialize/build raise
+# ``bad_rule`` (they consume Google/structured dicts); parse raises
+# ``bad_rule_line`` (it consumes the terse line) — pinning the code proves the
+# failure happened on the intended side of the grammar.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# serialize_rule — ranges coercion (single string + malformed list). DESIGN §4.4
+# keeps ranges as A1 here (serviceless); these pin the coercion contract.
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_accepts_single_string_range():
+    # A bare A1 string (not a list) is coerced to a one-element range list (line 122).
+    rule = {
+        "ranges": "Cliff!A2:A9",
+        "booleanRule": {"condition": {"type": "BLANK"}, "format": {}},
+    }
+    assert serialize_rule(rule) == "[Cliff!A2:A9] if BLANK ->"
+
+
+def test_serialize_rejects_empty_range_list():
+    # An empty list is not "non-empty" -> bad_rule (line 124), distinct from None ranges.
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {"ranges": [], "booleanRule": {"condition": {"type": "BLANK"}}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_rejects_non_sequence_ranges():
+    # A non-str / non-list/tuple ranges value (e.g. an int) hits the same guard (line 124).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {"ranges": 7, "booleanRule": {"condition": {"type": "BLANK"}}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_rejects_blank_range_string_in_list():
+    # A whitespace-only range string is not resolvable A1 -> bad_rule.
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {"ranges": ["   "], "booleanRule": {"condition": {"type": "BLANK"}}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+# ---------------------------------------------------------------------------
+# serialize_rule — booleanRule / condition structural guards.
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_rejects_boolean_without_condition():
+    # booleanRule present but no condition dict -> bad_rule (line 140).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule({"ranges": ["S!A1"], "booleanRule": {"format": {}}})
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_rejects_condition_without_type():
+    # condition dict present but no ``type`` -> bad_rule (line 153).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {
+                "ranges": ["S!A1"],
+                "booleanRule": {"condition": {"values": [{"userEnteredValue": "x"}]}},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_rejects_condition_with_empty_string_type():
+    # An empty-string ``type`` is falsy and must also raise (line 152-153 guard).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {"ranges": ["S!A1"], "booleanRule": {"condition": {"type": ""}}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+# ---------------------------------------------------------------------------
+# _serialize_condition — value variant handling (lines 161-167).
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_condition_relative_date_value():
+    # A relativeDate-bearing value uses the relativeDate string verbatim (line 161-162).
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {
+            "condition": {
+                "type": "DATE_BEFORE",
+                "values": [{"relativeDate": "PAST_WEEK"}],
+            },
+            "format": {},
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] if DATE_BEFORE(PAST_WEEK) ->"
+
+
+def test_serialize_condition_unknown_value_variant_best_effort():
+    # An unrecognized value dict variant is stringified best-effort from its first
+    # value (line 164-165); a single-key dict is deterministic.
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {
+            "condition": {"type": "WEIRD", "values": [{"futureField": "zzz"}]},
+            "format": {},
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] if WEIRD(zzz) ->"
+
+
+def test_serialize_condition_scalar_values_stringified():
+    # Non-dict scalar values (already-flattened ints/strings) are str()'d (line 167).
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {
+            "condition": {"type": "NUMBER_BETWEEN", "values": ["lo", 42]},
+            "format": {},
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] if NUMBER_BETWEEN(lo,42) ->"
+
+
+# ---------------------------------------------------------------------------
+# _google_format_to_flat — non-dict + legacy flat Color fallbacks.
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_format_non_dict_is_ignored():
+    # A non-dict ``format`` yields no fmt tokens (line 217) -> degenerate arrow line.
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {"condition": {"type": "BLANK"}, "format": "oops"},
+    }
+    assert serialize_rule(rule) == "[S!A1] if BLANK ->"
+
+
+def test_serialize_legacy_flat_background_color():
+    # No backgroundColorStyle, only a deprecated flat ``backgroundColor`` -> bg token
+    # via the legacy fallback (line 224). ColorStyle-vs-flat Color gotcha.
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {
+            "condition": {"type": "BLANK"},
+            "format": {"backgroundColor": {"red": 1, "green": 0, "blue": 0}},
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] if BLANK -> bg #FF0000"
+
+
+def test_serialize_legacy_flat_foreground_color():
+    # No foregroundColorStyle, only a deprecated flat ``foregroundColor`` -> fg token
+    # via the legacy fallback (line 232).
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {
+            "condition": {"type": "BLANK"},
+            "format": {"textFormat": {"foregroundColor": {"red": 0, "green": 1, "blue": 0}}},
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] if BLANK -> fg #00FF00"
+
+
+def test_serialize_color_style_preferred_over_legacy_flat():
+    # When BOTH the ColorStyle and the legacy flat Color are present, ColorStyle wins
+    # (the ``elif`` never runs) — prove the preferred branch dominates.
+    rule = {
+        "ranges": ["S!A1"],
+        "booleanRule": {
+            "condition": {"type": "BLANK"},
+            "format": {
+                "backgroundColorStyle": {"rgbColor": {"red": 0, "green": 0, "blue": 1}},
+                "backgroundColor": {"red": 1, "green": 0, "blue": 0},
+            },
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] if BLANK -> bg #0000FF"
+
+
+# ---------------------------------------------------------------------------
+# _serialize_gradient / _point_color_hex / _serialize_midpoint guards.
+# ---------------------------------------------------------------------------
+
+
+def test_serialize_gradient_no_points_raises():
+    # gradientRule present but with no min/mid/max points -> bad_rule (line 274).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule({"ranges": ["S!A1"], "gradientRule": {}})
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_gradient_non_dict_point_raises():
+    # A minpoint that is not a dict -> bad_rule (line 281).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {"ranges": ["S!A1"], "gradientRule": {"minpoint": "not-a-dict"}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_gradient_point_without_color_raises():
+    # An interpolation point with no colorStyle/color -> bad_rule (line 284).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {"ranges": ["S!A1"], "gradientRule": {"minpoint": {"type": "MIN"}}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_serialize_gradient_point_legacy_color_field():
+    # _point_color_hex falls back to the legacy ``color`` field when ``colorStyle`` absent.
+    rule = {
+        "ranges": ["S!A1"],
+        "gradientRule": {
+            "minpoint": {"type": "MIN", "color": {"red": 1, "green": 1, "blue": 1}},
+            "maxpoint": {"type": "MAX", "color": {"red": 0, "green": 0, "blue": 0}},
+        },
+    }
+    assert serialize_rule(rule) == "[S!A1] gradient min=#FFFFFF | max=#000000"
+
+
+def test_serialize_gradient_midpoint_bad_interp_type_raises():
+    # Midpoint with a type Google would never use (not NUMBER/PERCENT/PERCENTILE) and that
+    # is therefore unmappable to an interp prefix -> bad_rule (line 294).
+    with pytest.raises(SheetsError) as exc:
+        serialize_rule(
+            {
+                "ranges": ["S!A1"],
+                "gradientRule": {
+                    "midpoint": {
+                        "type": "MIN",  # MIN/MAX are not valid midpoint interp types
+                        "value": "5",
+                        "colorStyle": {"themeColor": "ACCENT1"},
+                    }
+                },
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+# ---------------------------------------------------------------------------
+# parse_rule_line — range-list and body-shape edge cases.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_rejects_range_list_of_only_commas():
+    # "[ , ]" survives the empty-string check (non-empty rangelist) but every split
+    # token is blank, so the post-filter list is empty -> bad_rule_line (line 339).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[ , ] if BLANK -> bold")
+    assert exc.value.code == "bad_rule_line"
+
+
+def test_parse_boolean_body_missing_arrow_raises():
+    # An ``if`` body with neither " -> " nor a trailing " ->" -> bad_rule_line (line 376).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] if BLANK bg #FFFFFF")
+    assert exc.value.code == "bad_rule_line"
+
+
+def test_parse_rejects_empty_condition():
+    # "if  -> bold" leaves an empty condition before the arrow -> bad_rule_line (line 387).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] if  -> bold")
+    assert exc.value.code == "bad_rule_line"
+
+
+def test_parse_rejects_condition_with_empty_type_before_paren():
+    # "(arg)" with nothing before the paren -> condition missing type (line 393).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] if (5) -> bold")
+    assert exc.value.code == "bad_rule_line"
+
+
+# ---------------------------------------------------------------------------
+# _parse_format_tokens — interior empty tokens + num-pattern edge.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_format_tolerates_double_spaces_between_tokens():
+    # Collapsed/duplicated spaces produce empty tokens that are skipped (lines 414-415),
+    # not treated as unknown tokens. The format still parses cleanly.
+    parsed = parse_rule_line("[S!A1] if BLANK ->  bold   italic")
+    assert parsed["format"] == {"bold": True, "italic": True}
+
+
+def test_parse_num_token_with_trailing_align_keeps_pattern_tight():
+    # ``num`` greedily consumes up to the next align/wrap keyword; the pattern stops
+    # exactly at ``halign`` even though a number pattern may itself contain a space.
+    parsed = parse_rule_line('[S!A1] if BLANK -> num #,##0.00 "kg" halign RIGHT')
+    assert parsed["format"] == {"numberFormat": '#,##0.00 "kg"', "halign": "RIGHT"}
+
+
+def test_parse_rejects_num_token_without_pattern():
+    # ``num`` immediately followed by an align keyword leaves no pattern parts (line 437).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] if BLANK -> num halign LEFT")
+    assert exc.value.code == "bad_rule_line"
+
+
+# ---------------------------------------------------------------------------
+# _parse_gradient_body — stop-level edge cases.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_rejects_empty_gradient_stop_between_pipes():
+    # A blank stop between two " | " separators -> bad_rule_line (line 476).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] gradient min=#FFFFFF |  | max=#000000")
+    assert exc.value.code == "bad_rule_line"
+
+
+def test_parse_rejects_gradient_stop_missing_color():
+    # ``min=`` has a slot but no hex after the '=' -> bad_rule_line (line 483).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] gradient min=")
+    assert exc.value.code == "bad_rule_line"
+
+
+def test_parse_rejects_mid_stop_without_interp_value_colon():
+    # ``mid:num`` has no inner ':' separating interp from value -> bad_rule_line (line 493).
+    with pytest.raises(SheetsError) as exc:
+        parse_rule_line("[S!A1] gradient mid:num=#FFFFFF")
+    assert exc.value.code == "bad_rule_line"
+
+
+# ---------------------------------------------------------------------------
+# build_google_rule — boolean/condition structural guards.
+# ---------------------------------------------------------------------------
+
+
+def test_build_rejects_boolean_with_non_dict_condition():
+    # kind=boolean but condition is not a dict -> bad_rule (line 572).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {"ranges": ["S!A1"], "kind": "boolean", "condition": "BLANK", "format": {}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_condition_missing_type():
+    # A condition dict with no ``type`` -> bad_rule (line 585).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {"ranges": ["S!A1"], "kind": "boolean", "condition": {"values": ["x"]}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_condition_empty_string_type():
+    # An empty-string type is falsy and rejected (line 584-585 guard).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {"ranges": ["S!A1"], "kind": "boolean", "condition": {"type": ""}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+# ---------------------------------------------------------------------------
+# _build_gradient_rule — stop-level structural guards.
+# ---------------------------------------------------------------------------
+
+
+def test_build_rejects_non_dict_gradient_stop():
+    # A non-dict stop entry -> bad_rule (line 642).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {"ranges": ["S!A1"], "kind": "gradient", "stops": ["min=#FFFFFF"], "format": {}}
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_gradient_stop_bad_slot():
+    # A stop slot outside min/mid/max -> bad_rule (line 645).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {
+                "ranges": ["S!A1"],
+                "kind": "gradient",
+                "stops": [{"slot": "middle", "hexColor": "#FFFFFF"}],
+                "format": {},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_duplicate_gradient_slot():
+    # Two ``min`` stops -> bad_rule (line 647). (parse dedups too, but a caller-built dict
+    # can reach build directly.)
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {
+                "ranges": ["S!A1"],
+                "kind": "gradient",
+                "stops": [
+                    {"slot": "min", "hexColor": "#FFFFFF"},
+                    {"slot": "min", "hexColor": "#000000"},
+                ],
+                "format": {},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_gradient_stop_without_hexcolor():
+    # A stop with no hexColor -> bad_rule (line 651).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {
+                "ranges": ["S!A1"],
+                "kind": "gradient",
+                "stops": [{"slot": "min"}],
+                "format": {},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_mid_stop_bad_interp():
+    # A mid stop with an interp not in num/pct/pctile -> bad_rule (line 661).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {
+                "ranges": ["S!A1"],
+                "kind": "gradient",
+                "stops": [{"slot": "mid", "hexColor": "#000000", "interp": "bogus", "value": "5"}],
+                "format": {},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_mid_stop_missing_value():
+    # A mid stop with interp but no value -> bad_rule (line 667).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {
+                "ranges": ["S!A1"],
+                "kind": "gradient",
+                "stops": [{"slot": "mid", "hexColor": "#000000", "interp": "num"}],
+                "format": {},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_rejects_mid_stop_empty_string_value():
+    # An empty-string value is also rejected (line 666-667 ``value == ""`` guard).
+    with pytest.raises(SheetsError) as exc:
+        build_google_rule(
+            {
+                "ranges": ["S!A1"],
+                "kind": "gradient",
+                "stops": [{"slot": "mid", "hexColor": "#000000", "interp": "num", "value": ""}],
+                "format": {},
+            }
+        )
+    assert exc.value.code == "bad_rule"
+
+
+def test_build_gradient_min_max_emit_no_value_and_correct_types():
+    # min -> MIN/no value; max -> MAX/no value; mid -> mapped interp type + formatted value.
+    rule = build_google_rule(
+        {
+            "ranges": ["S!A1:A9"],
+            "kind": "gradient",
+            "stops": [
+                {"slot": "min", "hexColor": "#FFFFFF"},
+                {"slot": "mid", "hexColor": "#FFEB3B", "interp": "pct", "value": "50"},
+                {"slot": "max", "hexColor": "#000000"},
+            ],
+            "format": {},
+        }
+    )
+    grad = rule["gradientRule"]
+    assert grad["minpoint"]["type"] == "MIN" and "value" not in grad["minpoint"]
+    assert grad["maxpoint"]["type"] == "MAX" and "value" not in grad["maxpoint"]
+    assert grad["midpoint"]["type"] == "PERCENT"
+    assert grad["midpoint"]["value"] == "50"
+
+
+# ---------------------------------------------------------------------------
+# _format_number — every render branch (via build_google_rule, the real caller).
+# ---------------------------------------------------------------------------
+
+
+def _build_mid_value(value):
+    """Build a gradient mid stop with ``value`` and return the emitted Google value string."""
+    rule = build_google_rule(
+        {
+            "ranges": ["S!A1"],
+            "kind": "gradient",
+            "stops": [{"slot": "mid", "hexColor": "#000000", "interp": "num", "value": value}],
+            "format": {},
+        }
+    )
+    return rule["gradientRule"]["midpoint"]["value"]
+
+
+def test_format_number_int_value_renders_bare():
+    # A bare int value renders without a decimal point (line 692): 50 -> "50".
+    assert _build_mid_value(50) == "50"
+
+
+def test_format_number_integer_valued_float_drops_point():
+    # An integer-valued float renders as a bare int (lines 694-695): 50.0 -> "50".
+    assert _build_mid_value(50.0) == "50"
+
+
+def test_format_number_non_integer_float_uses_repr():
+    # A non-integer float keeps its fractional part (line 696): 12.5 -> "12.5".
+    assert _build_mid_value(12.5) == "12.5"
+
+
+def test_format_number_non_numeric_string_passthrough():
+    # A non-numeric string can't be float()'d, so it passes through verbatim (lines 703-704).
+    assert _build_mid_value("abc") == "abc"
+
+
+def test_format_number_rejects_boolean_value():
+    # bool is an int subclass; the explicit guard rejects True/False (line 690).
+    with pytest.raises(SheetsError) as exc:
+        _build_mid_value(True)
+    assert exc.value.code == "bad_rule"
+
+
+def test_format_number_rejects_whitespace_only_string():
+    # A whitespace-only string is empty after strip -> bad_rule (line 699). (Reached via
+    # _format_number directly because build's ``value == ""`` guard precedes it for "" but
+    # not for "   ".)
+    with pytest.raises(SheetsError) as exc:
+        _build_mid_value("   ")
+    assert exc.value.code == "bad_rule"
+
+
+def test_format_number_string_50_0_normalizes_to_50():
+    # A float-ish string normalizes through float() back to a bare int (line 705-707).
+    assert _build_mid_value("50.0") == "50"

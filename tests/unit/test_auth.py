@@ -604,3 +604,121 @@ def test_client_path_default_under_config_dir(patch_resolver, monkeypatch, tmp_p
     assert ei.value.code == "oauth_client_missing"
     # The default client path under the config dir is reported in the message.
     assert str(cfg / "credentials.json") in ei.value.message
+
+
+# =========================================================================== resolver helpers
+# Direct unit tests for the private resolver helpers whose degraded-input branches are not
+# reached through the public ``resolve_credentials`` paths: a malformed SA/token file and a
+# non-serializable credential. These pin "never raise on bad input — degrade gracefully".
+
+
+from gsheets.auth import resolver as _resolver  # noqa: E402
+
+SCOPE_SPREADSHEETS = _resolver.SCOPE_SPREADSHEETS
+SCOPE_DRIVE = _resolver.SCOPE_DRIVE
+
+
+class TestIsServiceAccountFile:
+    def test_unreadable_file_returns_false(self, tmp_path):
+        # A path that does not exist -> the open() raises OSError, swallowed -> False
+        # (resolver.py:108-109). Never raises, so SA selection simply declines this input.
+        missing = tmp_path / "nope.json"
+        assert _resolver._is_service_account_file(missing) is False
+
+    def test_invalid_json_returns_false(self, tmp_path):
+        # A file that exists but is not valid JSON -> json.load raises ValueError, swallowed
+        # (resolver.py:108-109) -> False.
+        bad = tmp_path / "bad.json"
+        bad.write_text("this is not json {", encoding="utf-8")
+        assert _resolver._is_service_account_file(bad) is False
+
+    def test_json_without_service_account_type_returns_false(self, tmp_path):
+        # Valid JSON dict but ``type`` != "service_account" (e.g. an authorized_user token) -> False.
+        user = tmp_path / "user.json"
+        user.write_text(json.dumps({"type": "authorized_user"}), encoding="utf-8")
+        assert _resolver._is_service_account_file(user) is False
+
+    def test_non_dict_json_returns_false(self, tmp_path):
+        # JSON that parses to a non-dict (a list) -> the isinstance(dict) guard returns False.
+        arr = tmp_path / "arr.json"
+        arr.write_text(json.dumps(["service_account"]), encoding="utf-8")
+        assert _resolver._is_service_account_file(arr) is False
+
+    def test_service_account_json_returns_true(self, tmp_path):
+        sa = tmp_path / "sa.json"
+        sa.write_text(
+            json.dumps({"type": "service_account", "client_email": "svc@x.iam"}),
+            encoding="utf-8",
+        )
+        assert _resolver._is_service_account_file(sa) is True
+
+
+class TestTokenGrantedScopes:
+    def test_non_dict_token_json_returns_none(self, tmp_path):
+        # A token file whose JSON parses to a non-dict (a bare list) -> the isinstance(dict)
+        # guard returns None (resolver.py:130) rather than crashing the scope read.
+        path = tmp_path / "token.json"
+        path.write_text(json.dumps(["not", "a", "dict"]), encoding="utf-8")
+        assert _resolver._token_granted_scopes(path) is None
+
+    def test_json_string_token_returns_none(self, tmp_path):
+        # JSON that decodes to a plain string (still valid JSON, still a non-dict) -> None.
+        path = tmp_path / "token.json"
+        path.write_text(json.dumps("just-a-string"), encoding="utf-8")
+        assert _resolver._token_granted_scopes(path) is None
+
+    def test_empty_scopes_list_returns_none(self, tmp_path):
+        # ``scopes: []`` is falsy after filtering -> None (older-token "no scopes" shape).
+        path = tmp_path / "token.json"
+        path.write_text(json.dumps({"scopes": []}), encoding="utf-8")
+        assert _resolver._token_granted_scopes(path) is None
+
+    def test_scopes_list_with_non_strings_filtered(self, tmp_path):
+        # Non-string entries are dropped; valid scopes survive in order.
+        path = tmp_path / "token.json"
+        path.write_text(
+            json.dumps({"scopes": [SCOPE_SPREADSHEETS, 42, None, SCOPE_DRIVE]}),
+            encoding="utf-8",
+        )
+        assert _resolver._token_granted_scopes(path) == [SCOPE_SPREADSHEETS, SCOPE_DRIVE]
+
+    def test_missing_scopes_key_returns_none(self, tmp_path):
+        path = tmp_path / "token.json"
+        path.write_text(json.dumps({"client_id": "cid"}), encoding="utf-8")
+        assert _resolver._token_granted_scopes(path) is None
+
+
+class TestWriteToken:
+    def test_non_serializable_creds_writes_nothing(self, tmp_path):
+        # A credential whose ``to_json`` is not callable (e.g. SA/ADC creds, modeled here as a
+        # bare object with no to_json) -> _write_token returns early without creating the file
+        # (resolver.py:197-198). No parent dirs are created either.
+        dest = tmp_path / "nested" / "token.json"
+
+        class _NoToJson:
+            pass  # no to_json attribute at all
+
+        _resolver._write_token(_NoToJson(), dest)
+        assert not dest.exists()
+        assert not dest.parent.exists()
+
+    def test_to_json_attribute_not_callable_writes_nothing(self, tmp_path):
+        # ``to_json`` present but NOT callable (a string) -> the callable() guard skips the write.
+        dest = tmp_path / "token.json"
+
+        class _BadToJson:
+            to_json = "not a method"
+
+        _resolver._write_token(_BadToJson(), dest)
+        assert not dest.exists()
+
+    def test_serializable_creds_written_and_parent_created(self, tmp_path):
+        # The positive path: a callable ``to_json`` -> the file is written and parent dirs made.
+        dest = tmp_path / "deep" / "token.json"
+
+        class _GoodCreds:
+            def to_json(self):
+                return '{"token": "persisted"}'
+
+        _resolver._write_token(_GoodCreds(), dest)
+        assert dest.read_text(encoding="utf-8") == '{"token": "persisted"}'

@@ -731,3 +731,293 @@ def test_extra_keys_allowed_so_model_never_lags_core():
         {"ok": True, "title": "T", "futureField": [1, 2, 3]}
     )
     assert m.model_dump()["futureField"] == [1, 2, 3]
+
+
+# --------------------------------------------------------------------------------------
+# Terse-rendering branches: pin the exact ``content`` summary for each result model's
+# under-exercised code paths (the base fallback, the empty/None branches, every NewIds
+# bucket, the cross-file fan-out lines). These are the lines the MCP adapter ships as the
+# human/AI-facing ``content`` block, so each assertion pins the literal rendering.
+# --------------------------------------------------------------------------------------
+
+
+def test_base_result_terse_fallback_is_classname_and_ok():
+    # ``_Result`` itself (and any subclass that does NOT override ``terse``) falls back to the
+    # class name plus the ``ok`` flag so a model is never content-less (DESIGN §3.1).
+    assert models._Result(ok=True).terse == "_Result(ok=True)"
+    assert models._Result(ok=False).terse == "_Result(ok=False)"
+
+
+def test_read_values_terse_lists_each_range_row_count():
+    # Per-range "N rows" rendering; values may be absent (None) -> counted as 0.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "render": "formula",
+        "ranges": [
+            {"range": "Cliff!A1:B3", "values": [["=A1"], ["x"], ["y"]]},
+            {"range": "Cliff!Z1:Z1"},  # no values key at all -> 0 rows, not a crash
+        ],
+    }
+    m = models.ReadValuesResult.model_validate(data)
+    terse = m.terse
+    assert terse == (
+        "read_values render=formula\n"
+        "  Cliff!A1:B3: 3 rows\n"
+        "  Cliff!Z1:Z1: 0 rows"
+    )
+
+
+def test_inspect_compact_terse_appends_merges_line():
+    # Compact (runs) path WITH merges -> the trailing "merges:" line (models.py:628).
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "sheet": "Cliff",
+        "range": "Cliff!A1:B2",
+        "rows": 2,
+        "cols": 2,
+        "compact": True,
+        "merges": ["Cliff!A1:A2", "Cliff!B1:B2"],
+        "runs": [{"a1Range": "A1:A2", "value": "merged", "formula": None}],
+    }
+    m = models.InspectResult.model_validate(data)
+    terse = m.terse
+    assert "1 runs" in terse
+    assert "  A1:A2: 'merged'" in terse
+    assert terse.endswith("  merges: Cliff!A1:A2, Cliff!B1:B2")
+
+
+def test_inspect_compact_terse_prefers_formula_over_value():
+    # In a compact run the formula (when present) wins over the value in the rendering.
+    data = {
+        "ok": True,
+        "range": "Cliff!A1:A1",
+        "rows": 1,
+        "cols": 1,
+        "compact": True,
+        "merges": [],
+        "runs": [{"a1Range": "A1", "value": "10", "formula": "=SUM(B:B)"}],
+    }
+    m = models.InspectResult.model_validate(data)
+    assert "  A1: '=SUM(B:B)'" in m.terse
+
+
+def test_append_result_terse_none_updates_falls_back():
+    # No ``updates`` block -> the generic "appended rows" fallback (models.py:703).
+    m = models.AppendResult.model_validate(
+        {"ok": True, "spreadsheetId": "<YOUR_SPREADSHEET_ID>"}
+    )
+    assert m.updates is None
+    assert m.terse == "appended rows"
+
+
+def test_format_result_terse_renders_range_and_fields():
+    m = models.FormatResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "range": "Cliff!A1:A10",
+            "appliedFields": "userEnteredFormat.backgroundColorStyle,borders",
+        }
+    )
+    assert m.terse == (
+        "formatted Cliff!A1:A10: userEnteredFormat.backgroundColorStyle,borders"
+    )
+
+
+def test_set_validation_terse_cleared_when_validation_none():
+    # validation absent -> "cleared validation on <range>" (models.py:769); the round-trip of a
+    # clear ack carries only the range.
+    cleared = models.SetValidationResult.model_validate(
+        {"ok": True, "spreadsheetId": "<YOUR_SPREADSHEET_ID>", "range": "Cliff!A2:A100"}
+    )
+    assert cleared.validation is None
+    assert cleared.terse == "cleared validation on Cliff!A2:A100"
+
+
+def test_batch_result_terse_captures_every_newids_bucket():
+    # Exercise EACH NewIds bucket branch in the terse rendering (models.py:889/891/893/895):
+    # chartIds, namedRangeIds, protectedRangeIds, metadataIds (sheetIds covered elsewhere).
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "replies": [{}, {}, {}],
+        "newIds": {
+            "sheetIds": [7],
+            "chartIds": [42],
+            "namedRangeIds": ["nr_abc"],
+            "protectedRangeIds": [3],
+            "metadataIds": [99],
+        },
+    }
+    m = models.BatchResult.model_validate(data)
+    terse = m.terse
+    assert terse.startswith("batch: 3 reply(ies) | newIds: ")
+    # Every populated bucket is summarized, in declaration order.
+    assert "sheets=[7]" in terse
+    assert "charts=[42]" in terse
+    assert "named=['nr_abc']" in terse
+    assert "protected=[3]" in terse
+    assert "metadata=[99]" in terse
+
+
+def test_batch_result_terse_omits_newids_when_all_buckets_empty():
+    # A NewIds with every bucket empty captures nothing -> no " | newIds:" suffix.
+    m = models.BatchResult.model_validate(
+        {"ok": True, "replies": [{}], "newIds": {}}
+    )
+    assert m.terse == "batch: 1 reply(ies)"
+
+
+def test_batch_result_terse_no_newids_block():
+    # newIds absent entirely -> bare reply count.
+    m = models.BatchResult.model_validate({"ok": True, "replies": []})
+    assert m.terse == "batch: 0 reply(ies)"
+
+
+def test_dimensions_terse_length_branch_for_append():
+    # An append-style verb echoes ``length`` (not start/end) -> " xN" span (models.py:994-995).
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "append",
+        "sheet": "Sheet1",
+        "dimension": "ROWS",
+        "length": 10,
+    }
+    m = models.DimensionsResult.model_validate(data)
+    # start/end absent so the [a:b] span is skipped in favor of the xN length form.
+    assert m.terse == "dimensions append ROWS x10 on Sheet1"
+
+
+def test_dimensions_terse_dimension_only_no_span_numbers():
+    # dimension present but neither start/end NOR length -> bare dimension token, no span.
+    data = {
+        "ok": True,
+        "action": "resize",
+        "sheet": "Sheet1",
+        "dimension": "COLUMNS",
+        "pixelSize": 120,
+    }
+    m = models.DimensionsResult.model_validate(data)
+    assert m.terse == "dimensions resize COLUMNS on Sheet1"
+
+
+def test_comments_terse_deleted_branch():
+    m = models.CommentsResult.model_validate(
+        {"ok": True, "spreadsheetId": "<YOUR_SPREADSHEET_ID>", "commentId": "C1", "deleted": True}
+    )
+    assert m.terse == "deleted comment C1"
+
+
+def test_comments_terse_resolved_branch():
+    m = models.CommentsResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "commentId": "C2",
+            "resolved": True,
+            "reply": {"author": "Bob", "content": "lgtm", "action": "resolve"},
+        }
+    )
+    # resolved takes precedence over the reply branch.
+    assert m.terse == "resolved comment C2"
+
+
+def test_comments_terse_reply_branch():
+    m = models.CommentsResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "commentId": "C3",
+            "reply": {"author": "Ann", "content": "thanks"},
+        }
+    )
+    assert m.terse == "replied to comment C3"
+
+
+def test_comments_terse_created_branch():
+    m = models.CommentsResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "comment": {"id": "C4", "author": "Ann", "content": "new thread"},
+        }
+    )
+    assert m.terse == "created comment C4: 'new thread'"
+
+
+def test_comments_terse_created_branch_empty_content():
+    # A created comment with no content renders the empty string (the ``or ''`` fallback).
+    m = models.CommentsResult.model_validate(
+        {"ok": True, "comment": {"id": "C5", "author": "Ann"}}
+    )
+    assert m.terse == "created comment C5: ''"
+
+
+def test_export_result_terse_renders_path_and_bytes():
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "format": "csv",
+        "mimeType": "text/csv",
+        "path": "/tmp/out.csv",
+        "bytes": 2048,
+    }
+    _roundtrips(models.ExportResult, data)
+    m = models.ExportResult.model_validate(data)
+    assert m.terse == "exported csv -> /tmp/out.csv (2048 bytes)"
+
+
+def test_read_many_terse_summary_values_and_error_entries():
+    # All three result-entry shapes in ONE fan-out: a summary success, a values success, and a
+    # captured per-file error (models.py:1086-1101). Pins the exact per-entry rendering and that
+    # a top-level ok:True still surfaces the embedded ERROR line.
+    data = {
+        "ok": True,
+        "mode": "values",
+        "count": 3,
+        "results": [
+            {
+                "ok": True,
+                "spreadsheetId": "SID_SUMMARY",
+                "title": "Budget",
+                "sheets": [{"sheetId": 0}, {"sheetId": 1}],
+            },
+            {
+                "ok": True,
+                "spreadsheetId": "SID_VALUES",
+                "ranges": [
+                    {"range": "Sheet1!A1:B2", "values": [["a", "b"], ["c", "d"]]},
+                    {"range": "Sheet1!C1", "values": [["x"]]},
+                ],
+            },
+            {
+                "spreadsheetId": "SID_BAD",
+                "ok": False,
+                "error": {"code": "google_api_error", "message": "not found"},
+            },
+        ],
+    }
+    m = models.ReadManyResult.model_validate(data)
+    lines = m.terse.splitlines()
+    assert lines[0] == "read_many mode=values: 3 result(s)"
+    # summary entry: title + sheet count.
+    assert lines[1] == "  SID_SUMMARY: Budget (2 sheet(s))"
+    # values entry: total rows across N ranges (2 + 1 = 3 rows over 2 ranges).
+    assert lines[2] == "  SID_VALUES: 3 row(s) across 2 range(s)"
+    # error entry: the captured failure is surfaced inline.
+    assert lines[3] == "  SID_BAD: ERROR google_api_error: not found"
+
+
+def test_read_many_terse_untitled_summary_and_missing_id():
+    # A summary entry with no title -> "(untitled)"; a malformed entry with no id -> "?".
+    data = {
+        "ok": True,
+        "mode": "summary",
+        "count": 1,
+        "results": [{"ok": True, "sheets": []}],  # no spreadsheetId, no title
+    }
+    m = models.ReadManyResult.model_validate(data)
+    assert m.terse == "read_many mode=summary: 1 result(s)\n  ?: (untitled) (0 sheet(s))"

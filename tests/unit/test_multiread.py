@@ -172,6 +172,19 @@ class TestValuesMode:
         out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["A1"]}])
         assert out["results"][0]["spreadsheetId"] == SID_A
 
+    def test_setdefault_does_not_clobber_cores_own_spreadsheet_id(self, monkeypatch):
+        # ``result.setdefault("spreadsheetId", ...)`` must NOT overwrite an id the core fn already
+        # put on the result — only fill it when absent. If a core result carries a different id,
+        # that id is preserved verbatim (the request id is only a fallback identifier).
+        services = _service()
+
+        def _core_own_id(svc, sid, ranges, *, render):
+            return {"ok": True, "spreadsheetId": "CORE_REPORTED_ID", "ranges": []}
+
+        _patch_read_values(monkeypatch, side_effect=_core_own_id)
+        out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["A1"]}])
+        assert out["results"][0]["spreadsheetId"] == "CORE_REPORTED_ID"
+
 
 # =========================================================================== summary mode
 
@@ -296,6 +309,38 @@ class TestPerItemErrorCapture:
         )
         out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["A1"]}])
         assert out["results"][0]["error"] == err.to_dict()
+
+    def test_captured_values_error_entry_exact_shape(self, monkeypatch):
+        # Pin the FULL captured-failure envelope in values mode: {spreadsheetId, ok:False, error}
+        # where ``error`` omits None fields (no status/reason here) but keeps the hint.
+        services = _service()
+        err = SheetsError("bad_range", "Cliff!ZZ is not a valid A1 range", hint="fix the A1")
+        _patch_read_values(
+            monkeypatch,
+            side_effect=lambda svc, sid, ranges, *, render: (_ for _ in ()).throw(err),
+        )
+        out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["Cliff!ZZ"]}])
+        assert out["results"][0] == {
+            "spreadsheetId": SID_A,
+            "ok": False,
+            "error": {
+                "code": "bad_range",
+                "message": "Cliff!ZZ is not a valid A1 range",
+                "hint": "fix the A1",
+            },
+        }
+
+    def test_non_sheets_error_is_not_swallowed(self, monkeypatch):
+        # Only ``SheetsError`` is captured per-item; an unexpected exception (a real bug) must
+        # propagate so it is never silently masked as a per-file failure.
+        services = _service()
+
+        def _boom(svc, sid, ranges, *, render):
+            raise KeyError("unexpected programmer error")
+
+        _patch_read_values(monkeypatch, side_effect=_boom)
+        with pytest.raises(KeyError):
+            read_many(services, [{"spreadsheetId": SID_A, "ranges": ["A1"]}])
 
 
 # =========================================================================== validation

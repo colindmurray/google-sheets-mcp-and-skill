@@ -1789,6 +1789,278 @@ class TestCaptureNewIdsV02:
         assert capture_new_ids(replies)["slicerIds"] == [4]
 
 
+# =========================================================================== capture_new_ids: broken path
+
+# The reply-id specs walk a 2-step path (e.g. addSheet -> properties -> sheetId). If an
+# intermediate value is the wrong shape mid-walk, the capture must degrade to "no id" rather
+# than raise — exercising the path-abort branch (structure.py:88-90).
+
+
+class TestCaptureNewIdsBrokenPath:
+    def test_nested_non_dict_aborts_path_and_yields_no_id(self):
+        # ``addSheet`` exists and is a dict, but ``properties`` is a string, so the walk to
+        # ``properties.sheetId`` hits a non-dict before the last step -> no sheetId captured.
+        replies = [{"addSheet": {"properties": "not-a-dict"}}]
+        assert capture_new_ids(replies)["sheetIds"] == []
+
+    def test_chart_path_with_non_dict_chart_yields_no_id(self):
+        # ``addChart`` is a dict but ``chart`` is a list -> walk aborts at step 1.
+        replies = [{"addChart": {"chart": ["unexpected"]}}]
+        assert capture_new_ids(replies)["chartIds"] == []
+
+
+# =========================================================================== _require_params non-dict
+
+
+class TestRequireParamsNonDict:
+    def test_non_dict_params_rejected_before_dispatch(self):
+        """A non-None, non-dict ``params`` raises unknown_param (structure.py:111)."""
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure(
+                services, SHEET_ID, action="merge", range="Cliff!A1:B2", params=["nope"]
+            )
+        assert exc.value.code == "unknown_param"
+        assert "must be a dict" in exc.value.message
+
+
+# =========================================================================== read degradations
+
+
+class TestStructureReadDegradations:
+    def test_unrecognized_tab_color_style_is_swallowed(self, monkeypatch):
+        """A tabColorStyle dict that ``color_style_to_hex`` can't parse is dropped, NOT raised
+        (structure.py:389-390): the read never fails over one weird color."""
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        payload = {
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 0,
+                        "title": "Cliff",
+                        "gridProperties": {},
+                        # Neither a themeColor nor any rgb channel -> ValueError inside.
+                        "tabColorStyle": {"unknownColorKind": "x"},
+                    }
+                }
+            ]
+        }
+        _wire_spreadsheets_method(services, "get", [payload])
+        cliff = structure(services, SHEET_ID, action="read")["sheets"][0]
+        # The bad color is silently omitted; the rest of the sheet still serializes.
+        assert "tabColor" not in cliff
+        assert cliff["sheet"] == "Cliff"
+
+    def test_unresolvable_gridrange_degrades_to_none(self, monkeypatch):
+        """When ``gridrange_to_a1`` raises SheetsError, a feature range degrades to None rather
+        than aborting the read (structure.py:495-496 via _safe_gridrange_to_a1)."""
+
+        def boom_gridrange_to_a1(services, spreadsheet_id, gr):
+            raise SheetsError("sheet_not_found", "cannot resolve")
+
+        def fake_a1_to_gridrange(services, spreadsheet_id, a1):
+            return {"sheetId": 0, "_a1": a1}
+
+        monkeypatch.setattr(structure_mod, "a1_to_gridrange", fake_a1_to_gridrange)
+        monkeypatch.setattr(structure_mod, "gridrange_to_a1", boom_gridrange_to_a1)
+        services = _make_service()
+        payload = {
+            "namedRanges": [
+                {"name": "config", "namedRangeId": "abc", "range": {"sheetId": 0}}
+            ],
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Cliff", "gridProperties": {}},
+                    "merges": [{"sheetId": 0, "startRowIndex": 1, "endRowIndex": 4}],
+                }
+            ],
+        }
+        _wire_spreadsheets_method(services, "get", [payload])
+        out = structure(services, SHEET_ID, action="read")
+        # Unresolvable named-range and merge GridRanges become None, not exceptions.
+        assert out["namedRanges"][0]["range"] is None
+        assert out["sheets"][0]["merges"] == [None]
+
+    def test_feature_range_a1_non_dict_is_none(self):
+        """A non-dict GridRange passed to the feature-range resolver yields None directly,
+        never calling addressing (structure.py:485)."""
+        services = _make_service()
+        assert (
+            structure_mod._feature_range_a1(services, SHEET_ID, "not-a-grid-range")
+            is None
+        )
+        assert structure_mod._feature_range_a1(services, SHEET_ID, None) is None
+
+
+# =========================================================================== resolve named-range HTTP error
+
+
+class TestResolveNamedRangeHttpError:
+    def test_delete_named_by_name_classifies_get_error(self, monkeypatch):
+        """The narrow get that resolves a named-range NAME -> id classifies an HttpError
+        (structure.py:602-603)."""
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        bad = MagicMock()
+        bad.execute.side_effect = _make_http_error(404)
+        services.sheets.spreadsheets.return_value.get.return_value = bad
+        with pytest.raises(SheetsError) as exc:
+            structure(
+                services, SHEET_ID, action="delete_named", params={"name": "config"}
+            )
+        assert exc.value.code == "google_api_error"
+        assert exc.value.status == 404
+
+
+# =========================================================================== _added_sheet_props edges
+
+
+class TestAddedSheetProps:
+    def test_non_dict_reply_skipped(self):
+        """A non-dict entry in replies is skipped while scanning for the add/duplicate reply
+        (structure.py:1265)."""
+        resp = {
+            "replies": [
+                "garbage",
+                {"addSheet": {"properties": {"sheetId": 3, "title": "T", "index": 1}}},
+            ]
+        }
+        assert structure_mod._added_sheet_props(resp) == {
+            "sheetId": 3,
+            "title": "T",
+            "index": 1,
+        }
+
+    def test_no_add_reply_yields_all_none(self):
+        """When no addSheet/duplicateSheet reply is present, all id fields default to None
+        (structure.py:1274) — keeps the add/duplicate return shape stable."""
+        assert structure_mod._added_sheet_props({"replies": [{"updateCells": {}}]}) == {
+            "sheetId": None,
+            "title": None,
+            "index": None,
+        }
+
+    def test_add_with_empty_replies_returns_none_props(self, monkeypatch):
+        """End-to-end: an addSheet whose reply carries no properties surfaces an all-None
+        sheet dict rather than crashing."""
+        services = _make_service()
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{"replies": []}])
+        out = manage_sheets(services, SHEET_ID, action="add")
+        assert rec.calls  # the add was issued
+        assert out["sheet"] == {"sheetId": None, "title": None, "index": None}
+
+
+# =========================================================================== metadata location edges
+
+
+class TestMetadataLocationEdges:
+    def test_validate_location_non_dict_rejected(self):
+        """A non-dict, non-None ``location`` raises unknown_param (structure.py:1350)."""
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            metadata(
+                services, SHEET_ID, action="create", key="k", location=["not", "a", "dict"]
+            )
+        assert exc.value.code == "unknown_param"
+        assert "must be a dict" in exc.value.message
+
+    def test_create_dimension_anchor_bad_dimension_rejected(self, monkeypatch):
+        """A dimension anchor whose dimension is neither ROWS nor COLUMNS raises unknown_param
+        (structure.py:1378) — before any sheetId resolution."""
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        with pytest.raises(SheetsError) as exc:
+            metadata(
+                services,
+                SHEET_ID,
+                action="create",
+                key="k",
+                location={
+                    "sheet": "Cliff",
+                    "dimension": "DIAGONAL",
+                    "start": 0,
+                    "end": 1,
+                },
+            )
+        assert exc.value.code == "unknown_param"
+        assert "ROWS" in exc.value.message
+
+    def test_location_to_metadata_location_whole_sheet_missing_sheet(self):
+        """A whole-sheet anchor with no 'sheet' (and no dimension/start/end) raises
+        missing_param (structure.py:1393)."""
+        services = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            structure_mod._location_to_metadata_location(
+                services, SHEET_ID, {"sheet": ""}
+            )
+        assert exc.value.code == "missing_param"
+
+    def test_metadata_location_to_public_non_dict_is_empty(self):
+        """A non-dict Google location flattens to {} (structure.py:1403)."""
+        services = _make_service()
+        assert (
+            structure_mod._metadata_location_to_public(services, SHEET_ID, "bad") == {}
+        )
+
+    def test_metadata_location_to_public_bare_sheet_id(self, monkeypatch):
+        """A bare ``{"sheetId": N}`` Google location resolves to ``{"sheet": <title>}``
+        (structure.py:1417)."""
+        _patch_addressing(monkeypatch, sheet_id=0, title="Cliff")
+        services = _make_service()
+        out = structure_mod._metadata_location_to_public(
+            services, SHEET_ID, {"sheetId": 0}
+        )
+        assert out == {"sheet": "Cliff"}
+
+    def test_read_by_id_whole_sheet_location_resolves_title(self, monkeypatch):
+        """End-to-end: a read whose entry is anchored to a whole sheet surfaces
+        ``location={"sheet": <title>}`` (exercises the bare-sheetId public mapping)."""
+        _patch_addressing(monkeypatch, sheet_id=0, title="Cliff")
+        services = _make_service()
+        rec = _wire_developer_metadata_method(
+            services,
+            "get",
+            [
+                {
+                    "metadataId": 9,
+                    "metadataKey": "k",
+                    "metadataValue": "v",
+                    "visibility": "DOCUMENT",
+                    "location": {"sheetId": 0},
+                }
+            ],
+        )
+        out = metadata(services, SHEET_ID, action="read", metadata_id=9)
+        assert rec.calls
+        assert out["metadata"][0]["location"] == {"sheet": "Cliff"}
+
+
+# =========================================================================== _safe_sheet_title
+
+
+class TestSafeSheetTitle:
+    def test_none_sheet_id_is_none(self):
+        services = _make_service()
+        assert structure_mod._safe_sheet_title(services, SHEET_ID, None) is None
+
+    def test_unresolvable_sheet_id_degrades_to_none(self, monkeypatch):
+        """When ``gridrange_to_a1`` raises SheetsError resolving a sheetId, the title degrades
+        to None rather than propagating (structure.py:1424,1427-1428)."""
+
+        def boom(services, spreadsheet_id, gr):
+            raise SheetsError("sheet_not_found", "no such sheet")
+
+        monkeypatch.setattr(structure_mod, "gridrange_to_a1", boom)
+        services = _make_service()
+        assert structure_mod._safe_sheet_title(services, SHEET_ID, 999) is None
+
+    def test_resolvable_sheet_id_returns_title(self, monkeypatch):
+        _patch_addressing(monkeypatch, sheet_id=0, title="Cliff")
+        services = _make_service()
+        assert structure_mod._safe_sheet_title(services, SHEET_ID, 0) == "Cliff"
+
+
 # =========================================================================== boundary
 
 

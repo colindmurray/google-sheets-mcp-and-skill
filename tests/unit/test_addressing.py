@@ -132,6 +132,39 @@ class TestParseA1:
             parse_a1("'unclosed!A1")
         assert ei.value.code == "bad_range"
 
+    def test_quoted_name_not_followed_by_bang_raises(self):
+        # A closed quote with trailing junk that is not "!..." is malformed (addressing.py:240).
+        with pytest.raises(SheetsError) as ei:
+            parse_a1("'My Sheet'extra")
+        assert ei.value.code == "bad_range"
+        assert "expected '!'" in str(ei.value)
+
+    def test_empty_sheet_name_before_bang_raises(self):
+        # "!A1" has an empty sheet prefix before the "!" (addressing.py:247).
+        with pytest.raises(SheetsError) as ei:
+            parse_a1("!A1")
+        assert ei.value.code == "bad_range"
+        assert "empty sheet name" in str(ei.value)
+
+    def test_unqualified_triple_colon_token_is_treated_as_sheet_name(self):
+        # "A:B:C" has >2 colon parts, so _looks_like_range rejects it (addressing.py:271); with
+        # no "!" it is then taken as a bare (whole-sheet) sheet name, not a range.
+        assert parse_a1("A:B:C") == {"sheet": "A:B:C", "start": None, "end": None}
+
+    def test_unqualified_dangling_colon_token_is_treated_as_sheet_name(self):
+        # "A1:" has an empty endpoint -> _looks_like_range rejects it (addressing.py:276); with
+        # no "!" it degenerates to a bare (whole-sheet) sheet name.
+        assert parse_a1("A1:") == {"sheet": "A1:", "start": None, "end": None}
+
+    def test_zero_row_endpoint_rejected_by_split_cell(self):
+        # parse_a1 accepts "A0" lexically (regex matches digits), but converting it raises
+        # because the row index is < 1 (addressing.py:301, enforced in _split_cell).
+        services, _ = _make_services()
+        with pytest.raises(SheetsError) as ei:
+            a1_to_gridrange(services, "SID", "Cliff!A0:A0")
+        assert ei.value.code == "bad_range"
+        assert "row index must be >= 1" in str(ei.value)
+
 
 # --------------------------------------------------------------------------------------
 # a1_to_gridrange + gridrange_to_a1 (golden master)
@@ -350,6 +383,133 @@ class TestGridRangeToA1:
         gr = {"sheetId": 0, "startColumnIndex": 0, "endColumnIndex": 1, "startRowIndex": 4}
         # rows present (start only) -> end defaults to start row.
         assert gridrange_to_a1(services, "SID", gr) == "Cliff!A5"
+
+
+# --------------------------------------------------------------------------------------
+# Malformed sheet-index resolution (missing/None sheetId or title)
+# --------------------------------------------------------------------------------------
+
+
+class TestSheetResolutionEdgeCases:
+    def test_unqualified_range_with_no_sheets_raises(self):
+        # An unqualified range binds the first sheet; a spreadsheet with NO sheets cannot
+        # resolve one (addressing.py:388).
+        services, _ = _make_services(sheets_index=[])
+        with pytest.raises(SheetsError) as ei:
+            a1_to_gridrange(services, "SID", "A1:B2")
+        assert ei.value.code == "sheet_not_found"
+        assert "no sheets" in str(ei.value)
+
+    def test_unqualified_range_first_sheet_missing_id_raises(self):
+        # The first sheet exists but its properties omit sheetId (addressing.py:393).
+        services, resource = _make_services()
+        resource.spreadsheets.return_value.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"title": "Cliff", "index": 0}}]
+        }
+        with pytest.raises(SheetsError) as ei:
+            a1_to_gridrange(services, "SID", "A1:B2")
+        assert ei.value.code == "sheet_not_found"
+        assert "first sheet" in str(ei.value)
+
+    def test_named_sheet_without_id_raises(self):
+        # A title match whose properties carry no sheetId (addressing.py:400).
+        services, resource = _make_services()
+        resource.spreadsheets.return_value.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"title": "Cliff", "index": 0}}]
+        }
+        with pytest.raises(SheetsError) as ei:
+            a1_to_gridrange(services, "SID", "Cliff!A1")
+        assert ei.value.code == "sheet_not_found"
+        assert "has no sheetId" in str(ei.value)
+
+    def test_gridrange_to_a1_sheet_without_title_raises(self):
+        # gridrange_to_a1 resolves sheetId -> title; a matching sheet missing its title is an
+        # error rather than rendering a prefix-less range (addressing.py:419).
+        services, resource = _make_services()
+        resource.spreadsheets.return_value.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"sheetId": 7, "index": 0}}]
+        }
+        gr = {
+            "sheetId": 7,
+            "startRowIndex": 0,
+            "endRowIndex": 1,
+            "startColumnIndex": 0,
+            "endColumnIndex": 1,
+        }
+        with pytest.raises(SheetsError) as ei:
+            gridrange_to_a1(services, "SID", gr)
+        assert ei.value.code == "sheet_not_found"
+        assert "has no title" in str(ei.value)
+
+
+# --------------------------------------------------------------------------------------
+# Pure internal helpers — boundary branches not reachable via the validated public path
+# --------------------------------------------------------------------------------------
+
+
+class TestInternalHelperBranches:
+    def test_split_cell_rejects_unparseable_token(self):
+        # _CELL_RE (col-letters then digits) does not match a digit-then-letter token; the
+        # public path pre-validates, so we drive the helper directly (addressing.py:294).
+        from gsheets.core.addressing import _split_cell
+
+        with pytest.raises(SheetsError) as ei:
+            _split_cell("1A", "1A")
+        assert ei.value.code == "bad_range"
+
+    def test_split_cell_rejects_empty_endpoint(self):
+        # An empty token carries neither a column nor a row (addressing.py:298).
+        from gsheets.core.addressing import _split_cell
+
+        with pytest.raises(SheetsError) as ei:
+            _split_cell("", "orig")
+        assert ei.value.code == "bad_range"
+        assert "empty A1 endpoint" in str(ei.value)
+
+    def test_split_cell_parses_column_only_and_row_only(self):
+        # Column-only ("A") -> row None; row-only ("5") -> col None — the unbounded endpoints.
+        from gsheets.core.addressing import _split_cell
+
+        assert _split_cell("A", "A") == ("A", None)
+        assert _split_cell("5", "5") == (None, 5)
+
+    def test_index_to_col_rejects_negative(self):
+        # A negative column index is a programming error, not a renderable column
+        # (addressing.py:316).
+        from gsheets.core.addressing import _index_to_col
+
+        with pytest.raises(SheetsError) as ei:
+            _index_to_col(-1)
+        assert ei.value.code == "bad_range"
+
+    def test_col_index_roundtrip_boundaries(self):
+        # Pin the 0-based column math at the Z/AA and the two-letter boundary.
+        from gsheets.core.addressing import _col_to_index, _index_to_col
+
+        assert _col_to_index("A") == 0
+        assert _col_to_index("Z") == 25
+        assert _col_to_index("AA") == 26
+        assert _col_to_index("AB") == 27
+        assert _index_to_col(0) == "A"
+        assert _index_to_col(25) == "Z"
+        assert _index_to_col(26) == "AA"
+        assert _index_to_col(27) == "AB"
+
+    def test_looks_like_range_rejects_three_parts(self):
+        # More than two colon-separated endpoints is never a valid A1 range
+        # (addressing.py:271).
+        from gsheets.core.addressing import _looks_like_range
+
+        assert _looks_like_range("A:B:C") is False
+        assert _looks_like_range("A1:B2") is True
+
+    def test_looks_like_range_rejects_empty_endpoint(self):
+        # An endpoint that is neither a column nor a row token fails the range check
+        # (addressing.py:276).
+        from gsheets.core.addressing import _looks_like_range
+
+        assert _looks_like_range("A1:") is False
+        assert _looks_like_range(":B2") is False
 
 
 # --------------------------------------------------------------------------------------

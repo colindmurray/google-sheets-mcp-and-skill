@@ -196,6 +196,58 @@ class TestDriveExports:
         # No Sheets values read happened for a Drive-backed export.
         services.sheets.spreadsheets.assert_not_called()
 
+    def test_lazy_binds_media_download_on_first_drive_export(self, tmp_path, monkeypatch):
+        # The module-level ``MediaIoBaseDownload`` is bound LAZILY from googleapiclient.http on the
+        # FIRST Drive export (the argparse-boundary deferral, export.py:170-174). Force the unbound
+        # state (None) and intercept the real ``from googleapiclient.http import ...`` so the lazy
+        # branch runs without touching the network, then assert the global got populated.
+        import googleapiclient.http as ghttp
+
+        payload = b"lazy-bound-bytes"
+        fake_dl, constructed = _fake_downloader_factory(payload)
+        # Patch the SOURCE module attribute so the in-function ``from googleapiclient.http import
+        # MediaIoBaseDownload`` resolves to our fake; reset the export module's seam to None so the
+        # ``if MediaIoBaseDownload is None:`` branch is taken.
+        monkeypatch.setattr(ghttp, "MediaIoBaseDownload", fake_dl)
+        monkeypatch.setattr(export_mod, "MediaIoBaseDownload", None)
+
+        services = _make_service()
+        dest = tmp_path / "lazy.pdf"
+        out = export(services, SHEET_ID, format="pdf", path=str(dest))
+
+        # The bytes streamed through the lazily-bound downloader.
+        assert dest.read_bytes() == payload
+        assert out["bytes"] == len(payload)
+        # The lazy branch populated the module-level seam from googleapiclient.http (no longer None).
+        assert export_mod.MediaIoBaseDownload is fake_dl
+        # And the real export_media request flowed into the freshly-bound downloader.
+        assert (
+            constructed["request"]
+            is services.drive.files.return_value.export_media.return_value
+        )
+
+    def test_already_bound_media_download_not_reimported(self, tmp_path, monkeypatch):
+        # When the seam is ALREADY bound (a prior export or a test patch), the lazy import is
+        # skipped: a poisoned googleapiclient.http import would raise if it were re-entered.
+        import googleapiclient.http as ghttp
+
+        payload = b"already-bound"
+        fake_dl, _ = _fake_downloader_factory(payload)
+        monkeypatch.setattr(export_mod, "MediaIoBaseDownload", fake_dl)
+
+        def _boom():  # pragma: no cover - must never be evaluated
+            raise AssertionError("lazy import must be skipped when already bound")
+
+        # Make the source attribute a property that explodes if read via re-import.
+        monkeypatch.delattr(ghttp, "MediaIoBaseDownload", raising=False)
+
+        services = _make_service()
+        dest = tmp_path / "bound.xlsx"
+        out = export(services, SHEET_ID, format="xlsx", path=str(dest))
+        assert out["bytes"] == len(payload)
+        # Still the same patched object — never replaced by a re-import.
+        assert export_mod.MediaIoBaseDownload is fake_dl
+
     def test_drive_http_error_classified(self, tmp_path, monkeypatch):
         # export_media raises an HttpError -> classified through the single envelope.
         services = _make_service()

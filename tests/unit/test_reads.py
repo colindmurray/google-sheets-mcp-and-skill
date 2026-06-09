@@ -254,6 +254,90 @@ class TestOverview:
         assert ei.value.code == "google_api_error"
         assert ei.value.status == 403
 
+    def test_unparseable_tab_color_is_omitted_not_fatal(self):
+        # A tabColorStyle that is a non-empty dict but carries neither a themeColor nor any
+        # rgb channel makes the color helper raise ValueError; overview swallows it and omits
+        # the tabColor key rather than failing the whole call (reads.py:133-134).
+        payload = {
+            "properties": {"title": "T"},
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 0,
+                        "title": "Cliff",
+                        "index": 0,
+                        "sheetType": "GRID",
+                        "gridProperties": {"rowCount": 10, "columnCount": 5},
+                        "tabColorStyle": {"notAColor": True},
+                    }
+                }
+            ],
+        }
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        assert "tabColor" not in out["sheets"][0]
+
+    def test_named_range_with_dangling_sheet_id_renders_null_range(self):
+        # A namedRange whose GridRange points at a sheetId not present in the sheet index makes
+        # gridrange_to_a1 raise sheet_not_found; overview catches it and surfaces range=None
+        # rather than failing (reads.py:146-151).
+        payload = {
+            "properties": {"title": "T"},
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 0,
+                        "title": "Cliff",
+                        "index": 0,
+                        "sheetType": "GRID",
+                        "gridProperties": {"rowCount": 10, "columnCount": 5},
+                    }
+                }
+            ],
+            "namedRanges": [
+                {
+                    "name": "dangling",
+                    "namedRangeId": "z",
+                    "range": {
+                        "sheetId": 999,
+                        "startRowIndex": 0,
+                        "endRowIndex": 1,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 1,
+                    },
+                }
+            ],
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = overview(services, SHEET_ID)
+        assert out["namedRanges"] == [
+            {"name": "dangling", "namedRangeId": "z", "range": None}
+        ]
+
+    def test_named_range_without_range_key_renders_null_range(self):
+        # A namedRange entry that carries no ``range`` (or no sheetId in it) is surfaced with a
+        # null range, not dropped (reads.py:151, the else branch).
+        payload = {
+            "properties": {"title": "T"},
+            "sheets": [
+                {
+                    "properties": {
+                        "sheetId": 0,
+                        "title": "Cliff",
+                        "index": 0,
+                        "sheetType": "GRID",
+                        "gridProperties": {"rowCount": 10, "columnCount": 5},
+                    }
+                }
+            ],
+            "namedRanges": [{"name": "norange", "namedRangeId": "q"}],
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = overview(services, SHEET_ID)
+        assert out["namedRanges"] == [
+            {"name": "norange", "namedRangeId": "q", "range": None}
+        ]
+
 
 # =========================================================================== inspect (mask)
 
@@ -498,6 +582,86 @@ class TestInspectCells:
         )
         out = inspect(services, SHEET_ID, "Cliff!A1")
         assert out["cells"][0] == {"a1": "A1", "value": 42}
+
+    def test_bool_value_typed_fallback(self):
+        # boolValue is in the scalar-key preference list; surfaces the raw bool, not a string.
+        cell = {"effectiveValue": {"boolValue": True}}
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1")
+        assert out["cells"][0] == {"a1": "A1", "value": True}
+
+    def test_error_value_surfaces_error_type(self):
+        # A formula error with no formattedValue surfaces the errorValue.type (e.g. "#DIV/0!")
+        # so the model sees the cell rendered an error (reads.py:464-465).
+        cell = {
+            "effectiveValue": {
+                "errorValue": {"type": "DIVIDE_BY_ZERO", "message": "Division by zero"}
+            }
+        }
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1")
+        # Prefers .type over .message.
+        assert out["cells"][0] == {"a1": "A1", "value": "DIVIDE_BY_ZERO"}
+
+    def test_error_value_falls_back_to_message_when_no_type(self):
+        # When an errorValue carries only a message (no type), that message is the value
+        # (reads.py:466 — ``error.get("type") or error.get("message")``).
+        cell = {"effectiveValue": {"errorValue": {"message": "boom"}}}
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1")
+        assert out["cells"][0] == {"a1": "A1", "value": "boom"}
+
+    def test_user_entered_format_only_cell_flattens_uef(self):
+        # A cell carrying ONLY userEnteredFormat (intent, no value/effectiveFormat) still emits
+        # the flattened userEnteredFormat (reads.py:411).
+        cell = {
+            "formattedValue": "x",
+            "userEnteredFormat": {"textFormat": {"bold": True}},
+        }
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1")
+        assert out["cells"][0] == {
+            "a1": "A1",
+            "value": "x",
+            "userEnteredFormat": {"bold": True},
+        }
+
+    def test_empty_cell_collapses_to_a1_only(self):
+        # A cell with no value/format/note/validation collapses to None internally and is
+        # emitted as a bare {"a1": ...} blank in the padded rectangle (_build_cell -> None).
+        rowdata = [{"values": [{}, _cell(value="b")]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1")
+        assert out["cells"] == [{"a1": "A1"}, {"a1": "B1", "value": "b"}]
 
     def test_no_sheets_returned_raises(self):
         services, _ = _make_service(
@@ -813,6 +977,76 @@ class TestInspectCompactRuns:
         assert out["runs"] == [
             {"a1Range": "A1:B1", "value": "1", "formula": "=A1", "format": {}}
         ]
+
+    def test_run_format_falls_back_to_user_entered_format(self):
+        # When a cell carries userEnteredFormat but NO effectiveFormat (e.g.
+        # include_effective_format=False), the compact run's single ``format`` is sourced from
+        # userEnteredFormat (reads.py:596).
+        uef = {"textFormat": {"bold": True}}
+        a = _cell(value="x", uef=uef)
+        b = _cell(value="x", uef=uef)
+        rowdata = [{"values": [a, b]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(
+            services,
+            SHEET_ID,
+            "Cliff!A1:B1",
+            compact=True,
+            include_effective_format=False,
+        )
+        # Both cells equal -> one A1:B1 run whose format came from userEnteredFormat.
+        assert out["runs"] == [
+            {"a1Range": "A1:B1", "value": "x", "formula": None, "format": {"bold": True}}
+        ]
+
+    def test_run_prefers_effective_format_over_user_entered(self):
+        # When both are present, the run's ``format`` is the effectiveFormat (what renders),
+        # not the userEnteredFormat intent.
+        eff = {"textFormat": {"italic": True}}
+        uef = {"textFormat": {"bold": True}}
+        c = _cell(value="x", eff=eff, uef=uef)
+        rowdata = [{"values": [c]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1", compact=True)
+        assert out["runs"][0]["format"] == {"italic": True}
+
+    def test_pivot_rides_compact_run_when_present(self):
+        # A compact run for a pivot-anchor cell carries the serialized ``pivot`` (reads.py:726)
+        # so compact reads never silently drop it.
+        pivot = {
+            "source": {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 500,
+                "startColumnIndex": 0,
+                "endColumnIndex": 6,
+            },
+            "rows": [{"sourceColumnOffset": 0}],
+            "values": [{"summarizeFunction": "SUM", "sourceColumnOffset": 4}],
+        }
+        cell = {"formattedValue": "Region", "pivotTable": pivot}
+        rowdata = [{"values": [cell]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1", compact=True, include_pivot=True)
+        run = out["runs"][0]
+        assert run["a1Range"] == "A1:A1"
+        # The pivot's source GridRange was resolved to A1 via the addressing layer.
+        assert run["pivot"]["source"] == "Cliff!A1:F500"
 
 
 # =========================================================== read_conditional_formats
@@ -1192,6 +1426,38 @@ class TestInspectRichText:
         assert c["value"] == "x"
         assert c["runs"][0]["format"] == {"italic": True}
 
+    def test_runs_slice_uses_string_value_when_no_formatted_value(self):
+        # textFormatRuns index into the cell's DISPLAY string. When Google omits
+        # formattedValue, the slicer falls back to effectiveValue.stringValue so the run
+        # substrings are still correct (reads.py:482-487, _cell_text fallback).
+        cell = {
+            "effectiveValue": {"stringValue": "HelloWorld"},
+            "textFormatRuns": [
+                {"startIndex": 0, "format": {"bold": True}},
+                {"startIndex": 5, "format": {}},
+            ],
+        }
+        out = self._inspect_cell(cell, flags={"include_rich_text": True})
+        c = out["cells"][0]
+        assert c["value"] == "HelloWorld"
+        assert c["runs"] == [
+            {"start": 0, "text": "Hello", "format": {"bold": True}},
+            {"start": 5, "text": "World"},
+        ]
+
+    def test_runs_empty_substrings_when_value_is_numeric(self):
+        # A numeric cell has no string DISPLAY text to slice; _cell_text returns None so the
+        # run substrings are empty (the serializer treats None as "" — reads.py:487).
+        cell = {
+            "effectiveValue": {"numberValue": 12345},
+            "textFormatRuns": [{"startIndex": 0, "format": {"bold": True}}],
+        }
+        out = self._inspect_cell(cell, flags={"include_rich_text": True})
+        c = out["cells"][0]
+        assert c["value"] == 12345
+        # No display text -> the single run slices to an empty string.
+        assert c["runs"] == [{"start": 0, "text": "", "format": {"bold": True}}]
+
 
 # ==================================================== inspect pivot (§X.6)
 
@@ -1307,6 +1573,79 @@ class TestCompactRichTextNeverMerges:
         assert out["runs"] == [
             {"a1Range": "A1:B1", "value": "x", "formula": None, "format": {}}
         ]
+
+
+# =========================================================== pure internal helpers
+
+
+class TestValidationOneLiner:
+    def test_non_dict_rule_yields_empty_string(self):
+        # A defensive guard: a non-dict rule renders to "" rather than raising (reads.py:512).
+        assert reads_mod._validation_one_liner("nope") == ""
+        assert reads_mod._validation_one_liner(None) == ""
+
+    def test_rule_without_type_yields_empty_string(self):
+        # A rule dict with no ``type`` has nothing to render (reads.py:515).
+        assert reads_mod._validation_one_liner({"values": ["a", "b"]}) == ""
+
+    def test_source_rule_uses_source(self):
+        assert (
+            reads_mod._validation_one_liner(
+                {"type": "ONE_OF_RANGE", "source": "Cliff!Z1:Z10"}
+            )
+            == "ONE_OF_RANGE(Cliff!Z1:Z10)"
+        )
+
+    def test_values_rule_joins_with_commas(self):
+        assert (
+            reads_mod._validation_one_liner({"type": "ONE_OF_LIST", "values": ["Yes", "No"]})
+            == "ONE_OF_LIST(Yes,No)"
+        )
+
+    def test_type_only_rule_renders_bare_type(self):
+        assert reads_mod._validation_one_liner({"type": "BOOLEAN"}) == "BOOLEAN"
+
+    def test_source_takes_precedence_over_values(self):
+        # When a rule carries both a source and values, the source wins the one-liner.
+        rule = {"type": "ONE_OF_RANGE", "source": "Cliff!A1:A5", "values": ["x"]}
+        assert reads_mod._validation_one_liner(rule) == "ONE_OF_RANGE(Cliff!A1:A5)"
+
+
+class TestRunFormatHelper:
+    def test_prefers_effective_format(self):
+        cell = {"effectiveFormat": {"bg": "#fff"}, "userEnteredFormat": {"bold": True}}
+        assert reads_mod._run_format(cell) == {"bg": "#fff"}
+
+    def test_falls_back_to_user_entered_format(self):
+        # Only userEnteredFormat present (reads.py:595-596).
+        assert reads_mod._run_format({"userEnteredFormat": {"bold": True}}) == {
+            "bold": True
+        }
+
+    def test_returns_none_when_no_format(self):
+        # A value-only cell has no format to carry on its run.
+        assert reads_mod._run_format({"value": "x"}) is None
+
+
+class TestStableRepr:
+    def test_json_serializable_is_sorted_and_deterministic(self):
+        # Keys are sorted so two equal dicts in any insertion order produce one identity.
+        assert reads_mod._stable_repr({"b": 1, "a": 2}) == reads_mod._stable_repr(
+            {"a": 2, "b": 1}
+        )
+        assert reads_mod._stable_repr({"b": 1, "a": 2}) == '{"a": 2, "b": 1}'
+
+    def test_non_string_default_handled_via_str(self):
+        # default=str lets json.dumps stringify an otherwise-unserializable leaf VALUE (here a
+        # set) into a JSON string, so this stays on the json path (no repr fallback).
+        assert reads_mod._stable_repr({1, 2, 3}) == '"{1, 2, 3}"'
+
+    def test_unserializable_falls_back_to_repr(self):
+        # A dict with a non-primitive (tuple) KEY makes json.dumps raise TypeError that
+        # default= cannot rescue (default is not consulted for keys); _stable_repr falls back
+        # to repr() so it never raises (reads.py:606-607).
+        obj = {(1, 2): "x"}
+        assert reads_mod._stable_repr(obj) == repr(obj)
 
 
 # =========================================================== boundary: no transport imports

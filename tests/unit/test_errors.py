@@ -377,3 +377,122 @@ def test_classify_golden_404_envelope():
         "reason": "NOT_FOUND",
         "hint": "check the spreadsheet id / sheet name — the spreadsheet or sheet was not found",
     }
+
+
+# ------------------------------------- _decode_content edge cases (content shape variants)
+
+
+def test_classify_content_attribute_absent_decodes_to_none():
+    # An error object with NO ``content`` attribute at all -> _decode_content returns None
+    # (errors.py:111). Status still comes off the response, hint is the per-status default.
+    class _NoContent:
+        resp = _FakeResponse(429)
+
+    err = classify_google_error(_NoContent())
+    assert err.status == 429
+    assert err.reason is None  # no body -> no reason
+    assert "rate limit" in err.hint
+
+
+def test_classify_content_explicit_none_decodes_to_none():
+    # ``content = None`` (not just absent) also short-circuits to None (errors.py:110-111).
+    class _NoneContent:
+        content = None
+        resp = _FakeResponse(500)
+
+    err = classify_google_error(_NoneContent())
+    assert err.status == 500
+    assert err.reason is None
+    assert "transient" in err.hint
+
+
+def test_classify_undecodable_bytes_body_does_not_crash():
+    # Invalid UTF-8 bytes -> the .decode("utf-8") raises UnicodeDecodeError, which
+    # _decode_content swallows (errors.py:115-116) -> treated as no body.
+    bad_utf8 = b"\xff\xfe\x00bad"
+    err = classify_google_error(make_http_error(400, raw_content=bad_utf8))
+    assert err.code == "google_api_error"
+    assert err.status == 400  # status survives off the response even with an undecodable body
+    assert err.reason is None
+    assert "bad range" in err.hint
+
+
+def test_classify_non_str_non_bytes_content_decodes_to_none():
+    # ``content`` that is neither bytes nor str (e.g. an int) -> the isinstance(str) guard
+    # rejects it (errors.py:117-118) without raising.
+    class _WeirdContent:
+        content = 12345
+        resp = _FakeResponse(404)
+
+    err = classify_google_error(_WeirdContent())
+    assert err.status == 404
+    assert err.reason is None
+    assert "spreadsheet id" in err.hint
+
+
+# --------------------------------- _extract_status fallback chain (resp -> status_code -> body)
+
+
+def test_classify_non_int_resp_status_falls_back_to_body_code():
+    # ``resp.status`` is a non-numeric string -> int() raises (errors.py:134-135); with no
+    # ``status_code`` either, the body's ``error.code`` supplies the status.
+    class _BadRespStatus:
+        resp = _FakeResponse("not-a-number")  # type: ignore[arg-type]
+        content = json.dumps(
+            {"error": {"code": 403, "message": "denied", "status": "PERMISSION_DENIED"}}
+        ).encode("utf-8")
+
+    err = classify_google_error(_BadRespStatus())
+    assert err.status == 403  # recovered from error.code in the JSON body
+    assert err.reason == "PERMISSION_DENIED"
+
+
+def test_classify_status_code_property_used_when_no_resp():
+    # No ``resp`` at all, but a numeric ``status_code`` property (the googleapiclient mirror of
+    # resp.status) -> int(status_code) supplies the status (errors.py:137-139).
+    class _StatusCodeOnly:
+        status_code = 429
+        content = b"not json"
+
+    err = classify_google_error(_StatusCodeOnly())
+    assert err.status == 429
+    assert "rate limit" in err.hint
+
+
+def test_classify_non_int_status_code_falls_back_to_body():
+    # ``status_code`` present but non-numeric -> int() raises and is swallowed
+    # (errors.py:141-142); the body's error.code is the last resort.
+    class _BadStatusCode:
+        status_code = "oops"
+        content = json.dumps({"error": {"code": 500, "message": "backend"}}).encode("utf-8")
+
+    err = classify_google_error(_BadStatusCode())
+    assert err.status == 500
+    assert "transient" in err.hint
+
+
+def test_classify_non_int_body_code_yields_no_status():
+    # All three sources fail to produce an int: no resp/status_code, and ``error.code`` is a
+    # non-numeric string -> int() raises in the body branch (errors.py:149-150) -> status None.
+    class _BadBodyCode:
+        content = json.dumps({"error": {"code": "NaN", "message": "weird"}}).encode("utf-8")
+
+    err = classify_google_error(_BadBodyCode())
+    assert err.status is None
+    assert err.code == "google_api_error"
+    # Unknown status -> the generic default hint.
+    assert err.hint == "see the API message above for details"
+    # The body message still flows through even though the code was unusable.
+    assert err.message == "weird"
+
+
+def test_classify_resp_status_none_falls_to_status_code():
+    # ``resp`` present but ``resp.status`` is None -> skip to ``status_code`` (errors.py:131 false
+    # branch then 137-139). Confirms the chain does not stop at a None resp.status.
+    class _NoneRespStatus:
+        resp = _FakeResponse(None)  # type: ignore[arg-type]
+        status_code = 404
+        content = b""
+
+    err = classify_google_error(_NoneRespStatus())
+    assert err.status == 404

@@ -251,6 +251,94 @@ class TestFilters:
         assert "filters" not in out
         assert "filters:" not in out["line"]
 
+    def test_modern_filter_spec_data_source_column_reference(self):
+        """A ``filterSpec`` with no ``columnOffsetIndex`` falls back to its column-reference name.
+
+        Data-source pivots address a filtered column by name (not offset), so a spec carrying a
+        ``dataSourceColumnReference.name`` surfaces ``field`` instead of ``sourceColumnOffset``.
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        del pivot["criteria"]
+        pivot["filterSpecs"] = [
+            {
+                "dataSourceColumnReference": {"name": "Region"},
+                "filterCriteria": {"visibleValues": ["West"]},
+            }
+        ]
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["filters"] == [{"field": "Region", "visibleValues": ["West"]}]
+        assert "filters: Region[West]" in out["line"]
+
+    def test_non_dict_filter_spec_is_skipped(self):
+        """A malformed (non-dict) entry in ``filterSpecs`` is skipped, not fatal."""
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        del pivot["criteria"]
+        pivot["filterSpecs"] = [
+            "garbage",
+            {"columnOffsetIndex": 2, "filterCriteria": {"visibleValues": ["A"]}},
+        ]
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        # Only the well-formed spec survives.
+        assert out["filters"] == [{"sourceColumnOffset": 2, "visibleValues": ["A"]}]
+
+    def test_non_numeric_criteria_key_sorts_last_and_drops_offset(self):
+        """A non-numeric ``criteria`` key sorts AFTER numeric keys and emits no ``sourceColumnOffset``.
+
+        Google keys legacy criteria by the stringified column offset; a non-numeric key cannot be
+        coerced to an int, so it (a) sorts lexically after all numeric keys and (b) yields a filter
+        entry with no ``sourceColumnOffset`` (only its visibleValues).
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["criteria"] = {
+            "2": {"visibleValues": ["A"]},
+            "zzz": {"visibleValues": ["Q"]},
+        }
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["filters"] == [
+            {"sourceColumnOffset": 2, "visibleValues": ["A"]},
+            {"visibleValues": ["Q"]},
+        ]
+
+    def test_integer_criteria_key_coerced_to_offset(self):
+        """An int-typed ``criteria`` key (not a string) coerces straight to the offset.
+
+        Google normally stringifies offsets, but ``_to_int`` accepts a raw int key too, so a
+        ``{1: {...}}`` criteria map still produces ``sourceColumnOffset: 1``.
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["criteria"] = {1: {"visibleValues": ["X"]}}
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["filters"] == [{"sourceColumnOffset": 1, "visibleValues": ["X"]}]
+
+    def test_bool_criteria_key_is_not_coerced_to_offset(self):
+        """A bool ``criteria`` key is NOT treated as an int offset (bool is rejected by ``_to_int``).
+
+        ``True`` is an ``int`` subclass; the offset coercion must reject it so a stray bool key
+        never masquerades as column offset 1 — it sorts lexically and emits no offset.
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["criteria"] = {True: {"visibleValues": ["B"]}}
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["filters"] == [{"visibleValues": ["B"]}]
+        assert "sourceColumnOffset" not in out["filters"][0]
+
+    def test_non_string_non_int_criteria_key_yields_no_offset(self):
+        """A float (or any non bool/int/str) ``criteria`` key is uncoercible -> no offset emitted.
+
+        ``_to_int`` only coerces ints and numeric-string keys; anything else (here a float) returns
+        ``None``, so the filter entry carries only its visibleValues and sorts after numeric keys.
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["criteria"] = {2.5: {"visibleValues": ["F"]}}
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["filters"] == [{"visibleValues": ["F"]}]
+
 
 # =========================================================================== values
 
@@ -297,6 +385,50 @@ class TestValues:
         ]
         out = serialize_pivot(pivot, services, SHEET_ID)
         assert "values: SUM(Sales), COUNTA(Units)" in out["line"]
+
+    def test_value_data_source_column_reference_becomes_field(self):
+        """A data-source pivot value (no offset) names its measure via its column reference.
+
+        A ``PivotValue`` with no ``sourceColumnOffset`` but a ``dataSourceColumnReference.name``
+        surfaces that name under ``field`` (the offset-less data-source dimension reference).
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["values"] = [
+            {
+                "name": "Total",
+                "dataSourceColumnReference": {"name": "Sales"},
+                "summarizeFunction": "SUM",
+            }
+        ]
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["values"] == [
+            {"name": "Total", "field": "Sales", "summarize": "SUM"}
+        ]
+        # ``sourceColumnOffset`` is absent (the data-source ref took its place).
+        assert "sourceColumnOffset" not in out["values"][0]
+
+    def test_value_label_falls_back_to_col_offset_when_unnamed(self):
+        """An unnamed value (offset only) renders ``col<offset>`` in the terse line."""
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["values"] = [{"sourceColumnOffset": 4, "summarizeFunction": "SUM"}]
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["values"] == [{"sourceColumnOffset": 4, "summarize": "SUM"}]
+        assert "values: SUM(col4)" in out["line"]
+
+    def test_value_label_falls_back_to_col_question_when_no_offset(self):
+        """A value with neither name/field nor offset renders the ``col?`` placeholder token.
+
+        A formula-only value with no name and no offset still must produce a renderable label;
+        the line uses ``col?`` (an addressless measure) rather than crashing on a missing key.
+        """
+        services, _ = _make_service()
+        pivot = _golden_pivot()
+        pivot["values"] = [{"formula": "=1+1", "summarizeFunction": "SUM"}]
+        out = serialize_pivot(pivot, services, SHEET_ID)
+        assert out["values"] == [{"formula": "=1+1", "summarize": "SUM"}]
+        assert "values: SUM(col?)" in out["line"]
 
 
 # =========================================================================== groups / labels

@@ -25,6 +25,16 @@ from gsheets.core.rules import (
     set_validation,
     validation_to_rule,
 )
+from gsheets.core.rules import (
+    _condition_value_to_scalar,
+    _normalize_rule,
+    _require_index,
+    _resolve_rule_ranges,
+    _scalar_to_str,
+    _sheet_id_from_resolved_rule,
+    _validation_condition_values,
+    _validation_one_liner,
+)
 from gsheets.core.service import SheetsServices
 
 
@@ -699,3 +709,258 @@ class TestValidationRoundTrip:
         structured = validation_to_rule(google)
         rebuilt = rule_to_validation(structured)
         assert rebuilt == google
+
+
+# ===========================================================================
+# CF index validation + rule normalization (internal-helper edge cases)
+# ===========================================================================
+
+
+class TestRequireIndex:
+    """``_require_index`` guards the positional-index addressing CF rules depend on."""
+
+    def test_bool_index_rejected_even_though_bool_is_int(self):
+        # ``True`` is an ``int`` subclass; a stray boolean must NOT be accepted as index 1.
+        with pytest.raises(SheetsError) as ei:
+            _require_index("update", True)
+        assert ei.value.code == "bad_index"
+
+    def test_non_int_index_rejected(self):
+        with pytest.raises(SheetsError) as ei:
+            _require_index("update", "3")  # type: ignore[arg-type]
+        assert ei.value.code == "bad_index"
+
+    def test_float_index_rejected(self):
+        with pytest.raises(SheetsError) as ei:
+            _require_index("add", 2.0)  # type: ignore[arg-type]
+        assert ei.value.code == "bad_index"
+
+    def test_add_defaults_to_zero_but_update_requires_index(self):
+        # Behavior boundary: add prepends at 0 when omitted; update/delete must be explicit.
+        assert _require_index("add", None) == 0
+        with pytest.raises(SheetsError) as ei:
+            _require_index("delete", None)
+        assert ei.value.code == "missing_index"
+
+    def test_explicit_zero_index_is_kept(self):
+        # 0 is a valid (highest-priority) target and must not be treated as "absent".
+        assert _require_index("update", 0) == 0
+
+
+class TestNormalizeRule:
+    """``_normalize_rule`` accepts a body line, a structured dict, OR a pre-built Google rule."""
+
+    def test_prebuilt_boolean_rule_passed_through(self):
+        # A dict already carrying ``booleanRule`` must NOT be re-built — it is passed through
+        # verbatim (only copied) so a caller can hand in an exact Google ConditionalFormatRule.
+        google_in = {
+            "ranges": ["Cliff!A2:A100"],
+            "booleanRule": {
+                "condition": {"type": "NOT_BLANK"},
+                "format": {"textFormat": {"bold": True}},
+            },
+        }
+        google_rule, serialized = _normalize_rule(google_in)
+        assert google_rule["booleanRule"] is google_in["booleanRule"]
+        # Round-trips to the canonical body line.
+        assert serialized == "[Cliff!A2:A100] if NOT_BLANK -> bold"
+
+    def test_prebuilt_gradient_rule_passed_through(self):
+        google_in = {
+            "ranges": ["Cliff!H2:H100"],
+            "gradientRule": {
+                "minpoint": {"colorStyle": {"rgbColor": {"red": 1.0}}, "type": "MIN"},
+                "maxpoint": {"colorStyle": {"rgbColor": {"green": 1.0}}, "type": "MAX"},
+            },
+        }
+        google_rule, _serialized = _normalize_rule(google_in)
+        assert "gradientRule" in google_rule
+
+    def test_non_str_non_dict_rule_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            _normalize_rule(["not", "a", "rule"])  # type: ignore[arg-type]
+        assert ei.value.code == "bad_rule"
+        assert "list" in str(ei.value)
+
+
+class TestResolveRuleRanges:
+    def test_no_ranges_raises(self):
+        services, _get, _batch = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            _resolve_rule_ranges(services, SHEET_ID, {"booleanRule": {}})
+        assert ei.value.code == "bad_rule"
+
+    def test_empty_ranges_list_raises(self):
+        services, _get, _batch = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            _resolve_rule_ranges(services, SHEET_ID, {"ranges": []})
+        assert ei.value.code == "bad_rule"
+
+    def test_pre_resolved_gridrange_passed_through_untouched(self):
+        # A range already given as a GridRange dict must NOT be re-resolved (no get call) — it
+        # is passed straight through so callers can hand in pre-resolved ranges.
+        services, get_rec, _batch = _make_service()
+        pre = {"sheetId": 42, "startRowIndex": 0, "endRowIndex": 5}
+        out = _resolve_rule_ranges(services, SHEET_ID, {"ranges": [pre], "booleanRule": {}})
+        assert out["ranges"] == [pre]
+        # No addressing lookup was needed for a pre-resolved GridRange.
+        assert get_rec.calls == []
+
+
+class TestSheetIdFromResolvedRule:
+    def test_picks_first_range_with_a_sheet_id(self):
+        rule = {"ranges": [{"startRowIndex": 0}, {"sheetId": 7}]}
+        assert _sheet_id_from_resolved_rule(rule) == 7
+
+    def test_sheet_id_zero_is_accepted(self):
+        # sheetId 0 is the default first tab — must not be confused with "absent".
+        assert _sheet_id_from_resolved_rule({"ranges": [{"sheetId": 0}]}) == 0
+
+    def test_no_sheet_id_anywhere_raises_missing_sheet(self):
+        with pytest.raises(SheetsError) as ei:
+            _sheet_id_from_resolved_rule({"ranges": [{"startRowIndex": 0}]})
+        assert ei.value.code == "missing_sheet"
+
+
+class TestUpdateInfersSheetIdFromPreResolvedRange:
+    def test_update_prebuilt_google_rule_no_sheet_infers_from_resolved_range(self):
+        # update + no explicit ``sheet`` + a pre-built Google rule (carries ``booleanRule``):
+        # ``_normalize_rule`` passes it through, the A1 range resolves to a sheetId, and the
+        # update request infers ``sheetId`` from that resolved range (covers the no-name path).
+        services, _get, batch = _make_service()
+        prebuilt = {
+            "ranges": ["Sheet1!A2:A100"],
+            "booleanRule": {"condition": {"type": "NOT_BLANK"}},
+        }
+        set_conditional_format(services, SHEET_ID, action="update", index=2, rule=prebuilt)
+        upd = _last_requests(batch)[0]["updateConditionalFormatRule"]
+        # Sheet1 -> sheetId 7 in the fixture, inferred from the rule's resolved range.
+        assert upd["sheetId"] == 7
+        # The pre-built booleanRule is preserved (not rebuilt) on the resolved rule.
+        assert upd["rule"]["booleanRule"]["condition"]["type"] == "NOT_BLANK"
+
+
+# ===========================================================================
+# Validation condition-value building / extraction edge cases
+# ===========================================================================
+
+
+class TestValidationConditionValues:
+    """``_validation_condition_values`` — the write-side BooleanCondition.values builder."""
+
+    def test_one_of_range_tolerates_values_carrier(self):
+        # ONE_OF_RANGE normally reads ``source``; when only ``values`` is supplied, the first
+        # element is treated as the range and turned into a leading-"=" formula.
+        out = _validation_condition_values(
+            {"values": ["Cliff!Z1:Z10"]}, "ONE_OF_RANGE"
+        )
+        assert out == [{"userEnteredValue": "=Cliff!Z1:Z10"}]
+
+    def test_one_of_range_missing_source_and_values_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            _validation_condition_values({}, "ONE_OF_RANGE")
+        assert ei.value.code == "bad_validation"
+
+    def test_one_of_range_blank_source_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            _validation_condition_values({"source": "   "}, "ONE_OF_RANGE")
+        assert ei.value.code == "bad_validation"
+
+    def test_no_value_type_returns_empty(self):
+        assert _validation_condition_values({}, "BOOLEAN") == []
+
+    def test_generic_type_with_no_values_returns_empty(self):
+        # A value-bearing type carrying no ``values`` yields no condition values (not an error).
+        assert _validation_condition_values({"type": "ONE_OF_LIST"}, "ONE_OF_LIST") == []
+
+    def test_generic_type_non_list_values_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            _validation_condition_values({"values": "Yes"}, "ONE_OF_LIST")
+        assert ei.value.code == "bad_validation"
+        assert "list" in str(ei.value)
+
+    def test_generic_type_accepts_tuple_values(self):
+        out = _validation_condition_values({"values": (1, 2)}, "NUMBER_BETWEEN")
+        assert out == [{"userEnteredValue": "1"}, {"userEnteredValue": "2"}]
+
+
+class TestValidationToRuleNoConditionType:
+    def test_condition_without_type_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            validation_to_rule({"condition": {"values": []}})
+        assert ei.value.code == "bad_validation"
+        assert "type" in str(ei.value)
+
+    def test_condition_empty_type_string_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            validation_to_rule({"condition": {"type": ""}})
+        assert ei.value.code == "bad_validation"
+
+
+class TestValidationOneLiner:
+    """The terse token-cheap one-liner surfaced as ``validation`` on writes."""
+
+    def test_value_bearing_type_with_no_values_is_bare_type(self):
+        assert _validation_one_liner({"type": "ONE_OF_LIST"}) == "ONE_OF_LIST"
+
+    def test_value_bearing_type_with_empty_values_is_bare_type(self):
+        assert _validation_one_liner({"type": "ONE_OF_LIST", "values": []}) == "ONE_OF_LIST"
+
+    def test_range_type_without_source_is_bare_type(self):
+        assert _validation_one_liner({"type": "ONE_OF_RANGE"}) == "ONE_OF_RANGE"
+
+    def test_range_type_with_source(self):
+        assert (
+            _validation_one_liner({"type": "ONE_OF_RANGE", "source": "Cliff!Z1:Z10"})
+            == "ONE_OF_RANGE(Cliff!Z1:Z10)"
+        )
+
+    def test_no_value_type_is_bare_type(self):
+        assert _validation_one_liner({"type": "NOT_BLANK"}) == "NOT_BLANK"
+
+    def test_values_joined_with_comma(self):
+        assert (
+            _validation_one_liner({"type": "ONE_OF_LIST", "values": ["Yes", "No"]})
+            == "ONE_OF_LIST(Yes,No)"
+        )
+
+
+class TestConditionValueToScalar:
+    def test_user_entered_value_preferred(self):
+        assert _condition_value_to_scalar({"userEnteredValue": "Yes"}) == "Yes"
+
+    def test_relative_date_extracted(self):
+        assert _condition_value_to_scalar({"relativeDate": "PAST_MONTH"}) == "PAST_MONTH"
+
+    def test_unknown_variant_returns_first_value(self):
+        # Neither userEnteredValue nor relativeDate: best-effort first dict value.
+        assert _condition_value_to_scalar({"someOtherKey": "Z"}) == "Z"
+
+    def test_empty_dict_returns_empty_string(self):
+        assert _condition_value_to_scalar({}) == ""
+
+    def test_non_dict_passed_through(self):
+        assert _condition_value_to_scalar("plain") == "plain"
+
+
+class TestScalarToStr:
+    def test_bool_true_becomes_TRUE(self):
+        # bool must serialize to Sheets' TRUE/FALSE literals, NOT Python "True".
+        assert _scalar_to_str(True) == "TRUE"
+
+    def test_bool_false_becomes_FALSE(self):
+        assert _scalar_to_str(False) == "FALSE"
+
+    def test_integer_float_drops_dot_zero(self):
+        assert _scalar_to_str(100.0) == "100"
+
+    def test_non_integer_float_kept(self):
+        assert _scalar_to_str(1.5) == "1.5"
+
+    def test_int_stays_bare(self):
+        assert _scalar_to_str(42) == "42"
+
+    def test_bool_in_validation_values_serializes_as_literal(self):
+        # End-to-end: a boolean inside a rule's ``values`` reaches Google as TRUE/FALSE.
+        out = rule_to_validation({"type": "CUSTOM_FORMULA", "values": [True]})
+        assert out["condition"]["values"][0]["userEnteredValue"] == "TRUE"

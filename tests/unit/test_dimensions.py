@@ -917,6 +917,121 @@ class TestSheetResolution:
         assert exc.value.code == "sheet_not_found"
 
 
+# =========================================================================== span/int coercion edges
+
+
+class TestSpanCoercion:
+    def test_non_numeric_span_string_rejected(self):
+        """A non-numeric string ``start`` can't be coerced to int -> bad_param
+        (dimensions.py:205-206). (Booleans are caught earlier by a dedicated guard.)"""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="delete",
+                sheet="Sheet1",
+                params={"dimension": "ROWS", "start": "five", "end": 10},
+            )
+        assert exc.value.code == "bad_param"
+        assert "integer" in exc.value.message
+
+    def test_list_span_value_rejected(self):
+        """A list ``end`` raises TypeError inside int() -> bad_param (dimensions.py:205-206)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="delete",
+                sheet="Sheet1",
+                params={"dimension": "ROWS", "start": 0, "end": [10]},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_numeric_string_span_is_coerced(self):
+        """A numeric string span IS accepted (int("5") works) and flows into the request as an
+        int — pins the happy side of the coercion the bad-param tests guard."""
+        services, _, batch_rec = _make_service()
+        dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="delete",
+            sheet="Sheet1",
+            params={"dimension": "ROWS", "start": "5", "end": "8"},
+        )
+        rng = _only_request(batch_rec)["deleteDimension"]["range"]
+        assert rng["startIndex"] == 5
+        assert rng["endIndex"] == 8
+
+
+class TestRequireIntCoercion:
+    def test_move_boolean_destination_index_rejected(self):
+        """A boolean ``destinationIndex`` is rejected (a bool is not a valid int here)
+        (dimensions.py:227)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="move",
+                sheet="Sheet1",
+                params={
+                    "dimension": "ROWS",
+                    "start": 0,
+                    "end": 2,
+                    "destinationIndex": True,
+                },
+            )
+        assert exc.value.code == "bad_param"
+        assert "boolean" in exc.value.message
+
+    def test_append_boolean_length_rejected(self):
+        """A boolean ``length`` for append is rejected (dimensions.py:227)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="append",
+                sheet="Sheet1",
+                params={"dimension": "ROWS", "length": True},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_move_non_numeric_destination_index_rejected(self):
+        """A non-numeric ``destinationIndex`` can't be coerced -> bad_param
+        (dimensions.py:230-231)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="move",
+                sheet="Sheet1",
+                params={
+                    "dimension": "ROWS",
+                    "start": 0,
+                    "end": 2,
+                    "destinationIndex": "top",
+                },
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_append_list_length_rejected(self):
+        """A list ``length`` raises TypeError inside int() -> bad_param (dimensions.py:230-231)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="append",
+                sheet="Sheet1",
+                params={"dimension": "ROWS", "length": [5]},
+            )
+        assert exc.value.code == "bad_param"
+
+
 # =========================================================================== public symbol
 
 
