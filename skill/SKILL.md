@@ -247,12 +247,18 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   out every `computed` cell that equals `values` and drop `computed` entirely for a fully-static
   range — a `null` hole means "computed == values here". This roughly halves a formula-sheet read
   while staying index-aligned; genuine formulas (where computed differs) are still emitted.
+  Note the two passes differ in type: `values` keeps native types (the number `185`) while
+  `computed` is the display string (`"185"`, `"0.50"`). `--diff-only` normalizes that before
+  comparing, so let it do the diffing — a hand-rolled `values`-vs-`computed` compare would flag
+  every numeric static cell as "changed".
 - For bulk VALUE dumps, `export` beats `read-values`. `export --format csv --sheet <tab> --path …`
   serializes the values straight to a local file (no token cap, no null-key bloat); a whole-tab
   `read-values` can be megabytes and only fails at the *caller's* token limit. CSV can't carry
   formulas, so the pattern is: `export csv` for the values + a **narrow-band** `read-values --render
   formula` (or `all`) over just the formula columns. As a guardrail, `--max-cells N` (MCP
-  `max_cells`) makes a read fail fast with `result_too_large` instead of returning a giant payload.
+  `max_cells`) makes a read fail fast with `result_too_large` instead of returning a giant payload —
+  it counts the padded **rectangle** (rows × cols, blanks included), so size it to the range area,
+  not the populated-cell count (a 187×86 range is 16,082 cells even if mostly empty).
 - Budget reads against the per-user read-RPM quota — it is small. Even a *single* sequential caller
   doing a normal bulk export (~a dozen reads in a couple of minutes) can saturate it and start
   429ing; the automatic backoff smooths bursts but cannot conjure quota that's already spent. Prefer

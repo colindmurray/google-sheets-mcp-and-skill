@@ -123,7 +123,7 @@ Two optional knobs for large reads:
 | Flag | Effect |
 |---|---|
 | `--diff-only` | `--render all` only: null out each `computed` cell that equals `values`, and drop `computed` entirely for a fully-static range. A `null` hole means "computed == values here"; the matrix stays index-aligned. Roughly halves a staticized formula-sheet read. |
-| `--max-cells N` | Fail with a structured `result_too_large` error if the read spans more than `N` cells, instead of returning a payload that only fails at the caller's token cap. Default: unlimited. |
+| `--max-cells N` | Fail with a structured `result_too_large` error if the read spans more than `N` cells, instead of returning a payload that only fails at the caller's token cap. Counts the padded **rectangle** (rows × cols, blanks included), so size it to the range area. Default: unlimited. |
 
 For a **pure value dump**, prefer `export --format csv` (writes a local file, no token cap) over a
 wide `read-values`; CSV can't carry formulas, so pair it with a narrow-band `--render formula` read
