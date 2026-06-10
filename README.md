@@ -16,8 +16,8 @@ That gap is the whole point of this project. The thesis is **read-side richness*
 
 This was built after surveying the Google Sheets MCP servers and skills people actually use. The four below are the ones worth comparing against, chosen by traction (star counts verified with `gh` on 2026-06-09):
 
-- **[xing5/mcp-google-sheets](https://github.com/xing5/mcp-google-sheets)** — 899★ — the recommended dedicated Sheets MCP (listed in `awesome-mcp-servers`, on Homebrew/Smithery/PyPI).
-- **[taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp)** — 2,636★ — the most-starred Workspace MCP and the closest analogue in shape (it ships a server, a CLI, and a bundled skill).
+- **[xing5/mcp-google-sheets](https://github.com/xing5/mcp-google-sheets)** — 900★ — the recommended dedicated Sheets MCP (listed in `awesome-mcp-servers`, on Homebrew and PyPI).
+- **[taylorwilsdon/google_workspace_mcp](https://github.com/taylorwilsdon/google_workspace_mcp)** — 2,639★ — the most-starred Workspace MCP and the closest analogue in shape (it ships a server, a CLI, and a bundled skill).
 - **[a-bonus/google-docs-mcp](https://github.com/a-bonus/google-docs-mcp)** — 563★ — the densest Sheets feature surface of the bunch (native tables, comments, CF round-trip, charts).
 - **[gemini-cli-extensions/workspace](https://github.com/gemini-cli-extensions/workspace)** — 585★ — Google's official Workspace extension, listed in `google/mcp`. Its Sheets surface is read-only.
 
@@ -28,7 +28,7 @@ Legend: ✅ first-class · ⚠️ partial, indirect, or build-only · ❌ absent
 | Read formulas **side by side** with computed values | ⚠️ separate call | ⚠️ flag | ⚠️ flag | ❌ | ✅ |
 | Write formulas (`USER_ENTERED`, not inert `RAW`) | ✅ | ✅ | ✅ | ❌ read-only | ✅ |
 | Read cell formatting + colors (flattened, **effective *and* user-entered**) | ❌ raw blob only | ❌ write-only | ⚠️ single format, no split | ❌ | ✅ |
-| **Read conditional-format rules** (terse round-trippable lines) | ❌ | ⚠️ summary lines, not round-trippable | ✅ structured, no round-trip grammar | ❌ | ✅ |
+| **Read conditional-format rules** (terse round-trippable lines) | ❌ | ⚠️ summary lines (bg/fg-only rule model) | ✅ structured, no round-trip grammar | ❌ | ✅ |
 | Write conditional-format rules (index-safe) | ❌ | ✅ | ✅ | ❌ | ✅ |
 | Data validation **read *and* write** (round-trip) | ❌ | ❌ | ⚠️ write-only dropdown | ❌ | ✅ |
 | Native Sheets **Tables** (typed-column read + CRUD) | ❌ | ⚠️ list + append | ✅ | ❌ | ✅ |
@@ -37,19 +37,19 @@ Legend: ✅ first-class · ⚠️ partial, indirect, or build-only · ❌ absent
 | **Pivot definitions** (read) | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Banding + slicers (read *and* write)** | ❌ | ❌ | ❌ | ❌ | ✅ |
 | **Drive threaded comments** (full CRUD) | ❌ | ⚠️ list/create/reply/resolve, no delete | ✅ | ❌ | ✅ |
-| **Export to PDF / XLSX / ODS / CSV / TSV** | ❌ | ❌ | ⚠️ generic Drive export (PDF/CSV/XLSX) | ❌ | ✅ |
+| **Export to PDF / XLSX / ODS / CSV / TSV** | ❌ | ⚠️ Drive download-URL export (XLSX/PDF/CSV) | ⚠️ generic Drive export (PDF/CSV/XLSX) | ❌ | ✅ |
 | **Multi-spreadsheet batch reads** | ✅ | ❌ | ❌ | ❌ | ✅ |
 | Embedded charts (create / update / delete + read) | ⚠️ add only | ❌ | ⚠️ insert/delete | ❌ | ✅ (read = metadata list) |
 | Developer metadata (durable anchors) | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Data verbs (find/replace, dedupe, sort, paste-type) | ⚠️ find only | ⚠️ move rows | ⚠️ find/replace | ❌ | ✅ |
-| Pure core, no transport coupling (CLI-able) | ⚠️ ctx-coupled | ✅ | ⚠️ | n/a | ✅ |
-| Ships **MCP server + CLI + bundled skill** | MCP only | MCP + CLI + skill | MCP only | MCP + read-only skill | ✅ MCP + CLI + skill |
-| Auth models | SA + OAuth + ADC | OAuth 2.0/2.1 + SA (DWD) | OAuth | (Google account) | SA + OAuth + ADC, least-privilege default |
+| Data verbs (find/replace, dedupe, sort, paste-type) | ⚠️ find only | ⚠️ move rows | ❌ (find/replace is Docs-only) | ❌ | ✅ |
+| Pure core, no transport coupling (CLI-able) | ⚠️ ctx-coupled | ⚠️ CLI is a proxy to the running server | ⚠️ | n/a | ✅ |
+| Ships **MCP server + CLI + bundled skill** | MCP only | MCP + proxy CLI + skill | MCP only | MCP + read-only skill | ✅ MCP + CLI + skill |
+| Auth models | SA + OAuth + ADC | OAuth 2.0/2.1 + SA (DWD) | OAuth + SA | (Google account) | SA + OAuth + ADC, least-privilege default |
 
 Where each falls short:
 
 - **xing5** can't read formatting without pulling the raw `includeGridData` blob, and has no structured conditional-format read — the rules surface only inside that raw dump. Flattened formats (effective *and* user-entered) plus a terse CF line grammar are exactly what it lacks.
-- **taylorwilsdon** is strong on CF *write* and has table-append and dimension ops, but its CF read is a prose summary you can't feed back into its own add/update/delete actions by index, it never reads cell formats, and it has no styled rich-text, pivot, filter-view, or banding read.
+- **taylorwilsdon** is strong on CF *write* and has table-append and dimension ops, but its conditional-format model is background/text color only — rules using bold, italic, or number formats can't be expressed and summarize lossily on read — and it never reads cell formats, styled rich-text runs, pivots, filter views, or banding. Its CLI is a network proxy to the running MCP server, not a standalone adapter over shared logic.
 - **a-bonus** is the densest Sheets surface and the most direct feature rival: the only competitor here with native tables, comments, and CF round-trip. With comments CRUD and chart writes in this tool, there's no longer a Sheets capability it has that this one doesn't, and it still lacks rich-text runs, the effective-vs-user format split, pivot/filter-view/banding read, structured validation round-trip, and developer-metadata anchors.
 - **gemini-cli-extensions/workspace** is Google's official answer, and its Sheets surface is read-only (`getText`/`getRange`/`getMetadata`) — no write, format, CF, tables, or charts. Google ships no managed Sheets MCP, and its official open-source extension can't write or format a sheet.
 
