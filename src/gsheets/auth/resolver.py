@@ -187,8 +187,60 @@ def _ensure_fresh(creds, *, persist_token: Path | None = None):
     if refresh_token and (expired or not valid):
         creds.refresh(_refresh_request())
         if persist_token is not None:
-            _write_token(creds, persist_token)
+            # Best-effort: a successful refresh leaves the in-memory creds fully usable even if
+            # the rotated token can't be cached (e.g. a read-only sandbox FS). Don't fail the
+            # whole call on a persist error — but don't silently lose WHY either: every
+            # subsequent process would re-pay the refresh cost (and hard-fail when the token
+            # endpoint is unreachable), so the failure is recorded for `auth status` to surface
+            # (ISSUES.md #6).
+            try:
+                _write_token(creds, persist_token)
+            except OSError as exc:
+                _record_persist_failure(persist_token, exc)
     return creds
+
+
+#: Best-effort record of the last token-persist failure (path -> reason), surfaced by
+#: ``auth status`` so an operator can see WHY a rotated token isn't sticking (ISSUES.md #6).
+_LAST_PERSIST_ERROR: dict[str, str] = {}
+
+
+def _record_persist_failure(path: Path, exc: OSError) -> None:
+    """Note that writing the refreshed token to ``path`` failed (non-fatal; for diagnostics)."""
+    _LAST_PERSIST_ERROR[str(path)] = f"{type(exc).__name__}: {exc}"
+
+
+def last_persist_error(path: Path) -> str | None:
+    """Return the last recorded token-persist failure reason for ``path`` (or ``None``)."""
+    return _LAST_PERSIST_ERROR.get(str(path))
+
+
+def _classify_refresh_failure(exc: BaseException, token_path: Path) -> SheetsError:
+    """Split a token-refresh failure into "endpoint unreachable" vs "token invalid" (ISSUES.md #6).
+
+    The old single ``oauth_refresh_failed`` code conflated two very different failures: the token
+    endpoint being unreachable (a network/DNS outage hitting ``oauth2.googleapis.com``, where the
+    cached token may well still be valid and re-auth would ALSO fail) versus the refresh token
+    being revoked/expired (where re-consent is the right fix). A network failure gets
+    ``oauth_token_endpoint_unreachable`` with a retry hint; everything else keeps
+    ``oauth_refresh_failed`` with the re-consent hint.
+    """
+    from ..core.errors import _is_connection_failure
+
+    if _is_connection_failure(exc):
+        return SheetsError(
+            "oauth_token_endpoint_unreachable",
+            f"could not reach the OAuth token endpoint to refresh the cached token at "
+            f"{token_path}: {exc}",
+            hint="this is a NETWORK failure reaching oauth2.googleapis.com, not a bad token — "
+            "retry; a still-valid cached access token is unaffected and re-auth is NOT needed",
+        )
+    return SheetsError(
+        "oauth_refresh_failed",
+        f"cached OAuth token at {token_path} could not be refreshed: {exc}",
+        hint="the refresh token may be revoked/expired — re-run `gsheets auth login` to "
+        "re-consent and mint a fresh token",
+    )
 
 
 def _write_token(creds, path: Path) -> None:
@@ -295,12 +347,8 @@ def _resolve_oauth(scopes: list[str], *, allow_missing: bool):
 
     try:
         creds = _ensure_fresh(creds, persist_token=token_path)
-    except Exception as exc:  # google.auth.exceptions.RefreshError and friends
-        raise SheetsError(
-            "oauth_refresh_failed",
-            f"cached OAuth token at {token_path} could not be refreshed: {exc}",
-            hint="re-run `gsheets auth login` to re-consent and mint a fresh token",
-        ) from exc
+    except Exception as exc:  # google.auth.exceptions.RefreshError / TransportError and friends
+        raise _classify_refresh_failure(exc, token_path) from exc
 
     # Verify the token's GRANTED scopes cover what core needs. Source order, most authoritative
     # first: the credential's ``granted_scopes`` (set by google-auth from the refresh grant's

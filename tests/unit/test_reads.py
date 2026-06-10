@@ -1688,3 +1688,57 @@ def test_reads_module_imports_no_transport():
         f"--- child stdout ---\n{result.stdout}"
         f"--- child stderr ---\n{result.stderr}"
     )
+
+
+# =========================================================== ISSUES.md #2 — CUSTOM_FORMULA commas
+
+
+# A real-world CUSTOM_FORMULA rule whose single formula contains commas (the #2 repro).
+_GOOGLE_COMMA_FORMULA_RULE = {
+    "ranges": [
+        {
+            "sheetId": 0,
+            "startRowIndex": 2,
+            "endRowIndex": 345,
+            "startColumnIndex": 0,
+            "endColumnIndex": 1,
+        }
+    ],
+    "booleanRule": {
+        "condition": {
+            "type": "CUSTOM_FORMULA",
+            "values": [
+                {"userEnteredValue": '=AND($A3<>"", $D3=$G3, $E3=$H3, $C3<>$F3)'}
+            ],
+        },
+        "format": {"backgroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.8, "blue": 0.8}}},
+    },
+}
+
+
+class TestReadConditionalFormatsCommaFormula:
+    def _cf_payload(self, *rules, title="Cliff", sheet_id=0):
+        return {
+            "sheets": [
+                {
+                    "properties": {"sheetId": sheet_id, "title": title},
+                    "conditionalFormats": list(rules),
+                }
+            ]
+        }
+
+    def test_custom_formula_with_commas_stays_one_structured_value(self):
+        # ISSUES.md #2: a CUSTOM_FORMULA has exactly one value; commas inside it must NOT split
+        # condition.values into 4 bogus elements.
+        services, _ = _make_service(
+            data_responses=[self._cf_payload(_GOOGLE_COMMA_FORMULA_RULE)],
+            sheet_index=_CLIFF_INDEX,
+        )
+        out = read_conditional_formats(services, SHEET_ID)
+        rule = out["sheets"][0]["rules"][0]
+        assert rule["condition"] == {
+            "type": "CUSTOM_FORMULA",
+            "values": ['=AND($A3<>"", $D3=$G3, $E3=$H3, $C3<>$F3)'],
+        }
+        # The human-readable line still renders the formula verbatim.
+        assert '=AND($A3<>"", $D3=$G3, $E3=$H3, $C3<>$F3)' in rule["line"]

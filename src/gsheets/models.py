@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional, TypedDict
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_serializer
 
 
 class _Sub(BaseModel):
@@ -39,6 +39,24 @@ class _Sub(BaseModel):
     """
 
     model_config = {"extra": "allow"}
+
+    @model_serializer(mode="wrap")
+    def _prune_nulls(self, handler):
+        """Drop keys whose value is ``None`` from every serialized model (ISSUES.md #8).
+
+        Pydantic materializes EVERY declared optional field (``note``, ``hyperlink``,
+        ``validationRule``, …) as ``None`` even when the source core dict omitted it, so a plain
+        ``model_dump`` re-inflates a sparse read with explicit nulls — 2-5x larger MCP payloads
+        that blew the harness token cap. The core dicts already omit-when-absent; this realigns
+        the MCP structured output with that contract (and matches the CLI, which prunes nulls).
+        Applied at the wrap layer so it holds for ``model_dump`` AND ``model_dump_json`` however
+        FastMCP serializes, and recurses through nested sub-models. An empty list/``{}`` is kept
+        (it is not ``None``); only ``None`` values are dropped.
+        """
+        data = handler(self)
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v is not None}
+        return data
 
 
 class _Result(_Sub):
@@ -201,7 +219,10 @@ class SheetStructure(_Sub):
 
     sheet: Optional[str] = None
     sheetId: Optional[int] = None
-    merges: Optional[list[str]] = None
+    # ``list[Optional[str]]`` (not ``list[str]``): the Sheets API can return a sparse merges
+    # array with null entries, and validation must tolerate them rather than exploding with one
+    # error per null (ISSUES.md #1). Core already filters nulls; this is defense-in-depth.
+    merges: Optional[list[Optional[str]]] = None
     frozenRows: Optional[int] = None
     frozenCols: Optional[int] = None
     tabColor: Optional[str] = None
@@ -252,7 +273,8 @@ class ValueRange(_Sub):
     """One range entry in ``read_values`` output (DESIGN §3.3 read_values).
 
     ``computed`` is present only when ``render="all"`` (the FORMATTED pass, index-aligned with
-    ``values``).
+    ``values``). With ``diff_only`` (ISSUES.md #12) it is sparse — a ``None`` element means
+    "computed == values at that cell" — and absent entirely for a fully-static range.
     """
 
     range: Optional[str] = None
@@ -1079,11 +1101,19 @@ class ReadManyResult(_Result):
 
     mode: Optional[str] = None
     count: Optional[int] = None
+    # ISSUES.md #3: explicit partial-failure signal so a caller never mistakes a batch that ran
+    # (top-level ok:True) for one where every file succeeded.
+    succeeded: Optional[int] = None
+    failed: Optional[int] = None
+    partialFailure: Optional[bool] = None
     results: list[dict[str, Any]] = []
 
     @property
     def terse(self) -> str:
-        lines = [f"read_many mode={self.mode}: {self.count} result(s)"]
+        head = f"read_many mode={self.mode}: {self.count} result(s)"
+        if self.partialFailure:
+            head += f" — PARTIAL: {self.failed} failed"
+        lines = [head]
         for entry in self.results:
             sid = entry.get("spreadsheetId", "?")
             if entry.get("ok") is False:

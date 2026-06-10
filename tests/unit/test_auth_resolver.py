@@ -714,3 +714,50 @@ def test_resolver_module_has_no_transport_imports():
     # ``import mcp`` / ``from mcp`` (the PyPI transport) must not appear as import statements.
     assert "\nimport mcp" not in src
     assert "from mcp" not in src
+
+
+# ----------------------------------------------------- ISSUES.md #6 refresh-failure classification
+
+
+def test_classify_refresh_failure_network_vs_invalid(tmp_path):
+    from gsheets.auth import resolver as r
+
+    token_path = tmp_path / "token.json"
+
+    net = r._classify_refresh_failure(ConnectionError("getaddrinfo failed"), token_path)
+    assert net.code == "oauth_token_endpoint_unreachable"
+    assert "re-auth is NOT needed" in net.hint
+
+    class RefreshError(Exception):  # mimics google.auth.exceptions.RefreshError (invalid_grant)
+        pass
+
+    bad = r._classify_refresh_failure(RefreshError("invalid_grant"), token_path)
+    assert bad.code == "oauth_refresh_failed"
+    assert "gsheets auth login" in bad.hint
+
+
+def test_ensure_fresh_persist_failure_is_non_fatal(monkeypatch, tmp_path):
+    from gsheets.auth import resolver as r
+
+    class _Creds:
+        valid = False
+        expired = True
+        refresh_token = "rt"
+
+        def refresh(self, request):
+            self.valid = True
+
+        def to_json(self):
+            return "{}"
+
+    monkeypatch.setattr(r, "_refresh_request", lambda: object())
+
+    def boom_write(creds, path):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(r, "_write_token", boom_write)
+    token_path = tmp_path / "ro" / "token.json"
+    # A persist failure must NOT propagate — the refreshed creds are still usable (ISSUES.md #6).
+    creds = r._ensure_fresh(_Creds(), persist_token=token_path)
+    assert creds.valid is True
+    assert r.last_persist_error(token_path) is not None

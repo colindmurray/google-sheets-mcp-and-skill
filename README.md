@@ -232,6 +232,8 @@ Set `GSHEETS_AUTH_MODE` to `service_account`, `oauth`, or `adc` to force a singl
 | `GSHEETS_CONFIG_DIR` | Override the default config dir | `~/.config/google-sheets-mcp/` |
 | `ENABLED_TOOLS` | (MCP only) comma-separated tool allowlist; empty = all | unset |
 | `GSHEETS_VERBOSE_ERRORS` | `1` lets error hints include the authenticated account email (off by default, so it never leaks in pass-through errors) | unset |
+| `GSHEETS_MAX_RETRIES` | Automatic retry budget for every API call — randomized exponential backoff on 429 / 5xx / rate-limit; `0` disables | `4` |
+| `GSHEETS_HTTP_TIMEOUT` | Socket timeout (seconds) for API calls; raise it for very large grid reads | library default |
 
 ### Scopes (least-privilege default)
 

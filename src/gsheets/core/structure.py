@@ -371,13 +371,19 @@ def _serialize_sheet_structure(
 ) -> dict:
     """Serialize one sheet's structural data for the read envelope."""
     grid_props = props.get("gridProperties", {}) or {}
+    # The merges array can contain null / unresolvable entries (a stray null carries no range
+    # and is useless to a consumer). Drop anything that does not resolve to an A1 string so the
+    # result is always a clean ``list[str]`` — no nulls to crash the MCP model or leak to the CLI
+    # (ISSUES.md #1).
+    merges_out = [
+        a1
+        for m in (entry.get("merges", []) or [])
+        if (a1 := _safe_gridrange_to_a1(services, spreadsheet_id, m)) is not None
+    ]
     out: dict = {
         "sheet": props.get("title"),
         "sheetId": props.get("sheetId"),
-        "merges": [
-            _safe_gridrange_to_a1(services, spreadsheet_id, m)
-            for m in (entry.get("merges", []) or [])
-        ],
+        "merges": merges_out,
         "frozenRows": grid_props.get("frozenRowCount", 0),
         "frozenCols": grid_props.get("frozenColumnCount", 0),
     }

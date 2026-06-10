@@ -114,6 +114,100 @@ def serialize_rule(rule: dict) -> str:
     return f"[{rangelist}] {body}"
 
 
+def serialize_rule_structured(rule: dict) -> dict:
+    """Serialize a Google ``ConditionalFormatRule`` to its STRUCTURED ``{ranges, kind, ...}`` dict.
+
+    The structured counterpart of :func:`serialize_rule`, built DIRECTLY from the Google rule
+    body — NOT by re-parsing the serialized line. That distinction is the whole point: the line
+    grammar comma-separates a condition's args, so re-parsing a ``CUSTOM_FORMULA`` whose single
+    formula contains commas (``CUSTOM_FORMULA(=AND($A1<>"", $B1=$C1))``) shreds it into several
+    bogus values. Reading the condition's ``values[]`` straight off the rule keeps a single
+    formula a single value (ISSUES.md #2).
+
+    Boolean returns ``{"ranges", "kind": "boolean", "condition": {"type", "values"}, "format"}``;
+    gradient returns ``{"ranges", "kind": "gradient", "stops": [...], "format": {}}`` — the same
+    shapes :func:`parse_rule_line` produces, so the read side stays unchanged for every rule
+    EXCEPT the comma-in-formula case it was getting wrong.
+
+    Args:
+        rule: A Google ``ConditionalFormatRule`` whose ``ranges`` are already A1 strings.
+
+    Returns:
+        The structured rule dict (no ``index`` — addressing stays external, DESIGN §4.4).
+    """
+    if not isinstance(rule, dict):
+        raise SheetsError("bad_rule", f"rule must be a dict, got {type(rule).__name__}")
+
+    ranges = _ranges_to_a1_list(rule.get("ranges"))
+    boolean = rule.get("booleanRule")
+    gradient = rule.get("gradientRule")
+    if boolean is not None and gradient is not None:
+        raise SheetsError(
+            "bad_rule", "rule has both booleanRule and gradientRule; expected exactly one"
+        )
+    if boolean is not None:
+        condition = boolean.get("condition")
+        if not isinstance(condition, dict):
+            raise SheetsError("bad_rule", "booleanRule has no condition")
+        cond_type = condition.get("type")
+        if not isinstance(cond_type, str) or not cond_type:
+            raise SheetsError("bad_rule", "condition has no type")
+        return {
+            "ranges": ranges,
+            "kind": "boolean",
+            "condition": {"type": cond_type, "values": _condition_value_args(condition)},
+            "format": _google_format_to_flat(boolean.get("format") or {}),
+        }
+    if gradient is not None:
+        return {
+            "ranges": ranges,
+            "kind": "gradient",
+            "stops": _gradient_stops_structured(gradient),
+            "format": {},
+        }
+    raise SheetsError("bad_rule", "rule has neither booleanRule nor gradientRule")
+
+
+def _gradient_stops_structured(gradient: dict) -> list[dict]:
+    """Build the structured ``stops`` list directly from a Google ``gradientRule``.
+
+    Mirrors :func:`_parse_gradient_body`'s output shape (``{slot, hexColor[, interp, value]}``)
+    in canonical ``min | mid | max`` order, so the structured read is identical to the prior
+    parse-based path for gradients.
+    """
+    stops: list[dict] = []
+    minpoint = gradient.get("minpoint")
+    midpoint = gradient.get("midpoint")
+    maxpoint = gradient.get("maxpoint")
+    if minpoint is not None:
+        stops.append({"slot": "min", "hexColor": _point_color_hex(minpoint, "min")})
+    if midpoint is not None:
+        hex_color = _point_color_hex(midpoint, "mid")
+        prefix = _INTERP_TYPE_TO_PREFIX.get(midpoint.get("type"))
+        if prefix is None:
+            raise SheetsError(
+                "bad_rule",
+                f"gradient midpoint type {midpoint.get('type')!r} must be "
+                "NUMBER/PERCENT/PERCENTILE",
+            )
+        value = midpoint.get("value")
+        if value is None:
+            raise SheetsError("bad_rule", "gradient midpoint requires a value")
+        stops.append(
+            {
+                "slot": "mid",
+                "hexColor": hex_color,
+                "interp": prefix,
+                "value": _format_number(value),
+            }
+        )
+    if maxpoint is not None:
+        stops.append({"slot": "max", "hexColor": _point_color_hex(maxpoint, "max")})
+    if not stops:
+        raise SheetsError("bad_rule", "gradientRule has no interpolation points")
+    return stops
+
+
 def _ranges_to_a1_list(ranges: object) -> list[str]:
     """Coerce a rule's ``ranges`` (expected A1 strings) to a non-empty list of A1 strings."""
     if ranges is None:
@@ -146,11 +240,13 @@ def _serialize_boolean(boolean: dict) -> str:
     return f"if {cond_str} ->"
 
 
-def _serialize_condition(condition: dict) -> str:
-    """``COND_TYPE`` or ``COND_TYPE(arg,arg)`` — args verbatim, formulas kept exact."""
-    cond_type = condition.get("type")
-    if not isinstance(cond_type, str) or not cond_type:
-        raise SheetsError("bad_rule", "condition has no type")
+def _condition_value_args(condition: dict) -> list[str]:
+    """Extract a ``BooleanCondition``'s ``values[]`` as a flat list of verbatim string args.
+
+    Each value is ``{"userEnteredValue": "..."}`` (or ``relativeDate``); formulas keep their
+    leading ``=`` exactly. Shared by the line serializer and the structured serializer so both
+    read the SAME values straight off the Google rule (no lossy re-parse round-trip).
+    """
     values = condition.get("values") or []
     args: list[str] = []
     for v in values:
@@ -165,6 +261,15 @@ def _serialize_condition(condition: dict) -> str:
                 args.append(str(next(iter(v.values()), "")))
         else:
             args.append(str(v))
+    return args
+
+
+def _serialize_condition(condition: dict) -> str:
+    """``COND_TYPE`` or ``COND_TYPE(arg,arg)`` — args verbatim, formulas kept exact."""
+    cond_type = condition.get("type")
+    if not isinstance(cond_type, str) or not cond_type:
+        raise SheetsError("bad_rule", "condition has no type")
+    args = _condition_value_args(condition)
     if args:
         return f"{cond_type}({','.join(args)})"
     return cond_type
@@ -391,9 +496,13 @@ def _parse_condition(text: str) -> dict:
         inner = text[open_paren + 1 : -1]
         if not cond_type:
             raise SheetsError("bad_rule_line", f"condition missing type: {text!r}")
-        # Args are verbatim (formulas keep their leading "="); split on commas. Commas inside
-        # a formula are rare in CF custom formulas but if present would need quoting — the
-        # grammar treats args as comma-separated verbatim tokens (DESIGN §4.1).
+        # CUSTOM_FORMULA has EXACTLY ONE value — its formula. That formula routinely contains
+        # commas (``=AND($A1<>"", $B1=$C1)``), so splitting on commas would shred it into bogus
+        # values; keep the whole parenthesized body as the single verbatim value (ISSUES.md #2).
+        if cond_type == "CUSTOM_FORMULA":
+            return {"type": cond_type, "values": [inner.strip()] if inner.strip() else []}
+        # Other conditions are genuinely comma-separated (NUMBER_BETWEEN, ONE_OF_LIST, …); args
+        # are verbatim (formulas keep their leading "=").
         args = [a.strip() for a in inner.split(",")] if inner != "" else []
         return {"type": cond_type, "values": args}
     # No-arg condition (BLANK, NOT_BLANK, ...).

@@ -75,6 +75,8 @@ def read_values(
     ranges: list[str],
     *,
     render: str = "plain",
+    diff_only: bool = False,
+    max_cells: int | None = None,
 ) -> dict:
     """Read values for one or more A1 ranges with a render mode (DESIGN §3.3).
 
@@ -82,14 +84,28 @@ def read_values(
     ``"formula"`` -> ``FORMULA``; ``"all"`` -> FORMULA + FORMATTED side by side. Uses
     ``values.batchGet``. For ``render="all"``, both ``values`` and ``computed`` are padded to
     a COMMON rectangle (the element-wise max of both passes' row count and per-row width) so
-    they are index-aligned; non-formula cells return their literal value under FORMULA render
-    (DESIGN §3.3 LOCKED note).
+    they are index-aligned; non-formula cells return their literal value under FORMULA render.
+
+    ``diff_only`` (ISSUES.md #12, ``render="all"`` ONLY): on a staticized region every FORMATTED
+    cell equals its FORMULA-pass literal, so the parallel ``computed`` matrix is pure
+    duplication (it can double an already-large payload). With ``diff_only=True`` each ``computed``
+    cell that equals its ``values`` counterpart (compared str-normalized, so the typed literal
+    ``185`` matches the formatted ``"185"``) is emitted as ``null``, and ``computed`` is dropped
+    entirely for a range where nothing differs. The rectangle stays index-aligned — a ``null``
+    hole means "computed == values here". A no-op when ``render != "all"``.
+
+    ``max_cells`` (ISSUES.md #13): an optional guardrail. When the total cells across all ranges
+    (the ``values`` grid) exceeds it, raise a structured ``result_too_large`` rather than return a
+    huge payload that only fails at the caller's token cap. ``None`` (default) ⇒ unlimited. For
+    genuinely large value dumps prefer ``export`` (csv/tsv → local file, no token cap).
 
     Args:
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
         ranges: One or more A1 ranges.
         render: ``"plain"`` | ``"unformatted"`` | ``"formula"`` | ``"all"``.
+        diff_only: Sparsify ``computed`` against ``values`` (``render="all"`` only). Default off.
+        max_cells: Raise ``result_too_large`` if the read exceeds this many cells. Default unlimited.
 
     Returns:
         ``{"ok": True, "spreadsheetId": ..., "render": ..., "ranges": [...]}``.
@@ -102,6 +118,11 @@ def read_values(
         )
     if not ranges:
         raise SheetsError("empty_ranges", "read_values requires at least one range")
+    if max_cells is not None and max_cells < 1:
+        raise SheetsError(
+            "bad_max_cells",
+            f"max_cells must be a positive integer, got {max_cells!r}",
+        )
 
     values_api = services.sheets.spreadsheets().values()
     try:
@@ -130,6 +151,7 @@ def read_values(
     computed_ranges = (computed_resp.get("valueRanges") or []) if computed_resp else []
 
     out_ranges: list[dict] = []
+    total_cells = 0
     for idx, vr in enumerate(primary_ranges):
         entry: dict = {
             "range": vr.get("range", ranges[idx] if idx < len(ranges) else None),
@@ -142,10 +164,29 @@ def read_values(
                 raw_values, raw_computed
             )
             entry["values"] = values_rect
-            entry["computed"] = computed_rect
+            if diff_only:
+                sparse, any_diff = _sparsify_computed(values_rect, computed_rect)
+                # Omit ``computed`` entirely for a fully-static range; otherwise keep the
+                # null-holed (still index-aligned) matrix.
+                if any_diff:
+                    entry["computed"] = sparse
+            else:
+                entry["computed"] = computed_rect
         else:
             entry["values"] = pad_jagged(raw_values)
+        total_cells += sum(len(row) for row in entry["values"])
         out_ranges.append(entry)
+
+    if max_cells is not None and total_cells > max_cells:
+        raise SheetsError(
+            "result_too_large",
+            f"read spans {total_cells} cells, exceeding max_cells={max_cells}",
+            hint=(
+                "narrow the ranges, read only the formula columns with render='formula', or "
+                "use 'export' (format=csv/tsv) for bulk values — export writes to a local file "
+                "and never hits a token cap"
+            ),
+        )
 
     return {
         "ok": True,
@@ -153,6 +194,43 @@ def read_values(
         "render": render,
         "ranges": out_ranges,
     }
+
+
+def _sparsify_computed(
+    values_rect: list[list], computed_rect: list[list]
+) -> tuple[list[list], bool]:
+    """Null out ``computed`` cells equal to their ``values`` counterpart (ISSUES.md #12).
+
+    Both inputs share one rectangle (``_pad_to_common_rectangle``), so a positional zip is
+    exact. A cell where the FORMATTED value equals the FORMULA-pass literal — compared
+    str-normalized so the typed ``185`` matches the formatted ``"185"`` — becomes ``None`` (a
+    "same as values" hole); a differing cell keeps its computed value. Returns the sparse matrix
+    and whether ANY cell differed (so the caller can drop ``computed`` for a fully-static range).
+    """
+    sparse: list[list] = []
+    any_diff = False
+    for v_row, c_row in zip(values_rect, computed_rect):
+        out_row: list = []
+        for v, c in zip(v_row, c_row):
+            if _same_value(v, c):
+                out_row.append(None)
+            else:
+                out_row.append(c)
+                any_diff = True
+        sparse.append(out_row)
+    return sparse, any_diff
+
+
+def _same_value(v: object, c: object) -> bool:
+    """True if a FORMULA-pass literal and its FORMATTED counterpart denote the same value.
+
+    Equal objects match directly; otherwise compare string renderings so the typed number
+    ``185`` (FORMULA) equals the formatted string ``"185"`` (FORMATTED_VALUE), which is the
+    common staticized-cell case (DESIGN §3.3 — FORMULA returns literals typed, FORMATTED stringy).
+    """
+    if v == c:
+        return True
+    return str(v) == str(c)
 
 
 def _pad_to_common_rectangle(

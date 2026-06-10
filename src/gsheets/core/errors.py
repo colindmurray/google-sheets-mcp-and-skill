@@ -80,7 +80,8 @@ _HINT_BY_STATUS: dict[int, str] = {
     403: "share the sheet with the authenticated account, or check that the granted "
     "OAuth scopes cover this operation",
     404: "check the spreadsheet id / sheet name — the spreadsheet or sheet was not found",
-    429: "rate limit / quota exceeded — back off and retry; consider batching writes",
+    429: "rate limit / quota exceeded — N parallel callers share one per-user quota; batch "
+    "many ranges into one read_values call and reduce read RPM, then retry with backoff",
     500: "transient Google server error — retry the request",
     503: "Google Sheets is temporarily unavailable — retry the request",
 }
@@ -237,4 +238,105 @@ def classify_google_error(
         status=status,
         reason=reason,
         hint=hint,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Transport / unexpected-error classification (DESIGN §6 — nothing leaks raw).
+#
+# Core's per-call ``try/except HttpError`` only catches API-level errors. A
+# transport-level failure (socket timeout, DNS/connection error, a failed OAuth
+# token refresh) is NOT an ``HttpError`` and would otherwise bubble up as a raw
+# traceback (CLI) or a bare masked "Error calling tool" (MCP). These helpers map
+# such failures to a coded :class:`SheetsError` so BOTH adapters surface a
+# structured ``{code, message, hint}`` envelope instead.
+# ---------------------------------------------------------------------------
+
+
+def _is_connection_failure(exc: BaseException) -> bool:
+    """True when ``exc`` (or its cause chain) looks like a connectivity/DNS/timeout failure.
+
+    Recognizes stdlib socket/timeout/connection errors directly, plus google-auth's
+    ``TransportError`` wrapper and any ``requests``/``urllib3`` connection error reachable
+    through ``__cause__`` (a failed token refresh wraps the underlying connection error).
+    """
+    import socket
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (socket.timeout, socket.gaierror, TimeoutError, ConnectionError)):
+            return True
+        name = type(cur).__name__
+        if name in ("TransportError", "ConnectTimeout", "ReadTimeout",
+                    "NewConnectionError", "MaxRetryError", "SSLError"):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def classify_transport_error(exc: BaseException) -> SheetsError | None:
+    """Map a transport-level exception to a :class:`SheetsError`, or ``None`` if unrecognized.
+
+    Covers the failure modes a plain ``except HttpError`` misses: a socket read timeout on a
+    large grid read (``network_timeout``), and a DNS/connection failure reaching Google
+    (``network_error``). Returns ``None`` for anything that is not transport-shaped so the
+    caller can fall back to a generic ``internal_error``.
+    """
+    import socket
+    import ssl
+
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return SheetsError(
+            "network_timeout",
+            f"the request to Google timed out: {exc}",
+            hint="the read may be large or the network slow — retry, or narrow the range "
+            "(set GSHEETS_HTTP_TIMEOUT to raise the socket timeout)",
+        )
+    if isinstance(exc, (socket.gaierror, ConnectionError, ssl.SSLError)) or _is_connection_failure(
+        exc
+    ):
+        return SheetsError(
+            "network_error",
+            f"could not reach Google's servers: {exc}",
+            hint="check network connectivity / DNS to googleapis.com and retry "
+            "(a cached, still-valid token is unaffected by a transient outage)",
+        )
+    if isinstance(exc, OSError):
+        return SheetsError(
+            "network_error",
+            f"I/O error during the API call: {exc}",
+            hint="check network connectivity and retry",
+        )
+    return None
+
+
+def to_sheets_error(exc: BaseException) -> SheetsError:
+    """Coerce ANY exception into a :class:`SheetsError` (the adapter catch-all envelope).
+
+    Precedence: an already-built :class:`SheetsError` passes through unchanged; a Google
+    ``HttpError`` is classified by :func:`classify_google_error`; a transport failure by
+    :func:`classify_transport_error`; everything else becomes a generic ``internal_error`` that
+    still carries the exception type + message (never a bare, contextless string). This is what
+    lets both adapters turn an unexpected per-call failure into a structured error instead of a
+    raw traceback / masked "Error calling tool" (DESIGN §6.2).
+    """
+    if isinstance(exc, SheetsError):
+        return exc
+    try:
+        from googleapiclient.errors import HttpError
+
+        if isinstance(exc, HttpError):
+            return classify_google_error(exc)
+    except Exception:  # pragma: no cover - googleapiclient always present at runtime
+        pass
+    transport = classify_transport_error(exc)
+    if transport is not None:
+        return transport
+    return SheetsError(
+        "internal_error",
+        f"{type(exc).__name__}: {exc}",
+        hint="an unexpected error occurred while calling Google — this is likely a bug; "
+        "re-run with GSHEETS_VERBOSE_ERRORS=1 for more detail",
     )

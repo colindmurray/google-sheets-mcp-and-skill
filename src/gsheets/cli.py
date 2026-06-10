@@ -17,7 +17,7 @@ import json
 import sys
 
 from . import __version__, auth, core
-from .core.errors import SheetsError
+from .core.errors import SheetsError, to_sheets_error
 from .core.richtext import text_runs_line
 
 # Render modes / input modes / action enums mirrored from core so argparse can validate up
@@ -257,6 +257,19 @@ def _add_read_values(sub) -> None:
         choices=_RENDER_CHOICES,
         default="plain",
         help="plain | unformatted | formula | all (formula+computed side by side)",
+    )
+    p.add_argument(
+        "--diff-only",
+        action="store_true",
+        help="render=all only: null out computed cells equal to values (drops a static "
+        "sheet's duplicate computed matrix; a null hole means computed==values)",
+    )
+    p.add_argument(
+        "--max-cells",
+        type=int,
+        default=None,
+        help="fail with result_too_large if the read exceeds this many cells "
+        "(default: unlimited; prefer 'export' csv/tsv for bulk value dumps)",
     )
     p.set_defaults(func=_cmd_read_values, needs_services=True)
 
@@ -661,7 +674,14 @@ def _cmd_inspect(services, args) -> dict:
 
 
 def _cmd_read_values(services, args) -> dict:
-    return core.read_values(services, args.spreadsheet_id, args.ranges, render=args.render)
+    return core.read_values(
+        services,
+        args.spreadsheet_id,
+        args.ranges,
+        render=args.render,
+        diff_only=args.diff_only,
+        max_cells=args.max_cells,
+    )
 
 
 def _cmd_read_conditional_formats(services, args) -> dict:
@@ -1020,8 +1040,11 @@ def _render_text(result: dict) -> str:
             computed = rng.get("computed")
             for i, row in enumerate(values):
                 if computed is not None and i < len(computed):
+                    # A null computed cell (diff_only) means "same as values" — show just the
+                    # value rather than a misleading "v => None".
                     pairs = [
-                        f"{v} => {c}" for v, c in zip(row, computed[i])
+                        str(v) if c is None else f"{v} => {c}"
+                        for v, c in zip(row, computed[i])
                     ]
                     lines.append("  " + " | ".join(pairs))
                 else:
@@ -1129,7 +1152,10 @@ def _render_read_many(result: dict) -> str:
     """
     mode = result.get("mode")
     count = result.get("count")
-    lines = [f"read-many mode={mode}: {count} result(s)"]
+    head = f"read-many mode={mode}: {count} result(s)"
+    if result.get("partialFailure"):
+        head += f" — PARTIAL FAILURE: {result.get('failed')} of {count} failed"
+    lines = [head]
     for entry in result.get("results", []):
         sid = entry.get("spreadsheetId", "?")
         if entry.get("ok") is False:
@@ -1268,6 +1294,13 @@ def main(argv: list[str] | None = None) -> int:
             result = func(None, args)
     except SheetsError as err:
         _emit_error(err, as_json=args.json)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - never surface a raw traceback to the user
+        # A transport-level failure (socket read timeout on a big inspect, DNS/connection error,
+        # a failed token refresh) is NOT a SheetsError and would otherwise bubble up as a raw
+        # Python traceback (ISSUES.md #9b). Coerce it to the SAME structured envelope every other
+        # failure produces.
+        _emit_error(to_sheets_error(exc), as_json=args.json)
         return 1
 
     # ``auth status`` returns ok:False (not a raise) when no creds resolve -> non-zero exit.

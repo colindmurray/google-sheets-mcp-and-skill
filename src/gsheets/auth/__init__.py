@@ -37,6 +37,12 @@ _DEFAULT_CONFIG_DIR = "~/.config/google-sheets-mcp"
 _DEFAULT_TOKEN_BASENAME = "token.json"
 _DEFAULT_CLIENT_BASENAME = "credentials.json"
 
+#: Default automatic-retry budget for every Google API call (ISSUES.md #7). googleapiclient's
+#: ``execute(num_retries=N)`` does randomized exponential backoff on 429 / 5xx / rate-limit-403,
+#: which is exactly the shared-per-user-quota saturation N parallel agents hit. Overridable via
+#: ``GSHEETS_MAX_RETRIES`` (``0`` disables).
+_DEFAULT_MAX_RETRIES = 4
+
 
 # --------------------------------------------------------------------------- env helpers
 
@@ -126,6 +132,81 @@ def _creds_refreshable(creds: object) -> bool:
     return bool(getattr(creds, "refresh_token", None))
 
 
+def _max_retries() -> int:
+    """Resolve the per-call automatic-retry budget from ``GSHEETS_MAX_RETRIES`` (ISSUES.md #7)."""
+    raw = os.environ.get("GSHEETS_MAX_RETRIES")
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_MAX_RETRIES
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return _DEFAULT_MAX_RETRIES
+
+
+def _make_request_builder():
+    """A ``requestBuilder`` that gives EVERY API call a default ``num_retries`` (ISSUES.md #7).
+
+    googleapiclient never retries unless ``execute(num_retries=N)`` is passed, and no call site
+    passes it — so a single 429 (trivially hit when N parallel agents share one per-user read
+    quota) is surfaced raw. Defaulting ``num_retries`` here, in the ONE place every Resource is
+    built, gives all 28 call sites randomized exponential backoff with zero per-site churn.
+    """
+    from googleapiclient.http import HttpRequest
+
+    default_retries = _max_retries()
+
+    class _RetryingHttpRequest(HttpRequest):
+        def execute(self, http=None, num_retries=0):
+            # Only the default (0, what every call site uses) is upgraded; an explicit override
+            # is honored verbatim.
+            if not num_retries:
+                num_retries = default_retries
+            return super().execute(http=http, num_retries=num_retries)
+
+    return _RetryingHttpRequest
+
+
+def _http_timeout() -> float | None:
+    """Resolve an optional socket timeout (seconds) from ``GSHEETS_HTTP_TIMEOUT`` (ISSUES.md #9b).
+
+    Large grid reads can legitimately run longer than httplib2's default socket timeout; this
+    lets an operator raise it. Unset/invalid ⇒ ``None`` (use the library default).
+    """
+    raw = os.environ.get("GSHEETS_HTTP_TIMEOUT")
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _build_resource(api: str, version: str, creds: object, request_builder, timeout: float | None):
+    """Build one Google API Resource with the retry request builder + optional socket timeout."""
+    from googleapiclient.discovery import build
+
+    if timeout is not None:
+        import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
+
+        authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=timeout))
+        return build(
+            api,
+            version,
+            http=authed_http,
+            cache_discovery=False,
+            requestBuilder=request_builder,
+        )
+    return build(
+        api,
+        version,
+        credentials=creds,
+        cache_discovery=False,
+        requestBuilder=request_builder,
+    )
+
+
 # --------------------------------------------------------------------------- public API
 
 
@@ -148,17 +229,18 @@ def build_services(scopes_mode: str | None = None) -> SheetsServices:
     Raises:
         SheetsError: When no usable credentials can be resolved without consent.
     """
-    # Imported lazily so ``import gsheets.auth`` stays cheap and the heavy discovery client
-    # is only loaded when services are actually built.
-    from googleapiclient.discovery import build
-
     scopes = resolve_scopes(scopes_mode)
     creds = resolve_credentials(scopes)
 
-    sheets = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    # Every Resource gets the same retry request builder (ISSUES.md #7) and the optional
+    # socket timeout (ISSUES.md #9b); both are no-ops by default beyond the standard retry budget.
+    request_builder = _make_request_builder()
+    timeout = _http_timeout()
+
+    sheets = _build_resource("sheets", "v4", creds, request_builder, timeout)
     drive = None
     if _has_drive_scope(scopes):
-        drive = build("drive", "v3", credentials=creds, cache_discovery=False)
+        drive = _build_resource("drive", "v3", creds, request_builder, timeout)
 
     return SheetsServices(
         sheets=sheets,
@@ -279,18 +361,28 @@ def _status_from_creds(creds: object, scopes: list[str], *, persisted: bool) -> 
     expired = bool(getattr(creds, "expired", False))
     refreshable = _creds_refreshable(creds)
 
+    token_path = _token_path()
     out: dict[str, object] = {
         "ok": True,
         "mode": _auth_mode(),
         "scopes": scopes,
-        "tokenPath": str(_token_path()),
-        "tokenExists": _token_path().is_file(),
+        "tokenPath": str(token_path),
+        "tokenExists": token_path.is_file(),
         "tokenPersisted": persisted,
+        # ISSUES.md #6: surface WHETHER (and why not) a rotated token can be written back. If the
+        # token dir isn't writable, every fresh process re-pays the refresh cost and hard-fails
+        # when the token endpoint is unreachable — an operator needs to see that here.
+        "tokenWritable": _token_writable(token_path),
         "valid": valid,
         "expired": expired,
         "refreshable": refreshable,
         "expiry": _expiry_iso(creds),
     }
+    from .resolver import last_persist_error
+
+    persist_err = last_persist_error(token_path)
+    if persist_err is not None:
+        out["tokenPersistError"] = persist_err
 
     if _verbose_errors_enabled():
         email = _account_email(creds)
@@ -298,6 +390,24 @@ def _status_from_creds(creds: object, scopes: list[str], *, persisted: bool) -> 
             out["accountEmail"] = email
 
     return out
+
+
+def _token_writable(token_path: Path) -> bool:
+    """True when the cached token at ``token_path`` could be (re)written (ISSUES.md #6).
+
+    Checks the existing file's writability, or — when absent — whether its parent directory
+    (the nearest existing ancestor) is writable, so an operator can tell at a glance why a
+    refreshed token won't persist. Best-effort; any error degrades to ``False``.
+    """
+    try:
+        if token_path.is_file():
+            return os.access(token_path, os.W_OK)
+        parent = token_path.parent
+        while not parent.exists() and parent != parent.parent:
+            parent = parent.parent
+        return parent.exists() and os.access(parent, os.W_OK)
+    except OSError:  # pragma: no cover - defensive
+        return False
 
 
 def _verbose_errors_enabled() -> bool:

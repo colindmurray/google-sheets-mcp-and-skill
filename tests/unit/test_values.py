@@ -232,6 +232,141 @@ class TestReadValues:
         assert len(out["ranges"]) == 2
         assert out["ranges"][1]["values"] == [["y"], ["z"]]
 
+    # ---- diff_only (ISSUES.md #12): de-duplicate ``computed`` against ``values`` --------
+
+    def test_diff_only_omits_computed_when_range_fully_static(self):
+        # A staticized region: every FORMATTED cell equals its FORMULA-pass literal, so
+        # ``computed`` is pure duplication and is dropped entirely.
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["185", "200"]]}]},
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["185", "200"]]}]},
+            ],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:B1"], render="all", diff_only=True)
+        entry = out["ranges"][0]
+        assert entry["values"] == [["185", "200"]]
+        assert "computed" not in entry  # nothing differs -> computed omitted
+
+    def test_diff_only_keeps_differing_cells_and_nulls_the_equal_ones(self):
+        # One live formula (computed differs) + one static literal (computed equal): the sparse
+        # ``computed`` keeps the differing cell and nulls the equal one, preserving alignment.
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["=SUM(B:B)", "200"]]}]},
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["1234", "200"]]}]},
+            ],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:B1"], render="all", diff_only=True)
+        entry = out["ranges"][0]
+        assert entry["values"] == [["=SUM(B:B)", "200"]]
+        assert entry["computed"] == [["1234", None]]
+        # Still index-aligned: equal dimensions, holes mean "same as values".
+        assert len(entry["values"][0]) == len(entry["computed"][0])
+
+    def test_diff_only_treats_typed_literal_equal_to_its_formatted_string(self):
+        # FORMULA render yields the typed number 185; FORMATTED yields "185". They are the same
+        # value, so diff_only must treat them as equal (str-normalized) and drop ``computed``.
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [
+                {"valueRanges": [{"range": "S!A1:B1", "values": [[185, "hello"]]}]},
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["185", "hello"]]}]},
+            ],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:B1"], render="all", diff_only=True)
+        assert "computed" not in out["ranges"][0]
+
+    def test_diff_only_is_noop_for_non_all_render(self):
+        # diff_only only governs the computed pass; with render!="all" there is no computed and
+        # the flag is a silent no-op (no error, no computed key).
+        services, _ = _make_service()
+        _wire_values_method(
+            services, "batchGet", [{"valueRanges": [{"range": "S!A1", "values": [["x"]]}]}]
+        )
+        out = read_values(services, SHEET_ID, ["S!A1"], render="plain", diff_only=True)
+        assert out["ranges"][0] == {"range": "S!A1", "values": [["x"]]}
+
+    def test_default_all_still_emits_full_computed(self):
+        # Regression guard: default (diff_only=False) keeps the full duplicate computed matrix.
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["185", "200"]]}]},
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["185", "200"]]}]},
+            ],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:B1"], render="all")
+        assert out["ranges"][0]["computed"] == [["185", "200"]]
+
+    # ---- max_cells (ISSUES.md #13): fail fast instead of blowing the client token cap ----
+
+    def test_max_cells_raises_result_too_large_when_exceeded(self):
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [{"valueRanges": [{"range": "S!A1:C2", "values": [["a", "b", "c"], ["d", "e", "f"]]}]}],
+        )
+        with pytest.raises(SheetsError) as exc:
+            read_values(services, SHEET_ID, ["S!A1:C2"], render="plain", max_cells=5)
+        assert exc.value.code == "result_too_large"
+        assert "6" in exc.value.message  # the actual cell count is surfaced
+
+    def test_max_cells_at_limit_passes(self):
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [{"valueRanges": [{"range": "S!A1:C2", "values": [["a", "b", "c"], ["d", "e", "f"]]}]}],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:C2"], render="plain", max_cells=6)
+        assert out["ranges"][0]["values"] == [["a", "b", "c"], ["d", "e", "f"]]
+
+    def test_max_cells_counts_across_all_ranges(self):
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [
+                {
+                    "valueRanges": [
+                        {"range": "S!A1", "values": [["x"]]},
+                        {"range": "S!B1:B2", "values": [["y"], ["z"]]},
+                    ]
+                }
+            ],
+        )
+        with pytest.raises(SheetsError) as exc:
+            read_values(services, SHEET_ID, ["S!A1", "S!B1:B2"], render="plain", max_cells=2)
+        assert exc.value.code == "result_too_large"
+
+    def test_max_cells_none_is_unlimited(self):
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchGet",
+            [{"valueRanges": [{"range": "S!A1:C2", "values": [["a", "b", "c"], ["d", "e", "f"]]}]}],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:C2"], render="plain", max_cells=None)
+        assert out["ok"] is True
+
+    def test_bad_max_cells_raises(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            read_values(services, SHEET_ID, ["S!A1"], render="plain", max_cells=0)
+        assert exc.value.code == "bad_max_cells"
+
     def test_empty_value_range_yields_empty_values(self):
         services, _ = _make_service()
         _wire_values_method(

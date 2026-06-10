@@ -192,6 +192,15 @@ def test_read_values_maps_ranges_and_render(patched):
     # ranges is the first positional core arg after spreadsheet_id; render is a kwarg.
     assert patched["args"][0] == ["S!A1:B2", "S!C1"]
     assert patched["kwargs"]["render"] == "all"
+    # New flags default off / unlimited (ISSUES.md #12/#13).
+    assert patched["kwargs"]["diff_only"] is False
+    assert patched["kwargs"]["max_cells"] is None
+
+
+def test_read_values_diff_only_and_max_cells_flags_map(patched):
+    _run(["read-values", "ID", "S!A1:B2", "--render", "all", "--diff-only", "--max-cells", "2000"])
+    assert patched["kwargs"]["diff_only"] is True
+    assert patched["kwargs"]["max_cells"] == 2000
 
 
 def test_inspect_include_flags_map_one_to_one(patched):
@@ -808,3 +817,37 @@ def test_single_form_cf_result_renders_index_and_rule(patched, monkeypatch, caps
     assert "action: add" in out
     assert "index: 0" in out
     assert "rule: [Budget!D2:D40] if CUSTOM_FORMULA(=$D2<0) -> bg #F4C7C3 bold" in out
+
+
+# ----------------------------------------------------------- ISSUES.md #9b CLI never tracebacks
+
+
+def test_cli_network_timeout_emits_structured_error_not_traceback(monkeypatch, capsys):
+    import gsheets.cli as cli
+
+    monkeypatch.setattr(cli.auth, "build_services", lambda scopes_mode=None: object())
+    monkeypatch.setattr(
+        cli.core, "inspect", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("read timed out"))
+    )
+    rc = cli.main(["--json", "inspect", "<ID>", "Cliff!A1:AF51"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "network_timeout"
+    # No raw traceback leaked to stderr.
+    assert "Traceback (most recent call last)" not in err
+
+
+def test_cli_unexpected_exception_is_structured(monkeypatch, capsys):
+    import gsheets.cli as cli
+
+    monkeypatch.setattr(cli.auth, "build_services", lambda scopes_mode=None: object())
+    monkeypatch.setattr(
+        cli.core, "overview", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    rc = cli.main(["overview", "<ID>"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "internal_error" in err
+    assert "Traceback" not in err

@@ -496,3 +496,94 @@ def test_classify_resp_status_none_falls_to_status_code():
 
     err = classify_google_error(_NoneRespStatus())
     assert err.status == 404
+
+
+# --------------------------------------------------------------------------- transport / catch-all
+# (ISSUES.md #4/#6/#9b/#10) — a non-HttpError failure must still become a structured SheetsError
+# so neither adapter leaks a raw traceback or a bare "Error calling tool".
+
+
+def test_classify_transport_error_timeout():
+    from gsheets.core.errors import classify_transport_error
+
+    err = classify_transport_error(TimeoutError("the read operation timed out"))
+    assert err is not None
+    assert err.code == "network_timeout"
+    assert "timed out" in err.message
+    assert "retry" in err.hint
+
+
+def test_classify_transport_error_socket_timeout():
+    import socket
+
+    from gsheets.core.errors import classify_transport_error
+
+    err = classify_transport_error(socket.timeout("timed out"))
+    assert err is not None and err.code == "network_timeout"
+
+
+def test_classify_transport_error_dns_and_connection():
+    import socket
+
+    from gsheets.core.errors import classify_transport_error
+
+    assert classify_transport_error(socket.gaierror("Name or service not known")).code == (
+        "network_error"
+    )
+    assert classify_transport_error(ConnectionError("connection reset")).code == "network_error"
+
+
+def test_classify_transport_error_recognizes_google_transport_error_by_name():
+    from gsheets.core.errors import classify_transport_error
+
+    class TransportError(Exception):  # mimics google.auth.exceptions.TransportError by NAME
+        pass
+
+    err = classify_transport_error(TransportError("Failed to retrieve ... getaddrinfo failed"))
+    assert err is not None and err.code == "network_error"
+
+
+def test_classify_transport_error_returns_none_for_unrelated():
+    from gsheets.core.errors import classify_transport_error
+
+    assert classify_transport_error(ValueError("nope")) is None
+
+
+def test_to_sheets_error_passthrough_and_classification():
+    from gsheets.core.errors import to_sheets_error
+
+    original = SheetsError("bad_range", "nope")
+    assert to_sheets_error(original) is original
+
+    timeout = to_sheets_error(TimeoutError("read timed out"))
+    assert timeout.code == "network_timeout"
+
+    http = HttpError(_FakeResponse(403), json.dumps({"error": {"message": "denied"}}).encode())
+    assert to_sheets_error(http).code == "google_api_error"
+
+
+def test_to_sheets_error_wraps_unexpected_as_internal_error():
+    from gsheets.core.errors import to_sheets_error
+
+    err = to_sheets_error(KeyError("surprise"))
+    assert err.code == "internal_error"
+    # The exception type + message are preserved (never a bare contextless string).
+    assert "KeyError" in err.message
+    assert err.hint  # has an actionable hint
+
+
+def test_429_hint_mentions_reads_not_writes():
+    # ISSUES.md #7: the old hint wrongly said "batching writes" for a READ quota error.
+    err = classify_google_error(
+        HttpError(_FakeResponse(429), json.dumps({"error": {"message": "rate"}}).encode())
+    )
+    assert err.status == 429
+    assert "write" not in err.hint.lower()
+    assert "read_values" in err.hint
+
+
+def test_classify_transport_error_generic_oserror():
+    from gsheets.core.errors import classify_transport_error
+
+    err = classify_transport_error(OSError("disk gremlins"))
+    assert err is not None and err.code == "network_error"

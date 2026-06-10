@@ -78,7 +78,9 @@ Understand (read-only):
   `--rich-text` adds per-run rich text (styled segments + in-cell links) and the cell `hyperlink`;
   `--pivot` adds pivot-table definitions (both attached only to the cells that have them).
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
-  (`all` returns formulas and computed values side by side).
+  (`all` returns formulas and computed values side by side). For big reads: `--diff-only` drops the
+  duplicate `computed` matrix on static sheets; `--max-cells N` fails fast instead of blowing the
+  token cap (and for pure value dumps, `export csv` is better than either — see the gotchas).
 - `read-conditional-formats <ID> [--sheet NAME]` — conditional-format rules as terse, readable,
   round-trippable lines with their positional `index`.
 - `read-many --requests-json '[...]' [--mode {values,summary}]` — read values or summaries across
@@ -224,6 +226,49 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   at the document level, never mapped to a cell. `comments --action delete` requires `--confirm`.
 - A slicer's anchor reads back as `{sheet,row,col}` and renders in the terse line as `@ Sheet!E1`;
   a row-0/top-left anchor still renders (an absent 0-valued index just means 0).
+- One per-user read quota is shared across every concurrent caller. If you fan out N parallel
+  agents/processes against the same account, they all draw on one "read requests per minute" bucket
+  and trivially saturate it (every call then 429s). The fix is to batch: pass many ranges to a
+  single `read-values` call (one `batchGet`), and read many spreadsheets with one `read-many`,
+  instead of one call per range/file. The tool now retries 429/5xx automatically with exponential
+  backoff (tune with `GSHEETS_MAX_RETRIES`, default 4; `0` disables), but batching is what actually
+  keeps you under the cap.
+- Native-table dropdowns are invisible to `inspect`. A column constrained by a *Table* column type
+  (`Status:DROPDOWN(Open,Closed)`) is a table property, not per-cell data validation, so `inspect`
+  reports zero validation on those cells. To audit a table's enforced dropdowns, read
+  `structure --action read` and look at `tables[].columns[].validation`. Only validation set with
+  `set-validation` (or pre-existing per-cell rules) shows up under a cell's `validationRule`.
+- `read-values --render unformatted` hides whether a cell is formula-driven (it returns the typed
+  result only). When you're still discovering a sheet's logic, prefer `--render all` (formula and
+  computed value side by side) or `inspect`; reach for `unformatted` only once you know the shape.
+- `--render all` duplicates the grid on staticized sheets. It returns `values` (formulas/literals)
+  AND a parallel `computed` matrix; on a sheet whose formulas were frozen to literals the two are
+  identical, so half the payload is dead weight. Pass `--diff-only` (MCP `diff_only=true`) to null
+  out every `computed` cell that equals `values` and drop `computed` entirely for a fully-static
+  range — a `null` hole means "computed == values here". This roughly halves a formula-sheet read
+  while staying index-aligned; genuine formulas (where computed differs) are still emitted.
+- For bulk VALUE dumps, `export` beats `read-values`. `export --format csv --sheet <tab> --path …`
+  serializes the values straight to a local file (no token cap, no null-key bloat); a whole-tab
+  `read-values` can be megabytes and only fails at the *caller's* token limit. CSV can't carry
+  formulas, so the pattern is: `export csv` for the values + a **narrow-band** `read-values --render
+  formula` (or `all`) over just the formula columns. As a guardrail, `--max-cells N` (MCP
+  `max_cells`) makes a read fail fast with `result_too_large` instead of returning a giant payload.
+- Budget reads against the per-user read-RPM quota — it is small. Even a *single* sequential caller
+  doing a normal bulk export (~a dozen reads in a couple of minutes) can saturate it and start
+  429ing; the automatic backoff smooths bursts but cannot conjure quota that's already spent. Prefer
+  a few wide multi-range reads (one `batchGet`) and `export` over many small calls, and space large
+  reads out. (This is the same shared bucket the parallel-callers gotcha above describes.)
+- Table column types are author-declared, not validated against cell contents. `structure --action
+  read` echoes each native-Table column's `type` (`DOUBLE`, `TEXT`, …) exactly as the sheet author
+  declared it — so a column can report `DOUBLE` while holding text, carry no type at all, or have a
+  stray name like `Column 23`. Faithful, but don't auto-generate a schema from `tables[].columns[]
+  .type` and trust it; verify against the actual cell values.
+- Theme colors read back as `theme:NAME` (e.g. `theme:ACCENT1`), not a resolved hex. If you compare
+  a read-back color against a literal `#RRGGBB`, a theme-colored cell will not match — that is
+  expected, not a bug.
+- Single-quote A1 ranges in the shell. A range like `'WEEK-TEMPLATES!AS$START'` contains `!` and
+  `$`, which zsh/bash will history-expand or variable-expand if unquoted, silently corrupting the
+  argument. Always wrap A1 ranges in single quotes.
 
 ## Detailed references — read on demand
 

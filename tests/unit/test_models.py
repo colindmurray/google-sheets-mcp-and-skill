@@ -1021,3 +1021,44 @@ def test_read_many_terse_untitled_summary_and_missing_id():
     }
     m = models.ReadManyResult.model_validate(data)
     assert m.terse == "read_many mode=summary: 1 result(s)\n  ?: (untitled) (0 sheet(s))"
+
+
+# ----------------------------------------------------------------- ISSUES.md #8 null-key pruning
+
+
+def test_model_dump_prunes_null_keys():
+    # A sparse inspect cell (no note/formula/validation/etc.) must not re-inflate to explicit
+    # nulls in the MCP structured output (ISSUES.md #8 — null keys blew the token cap).
+    data = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "range": "Cliff!A1:A1",
+        "rows": 1,
+        "cols": 1,
+        "merges": [],
+        "compact": False,
+        "cells": [{"a1": "A1", "value": "x"}],
+    }
+    dumped = models.InspectResult.model_validate(data).model_dump()
+    cell = dumped["cells"][0]
+    # Only the keys the core dict carried survive — no note/formula/validationRule/runs nulls.
+    assert cell == {"a1": "A1", "value": "x"}
+    assert "note" not in cell and "hyperlink" not in cell and "validationRule" not in cell
+
+
+def test_model_dump_json_also_prunes_nulls():
+    import json as _json
+
+    data = {"ok": True, "spreadsheetId": "<ID>", "cells": [{"a1": "B2"}], "merges": []}
+    js = models.InspectResult.model_validate(data).model_dump_json()
+    assert "null" not in js
+    assert _json.loads(js)["cells"][0] == {"a1": "B2"}
+
+
+def test_pruning_keeps_empty_lists_and_false():
+    # Empty collections and falsey-but-not-None values are NOT pruned (they carry meaning).
+    data = {"ok": True, "spreadsheetId": "<ID>", "sheets": [], "namedRanges": [], "title": ""}
+    dumped = models.OverviewResult.model_validate(data).model_dump()
+    assert dumped["sheets"] == [] and dumped["namedRanges"] == []
+    assert dumped["title"] == ""
+    assert dumped["ok"] is True

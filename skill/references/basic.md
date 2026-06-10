@@ -118,6 +118,18 @@ gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' 'Sheet1!F1:F20' --rend
 A `values` entry that does **not** start with `=` is a **literal**, not a formula (FORMULA render
 passes literals through).
 
+Two optional knobs for large reads:
+
+| Flag | Effect |
+|---|---|
+| `--diff-only` | `--render all` only: null out each `computed` cell that equals `values`, and drop `computed` entirely for a fully-static range. A `null` hole means "computed == values here"; the matrix stays index-aligned. Roughly halves a staticized formula-sheet read. |
+| `--max-cells N` | Fail with a structured `result_too_large` error if the read spans more than `N` cells, instead of returning a payload that only fails at the caller's token cap. Default: unlimited. |
+
+For a **pure value dump**, prefer `export --format csv` (writes a local file, no token cap) over a
+wide `read-values`; CSV can't carry formulas, so pair it with a narrow-band `--render formula` read
+over just the formula columns. Reads draw on a small per-user read-RPM quota shared by all callers —
+favor a few wide multi-range reads and `export` over many small calls.
+
 ### read-conditional-formats
 
 Per-sheet conditional-format rules serialized to terse, readable, round-trippable lines, each with

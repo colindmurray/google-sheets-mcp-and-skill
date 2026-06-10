@@ -104,6 +104,17 @@ def test_read_tools_have_output_schema(name):
     assert _tools()[name].output_schema is not None
 
 
+def test_read_values_exposes_diff_only_and_max_cells_optional():
+    # ISSUES.md #12/#13: the optional payload-shaping knobs are exposed and NOT required.
+    tool = _tools()["sheets_read_values"]
+    props = tool.parameters.get("properties", {})
+    required = tool.parameters.get("required", [])
+    assert "diff_only" in props
+    assert "max_cells" in props
+    assert "diff_only" not in required
+    assert "max_cells" not in required
+
+
 def test_to_tool_error_api_shape():
     err = SheetsError(
         "google_api_error",
@@ -319,3 +330,40 @@ def test_enabled_tools_allowlist_restricts_registration():
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK" in proc.stdout
+
+
+# ----------------------------------------------------------- ISSUES.md #4/#10 exception-proofing
+
+
+def test_call_maps_timeout_to_structured_tool_error():
+    # A transport timeout (NOT a SheetsError) must surface as a structured ToolError, never a
+    # bare masked "Error calling tool" (ISSUES.md #4) — and must not propagate raw (ISSUES.md #10).
+    def boom(_s, _sid):
+        raise TimeoutError("The read operation timed out")
+
+    with pytest.raises(ToolError) as ei:
+        srv._call(srv.models.InspectResult, boom, object(), "x")
+    msg = str(ei.value)
+    assert msg.startswith("network_timeout:")
+    assert "timed out" in msg
+
+
+def test_call_maps_unexpected_exception_to_internal_error():
+    def boom(_s, _sid):
+        raise KeyError("surprise")
+
+    with pytest.raises(ToolError) as ei:
+        srv._call(srv.models.InspectResult, boom, object(), "x")
+    assert str(ei.value).startswith("internal_error:")
+
+
+def test_call_model_validation_error_fails_small():
+    # A mirror-model construction error must surface as ONE structured ToolError, not a masked
+    # bare error or a 1000-line validation wall (ISSUES.md #1 "fail small", #10).
+    def returns_bad_shape(_s, _sid):
+        # rows must be an int; a dict triggers a pydantic validation error in model_cls(**result).
+        return {"ok": True, "rows": {"not": "an int"}}
+
+    with pytest.raises(ToolError) as ei:
+        srv._call(srv.models.InspectResult, returns_bad_shape, object(), "x")
+    assert str(ei.value).startswith("internal_error:")

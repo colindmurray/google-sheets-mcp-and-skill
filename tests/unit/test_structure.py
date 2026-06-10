@@ -1878,9 +1878,45 @@ class TestStructureReadDegradations:
         }
         _wire_spreadsheets_method(services, "get", [payload])
         out = structure(services, SHEET_ID, action="read")
-        # Unresolvable named-range and merge GridRanges become None, not exceptions.
+        # An unresolvable named-range range still degrades to None (not an exception)...
         assert out["namedRanges"][0]["range"] is None
-        assert out["sheets"][0]["merges"] == [None]
+        # ...but an unresolvable merge is DROPPED from the list, never emitted as a null
+        # (ISSUES.md #1: nulls crash the MCP model and leak useless entries to the CLI).
+        assert out["sheets"][0]["merges"] == []
+
+    def test_null_and_unresolvable_merge_entries_are_filtered(self, monkeypatch):
+        """A merges array with null / unresolvable entries yields only the resolvable A1 strings
+        (ISSUES.md #1) — no nulls so the MCP StructureResult never explodes one-error-per-null."""
+
+        def selective_gridrange_to_a1(services, spreadsheet_id, gr):
+            # A valid merge dict resolves; a null / dict-without-sheetId raises (caught upstream).
+            if isinstance(gr, dict) and gr.get("startRowIndex") == 1:
+                return "Cliff!A2:D4"
+            raise SheetsError("bad_range", "unresolvable")
+
+        monkeypatch.setattr(structure_mod, "gridrange_to_a1", selective_gridrange_to_a1)
+        services = _make_service()
+        payload = {
+            "namedRanges": [],
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Cliff", "gridProperties": {}},
+                    # one good merge + a null + a junk dict (mirrors the sparse array from #1)
+                    "merges": [
+                        {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 4},
+                        None,
+                        {"unexpected": "shape"},
+                    ],
+                }
+            ],
+        }
+        _wire_spreadsheets_method(services, "get", [payload])
+        out = structure(services, SHEET_ID, action="read")
+        assert out["sheets"][0]["merges"] == ["Cliff!A2:D4"]
+        # The MCP mirror model validates without error (the regression that made #1 blocking).
+        from gsheets.models import StructureResult
+
+        StructureResult.model_validate(out)
 
     def test_feature_range_a1_non_dict_is_none(self):
         """A non-dict GridRange passed to the feature-range resolver yields None directly,

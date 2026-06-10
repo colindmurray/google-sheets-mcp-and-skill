@@ -59,9 +59,12 @@ def read_many(
         mode: ``"values"`` (default) or ``"summary"``.
 
     Returns:
-        ``{"ok": True, "mode": ..., "count": ..., "results": [...]}`` where ``results`` mixes
-        success result dicts (``ok: True``) and captured ``{"spreadsheetId", "ok": False,
-        "error": {...}}`` entries, one per request, in request order.
+        ``{"ok": True, "mode": ..., "count": ..., "succeeded": ..., "failed": ...,
+        "partialFailure": ..., "results": [...]}`` where ``results`` mixes success result dicts
+        (``ok: True``) and captured ``{"spreadsheetId", "ok": False, "error": {...}}`` entries,
+        one per request, in request order. ``partialFailure`` is ``True`` when ANY inner request
+        failed — top-level ``ok`` stays batch-level, so check ``partialFailure``/``failed`` (or
+        each entry's ``ok``) rather than the top-level ``ok`` alone (ISSUES.md #3).
 
     Raises:
         SheetsError: ``bad_mode`` for an unknown mode; ``bad_requests`` when ``requests`` is not
@@ -113,10 +116,19 @@ def read_many(
         result.setdefault("spreadsheetId", spreadsheet_id)
         results.append(result)
 
+    # The batch call itself succeeded (top-level ``ok: True`` means "the fan-out ran"), but a
+    # caller checking only that signal would be misled when an inner request failed (ISSUES.md
+    # #3). Surface an explicit ``partialFailure`` flag + ``failed`` count so a partial result is
+    # never mistaken for a clean one. (Top-level ``ok`` stays batch-level by design — the
+    # documented contract is "check each results[] entry's ok".)
+    failed = sum(1 for r in results if r.get("ok") is False)
     return {
         "ok": True,
         "mode": mode,
         "count": len(results),
+        "succeeded": len(results) - failed,
+        "failed": failed,
+        "partialFailure": failed > 0,
         "results": results,
     }
 

@@ -22,7 +22,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -52,7 +52,7 @@ from .core import (
     structure as _structure,
     write_values as _write_values,
 )
-from .core.errors import SheetsError
+from .core.errors import SheetsError, to_sheets_error
 from .core.service import SheetsServices
 
 
@@ -210,13 +210,24 @@ def _call(
         A populated ``model_cls`` instance.
 
     Raises:
-        ToolError: Built from the raised :class:`SheetsError` (curated, passes through masking).
+        ToolError: Built from the failure. A curated :class:`SheetsError` passes through the
+            server's error masking with its ``code``/``message``/``hint`` intact; ANY other
+            exception (a transport timeout, a failed token refresh, an unexpected bug) is first
+            coerced to a structured :class:`SheetsError` via :func:`to_sheets_error`, so the
+            client gets ``"<code>: <message> — <hint>"`` instead of a bare, masked
+            ``"Error calling tool '<name>'"`` (ISSUES.md #4) — and one per-call failure can never
+            take the server down (ISSUES.md #10).
     """
     try:
         result = fn(*args, **kwargs)
+        # Model construction is inside the guard too: a mirror-model validation error must also
+        # surface as ONE structured error, never a masked "Error calling tool" or a wall of
+        # per-field validation lines (ISSUES.md #1 "fail small", #10).
+        return model_cls(**result)
     except SheetsError as exc:
         raise to_tool_error(exc) from exc
-    return model_cls(**result)
+    except Exception as exc:  # noqa: BLE001 - turn ANY failure into a structured ToolError
+        raise to_tool_error(to_sheets_error(exc)) from exc
 
 
 # --------------------------------------------------------------------------- registration
@@ -381,6 +392,22 @@ def sheets_read_values(
         Literal["plain", "unformatted", "formula", "all"],
         Field(description="What each cell yields; see the tool description."),
     ] = "plain",
+    diff_only: Annotated[
+        bool,
+        Field(
+            description="render='all' only: null out computed cells equal to values, and drop "
+            "computed for fully-static ranges (halves a staticized sheet's payload). A null "
+            "hole means computed==values at that cell."
+        ),
+    ] = False,
+    max_cells: Annotated[
+        Optional[int],
+        Field(
+            description="Fail with result_too_large if the read exceeds this many cells, instead "
+            "of returning a payload that only fails at the token cap. null = unlimited. For bulk "
+            "value dumps prefer sheets_export (csv/tsv → a file, no token cap)."
+        ),
+    ] = None,
 ) -> models.ReadValuesResult:
     """Read plain values for one or more A1 ranges, with a selectable render mode.
 
@@ -390,12 +417,27 @@ def sheets_read_values(
     side-by-side, index-aligned). For rich per-cell formats/notes/validation, use
     ``sheets_inspect`` instead.
 
+    On a staticized sheet (frozen formulas → literals) "all" duplicates the grid: ``computed``
+    equals ``values`` almost everywhere. Pass ``diff_only=true`` to null out the equal cells and
+    drop ``computed`` where nothing differs — roughly halving the payload while staying
+    index-aligned (a ``null`` in ``computed`` means "same as values"). For a huge VALUE-only dump,
+    ``sheets_export`` (csv/tsv) is far better than this tool — it writes a local file and never
+    hits the token cap; ``max_cells`` guards against an accidental token-cap blow-up here.
+
     Returns:
         ``{ok, spreadsheetId, render, ranges:[{range, values:[[...]], computed:[[...]]}]}``
-        (``computed`` present only when ``render="all"``; rows padded to a rectangle).
+        (``computed`` present only when ``render="all"``; with ``diff_only`` it is sparse/absent;
+        rows padded to a rectangle).
     """
     return _call(
-        models.ReadValuesResult, _read_values, _services(ctx), spreadsheet_id, ranges, render=render
+        models.ReadValuesResult,
+        _read_values,
+        _services(ctx),
+        spreadsheet_id,
+        ranges,
+        render=render,
+        diff_only=diff_only,
+        max_cells=max_cells,
     )
 
 
@@ -469,13 +511,15 @@ def sheets_read_many(
     The cross-file analogue of ``sheets_overview`` / ``sheets_read_values``: each request names
     its own ``spreadsheetId`` (there is no top-level id). Errors are captured per item — one bad
     id (404, permission denied, bad range) becomes a ``{spreadsheetId, ok:False, error:{...}}``
-    entry in ``results`` instead of aborting the batch. A top-level ``ok:true`` therefore does
-    NOT mean every file succeeded; check each ``results[]`` entry's ``ok``.
+    entry in ``results`` instead of aborting the batch. A top-level ``ok:true`` is BATCH-level
+    (the fan-out ran) and does NOT mean every file succeeded — check ``partialFailure`` /
+    ``failed`` (or each ``results[]`` entry's ``ok``).
 
     Returns:
-        ``{ok, mode, count, results:[...]}`` — each entry either a success dict
-        (``{ok:True, spreadsheetId, ...}``, a values or summary shape) or a captured failure,
-        one per request in request order.
+        ``{ok, mode, count, succeeded, failed, partialFailure, results:[...]}`` — ``partialFailure``
+        is true when any file failed; each entry is either a success dict
+        (``{ok:True, spreadsheetId, ...}``, a values or summary shape) or a captured failure, one
+        per request in request order.
     """
     return _call(
         models.ReadManyResult,

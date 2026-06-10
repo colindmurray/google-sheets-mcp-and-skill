@@ -319,12 +319,14 @@ def test_status_reports_valid_token(patch_resolver):
         "tokenPath": out["tokenPath"],  # path value asserted separately below
         "tokenExists": False,
         "tokenPersisted": False,
+        "tokenWritable": out["tokenWritable"],  # ISSUES.md #6; environment-dependent
         "valid": True,
         "expired": False,
         "refreshable": True,
         "expiry": "2030-01-01T12:00:00",
     }
     assert out["tokenPath"].endswith("/token.json")
+    assert isinstance(out["tokenWritable"], bool)
 
 
 def test_status_reports_expired_refreshable_token(patch_resolver):
@@ -722,3 +724,88 @@ class TestWriteToken:
 
         _resolver._write_token(_GoodCreds(), dest)
         assert dest.read_text(encoding="utf-8") == '{"token": "persisted"}'
+
+
+# --------------------------------------------------------------------- ISSUES.md #7 retry builder
+
+
+def test_request_builder_defaults_num_retries(monkeypatch):
+    monkeypatch.delenv("GSHEETS_MAX_RETRIES", raising=False)
+    builder = auth._make_request_builder()
+
+    captured = {}
+
+    # Patch the parent HttpRequest.execute to capture the num_retries our subclass passes up.
+    from googleapiclient.http import HttpRequest
+
+    def fake_execute(self, http=None, num_retries=0):
+        captured["num_retries"] = num_retries
+        return {"ok": True}
+
+    monkeypatch.setattr(HttpRequest, "execute", fake_execute)
+
+    req = builder.__new__(builder)  # avoid constructing a real HttpRequest
+    builder.execute(req)
+    assert captured["num_retries"] == auth._DEFAULT_MAX_RETRIES
+
+
+def test_max_retries_env_override(monkeypatch):
+    monkeypatch.setenv("GSHEETS_MAX_RETRIES", "7")
+    assert auth._max_retries() == 7
+    monkeypatch.setenv("GSHEETS_MAX_RETRIES", "0")
+    assert auth._max_retries() == 0
+    monkeypatch.setenv("GSHEETS_MAX_RETRIES", "junk")
+    assert auth._max_retries() == auth._DEFAULT_MAX_RETRIES
+
+
+def test_http_timeout_env(monkeypatch):
+    monkeypatch.delenv("GSHEETS_HTTP_TIMEOUT", raising=False)
+    assert auth._http_timeout() is None
+    monkeypatch.setenv("GSHEETS_HTTP_TIMEOUT", "120")
+    assert auth._http_timeout() == 120.0
+    monkeypatch.setenv("GSHEETS_HTTP_TIMEOUT", "-5")
+    assert auth._http_timeout() is None
+
+
+def test_build_services_uses_timeout_http_when_env_set(patch_resolver, record_build, monkeypatch):
+    # ISSUES.md #9b: GSHEETS_HTTP_TIMEOUT routes builds through an AuthorizedHttp with a socket
+    # timeout (http=...), instead of the default credentials= path.
+    monkeypatch.setenv("GSHEETS_HTTP_TIMEOUT", "90")
+    creds = _FakeCreds()
+    patch_resolver(creds, scopes=DEFAULT_SCOPES)
+
+    build_services()
+
+    for call in record_build:
+        assert "credentials" not in call
+        assert call.get("http") is not None
+        assert call["cache_discovery"] is False
+        assert call.get("requestBuilder") is not None
+
+
+def test_build_services_passes_request_builder(patch_resolver, record_build):
+    # ISSUES.md #7: every Resource is built with the retry request builder.
+    patch_resolver(_FakeCreds(), scopes=DEFAULT_SCOPES)
+    build_services()
+    assert record_build  # at least sheets
+    for call in record_build:
+        assert call.get("requestBuilder") is not None
+
+
+def test_http_timeout_non_numeric_is_none(monkeypatch):
+    monkeypatch.setenv("GSHEETS_HTTP_TIMEOUT", "not-a-number")
+    assert auth._http_timeout() is None
+
+
+def test_status_surfaces_token_persist_error(patch_resolver, monkeypatch):
+    # ISSUES.md #6: a recorded token-persist failure is surfaced so the operator sees WHY a
+    # rotated token won't stick.
+    from gsheets.auth import resolver as r
+
+    creds = _FakeCreds(valid=True)
+    patch_resolver(creds, scopes=DEFAULT_SCOPES)
+    token_path = auth._token_path()
+    monkeypatch.setitem(r._LAST_PERSIST_ERROR, str(token_path), "OSError: read-only file system")
+
+    out = status()
+    assert out["tokenPersistError"] == "OSError: read-only file system"

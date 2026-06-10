@@ -825,9 +825,12 @@ def _serialize_cf_rule(
     """Serialize one Google ``ConditionalFormatRule`` to the read-side rule dict (DESIGN §3.3).
 
     Resolves each Google ``GridRange`` to an A1 string FIRST (condformat is serviceless and
-    takes A1 ranges, DESIGN §4 boundary), then serializes to the body-only ``line`` and parses
-    it back to recover the structured ``ranges``/``kind``/``condition``-or-``stops``/``format``
-    fields — keeping ``line`` and the structured fields trivially consistent (one source).
+    takes A1 ranges, DESIGN §4 boundary), then derives BOTH the body-only ``line`` and the
+    structured ``ranges``/``kind``/``condition``-or-``stops``/``format`` fields DIRECTLY from the
+    same A1-resolved rule. The structured fields are NOT re-parsed from the line: re-parsing
+    comma-splits a single ``CUSTOM_FORMULA`` value whose formula contains commas, so
+    ``serialize_rule_structured`` reads the condition's ``values[]`` straight off the rule
+    instead (ISSUES.md #2). ``line`` and the structured fields still share one source — the rule.
     """
     a1_ranges = [
         gridrange_to_a1(services, spreadsheet_id, gr)
@@ -839,17 +842,17 @@ def _serialize_cf_rule(
     rule_a1["ranges"] = a1_ranges
 
     line = condformat.serialize_rule(rule_a1)
-    parsed = condformat.parse_rule_line(line)
+    structured = condformat.serialize_rule_structured(rule_a1)
 
     out: dict = {
         "index": index,
         "line": line,
-        "ranges": parsed["ranges"],
-        "kind": parsed["kind"],
+        "ranges": structured["ranges"],
+        "kind": structured["kind"],
     }
-    if parsed["kind"] == "gradient":
-        out["stops"] = parsed.get("stops", [])
+    if structured["kind"] == "gradient":
+        out["stops"] = structured.get("stops", [])
     else:
-        out["condition"] = parsed.get("condition", {})
-    out["format"] = parsed.get("format", {})
+        out["condition"] = structured.get("condition", {})
+    out["format"] = structured.get("format", {})
     return out

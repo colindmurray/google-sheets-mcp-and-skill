@@ -426,3 +426,38 @@ class TestPurity:
             assert not any(
                 mod.startswith(f) for f in forbidden if isinstance(mod, str)
             )
+
+
+# ----------------------------------------------------------------- ISSUES.md #3 partialFailure
+
+
+class TestPartialFailureSignal:
+    def test_partial_failure_flag_when_one_inner_fails(self, monkeypatch):
+        import gsheets.core.multiread as mr
+
+        def fake_overview(services, sid):
+            if sid == "BAD":
+                raise SheetsError("google_api_error", "429", status=429)
+            return {"ok": True, "spreadsheetId": sid, "title": "T", "sheets": []}
+
+        monkeypatch.setattr(mr, "overview", fake_overview)
+        out = mr.read_many(
+            object(),
+            [{"spreadsheetId": "GOOD"}, {"spreadsheetId": "BAD"}],
+            mode="summary",
+        )
+        assert out["ok"] is True  # the batch ran
+        assert out["partialFailure"] is True
+        assert out["failed"] == 1
+        assert out["succeeded"] == 1
+
+    def test_no_partial_failure_when_all_succeed(self, monkeypatch):
+        import gsheets.core.multiread as mr
+
+        monkeypatch.setattr(
+            mr, "overview", lambda s, sid: {"ok": True, "spreadsheetId": sid, "sheets": []}
+        )
+        out = mr.read_many(object(), [{"spreadsheetId": "A"}], mode="summary")
+        assert out["partialFailure"] is False
+        assert out["failed"] == 0
+        assert out["succeeded"] == 1

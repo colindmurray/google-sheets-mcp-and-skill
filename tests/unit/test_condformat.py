@@ -329,10 +329,10 @@ def test_parse_boolean_empty_format():
 
 def test_parse_condition_keeps_formula_commas_and_equals():
     parsed = parse_rule_line("[S!A1:A1] if CUSTOM_FORMULA(=AND($A1>0,$B1<100)) -> bold")
-    # Formula contains a comma; the grammar splits args on commas (DESIGN §4.1) so this yields
-    # two verbatim arg tokens — assert the leading '=' is preserved on the first.
+    # A CUSTOM_FORMULA has exactly ONE value (its formula); commas inside it must NOT split it
+    # into bogus args (ISSUES.md #2). The whole formula stays one verbatim value, '=' preserved.
     assert parsed["condition"]["type"] == "CUSTOM_FORMULA"
-    assert parsed["condition"]["values"][0] == "=AND($A1>0"
+    assert parsed["condition"]["values"] == ["=AND($A1>0,$B1<100)"]
 
 
 def test_parse_number_between():
@@ -1265,3 +1265,110 @@ def test_format_number_rejects_whitespace_only_string():
 def test_format_number_string_50_0_normalizes_to_50():
     # A float-ish string normalizes through float() back to a bare int (line 705-707).
     assert _build_mid_value("50.0") == "50"
+
+
+# --------------------------------------------------------------------- ISSUES.md #2 regression
+
+
+def test_serialize_rule_structured_keeps_custom_formula_single_value():
+    from gsheets.core.condformat import serialize_rule_structured
+
+    rule = {
+        "ranges": ["Cliff!A3:A345"],
+        "booleanRule": {
+            "condition": {
+                "type": "CUSTOM_FORMULA",
+                "values": [{"userEnteredValue": '=AND($A3<>"", $B3=$C3)'}],
+            },
+            "format": {"backgroundColorStyle": {"rgbColor": {"red": 1.0}}},
+        },
+    }
+    out = serialize_rule_structured(rule)
+    assert out["kind"] == "boolean"
+    assert out["condition"] == {
+        "type": "CUSTOM_FORMULA",
+        "values": ['=AND($A3<>"", $B3=$C3)'],
+    }
+
+
+def test_serialize_rule_structured_gradient_matches_parse_shape():
+    from gsheets.core.condformat import parse_rule_line, serialize_rule, serialize_rule_structured
+
+    rule = {
+        "ranges": ["Cliff!H2:H100"],
+        "gradientRule": {
+            "minpoint": {"type": "MIN", "colorStyle": {"rgbColor": {"red": 0.96}}},
+            "midpoint": {"type": "NUMBER", "value": "50", "colorStyle": {"rgbColor": {"green": 1}}},
+            "maxpoint": {"type": "MAX", "colorStyle": {"rgbColor": {"green": 0.69}}},
+        },
+    }
+    structured = serialize_rule_structured(rule)
+    via_parse = parse_rule_line(serialize_rule(rule))
+    assert structured["stops"] == via_parse["stops"]
+
+
+def test_parse_condition_does_not_split_custom_formula_commas():
+    from gsheets.core.condformat import parse_rule_line
+
+    line = '[Cliff!A3:A345] if CUSTOM_FORMULA(=AND($A3<>"", $D3=$G3)) -> bg #FFCDD2'
+    parsed = parse_rule_line(line)
+    assert parsed["condition"] == {
+        "type": "CUSTOM_FORMULA",
+        "values": ['=AND($A3<>"", $D3=$G3)'],
+    }
+
+
+def test_number_between_still_comma_splits():
+    from gsheets.core.condformat import parse_rule_line
+
+    parsed = parse_rule_line("[Cliff!C2:C9] if NUMBER_BETWEEN(0,100) -> bg #C8E6C9")
+    assert parsed["condition"] == {"type": "NUMBER_BETWEEN", "values": ["0", "100"]}
+
+
+# ----------------------------------------------- ISSUES.md #2 serialize_rule_structured guards
+
+
+def test_serialize_rule_structured_error_guards():
+    import pytest
+
+    from gsheets.core.condformat import serialize_rule_structured
+    from gsheets.core.errors import SheetsError
+
+    with pytest.raises(SheetsError, match="rule must be a dict"):
+        serialize_rule_structured("nope")
+    with pytest.raises(SheetsError, match="expected exactly one"):
+        serialize_rule_structured(
+            {"ranges": ["S!A1"], "booleanRule": {"condition": {"type": "BLANK"}},
+             "gradientRule": {"minpoint": {}}}
+        )
+    with pytest.raises(SheetsError, match="booleanRule has no condition"):
+        serialize_rule_structured({"ranges": ["S!A1"], "booleanRule": {}})
+    with pytest.raises(SheetsError, match="condition has no type"):
+        serialize_rule_structured(
+            {"ranges": ["S!A1"], "booleanRule": {"condition": {"values": []}}}
+        )
+    with pytest.raises(SheetsError, match="neither booleanRule nor gradientRule"):
+        serialize_rule_structured({"ranges": ["S!A1"]})
+
+
+def test_gradient_stops_structured_error_guards():
+    import pytest
+
+    from gsheets.core.condformat import serialize_rule_structured
+    from gsheets.core.errors import SheetsError
+
+    with pytest.raises(SheetsError, match="must be NUMBER/PERCENT/PERCENTILE"):
+        serialize_rule_structured(
+            {"ranges": ["S!A1"], "gradientRule": {
+                "minpoint": {"type": "MIN", "colorStyle": {"rgbColor": {"red": 1}}},
+                "midpoint": {"type": "BOGUS", "colorStyle": {"rgbColor": {"red": 1}}},
+            }}
+        )
+    with pytest.raises(SheetsError, match="midpoint requires a value"):
+        serialize_rule_structured(
+            {"ranges": ["S!A1"], "gradientRule": {
+                "midpoint": {"type": "NUMBER", "colorStyle": {"rgbColor": {"red": 1}}},
+            }}
+        )
+    with pytest.raises(SheetsError, match="no interpolation points"):
+        serialize_rule_structured({"ranges": ["S!A1"], "gradientRule": {}})
