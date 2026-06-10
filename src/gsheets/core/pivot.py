@@ -5,8 +5,8 @@ its ``pivotTable`` definition; the owning read fn (``reads.inspect`` with ``incl
 attaches the serialized dict to that cell as ``"pivot": {…}`` ONLY when present (per-cell rich
 data emitted only when set — token-safe, DESIGN §X.6).
 
-This is **read-only** (writing a pivot table stays in the ``batch`` escape hatch, per the
-verified analysis: ``pivotTable`` is technically writable via ``updateCells`` but heavy). The
+This is **read-only**: writing a pivot table stays in the ``batch`` escape hatch
+(``pivotTable`` is technically writable via ``updateCells``, but the spec is heavy). The
 serializer flattens Google's nested ``PivotTable`` into:
 
 ```jsonc

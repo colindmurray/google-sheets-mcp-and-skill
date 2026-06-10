@@ -2,7 +2,7 @@
 
 A *slicer* is an on-grid filter control: it points at a
 data range, filters one column of it, and is anchored at a cell on a (usually different) sheet.
-The owning read fn (``structure(action="read")``, structure-ext) attaches the serialized dict to
+The owning read fn (``structure(action="read")``) attaches the serialized dict to
 the host sheet's ``slicers`` list, emitting per-sheet rich data only when present (token-safe).
 
 This module owns two halves, both PURE core:
