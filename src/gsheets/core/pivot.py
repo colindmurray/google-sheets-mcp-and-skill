@@ -1,6 +1,6 @@
 """Pivot-table definition read — serialize a ``PivotTable`` to a terse, flat dict (DESIGN §X.0b).
 
-Feature #6 (feature-gap-analysis). Only the **anchor (top-left) cell** of a pivot table carries
+Only the **anchor (top-left) cell** of a pivot table carries
 its ``pivotTable`` definition; the owning read fn (``reads.inspect`` with ``include_pivot=True``)
 attaches the serialized dict to that cell as ``"pivot": {…}`` ONLY when present (per-cell rich
 data emitted only when set — token-safe, DESIGN §X.6).

@@ -1,7 +1,7 @@
 """Basic-filter + filter-view (de)serialization and write-request builders (DESIGN §X.0d, §X.3/§X.4).
 
-Feature #4 — read ``sheets.basicFilter`` / ``sheets.filterViews`` into the terse, flattened
-condformat-style shape, and build the ``setBasicFilter`` / ``clearBasicFilter`` /
+This module reads ``sheets.basicFilter`` / ``sheets.filterViews`` into the terse, flattened
+condformat-style shape, and builds the ``setBasicFilter`` / ``clearBasicFilter`` /
 ``addFilterView`` / ``updateFilterView`` / ``deleteFilterView`` ``batchUpdate`` request bodies
 that ``core.structure``'s new actions issue.
 

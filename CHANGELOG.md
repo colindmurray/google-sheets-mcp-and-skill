@@ -12,52 +12,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-06-09
 
-Adds verified feature-gap capabilities on top of the v0.1.0 surface — all additive, with
-every base signature and test preserved. The tool surface grows from 15 to 20: new
-`data_ops`, `dimensions`, `comments`, `export`, and `read_many` tools, plus mask / flag /
-action extensions to existing tools (`inspect`, `structure`, `overview`). `comments` and
-the slicer actions on `structure` close the last read-only gaps into full CRUD. Read-side
-richness and token efficiency carry through: per-cell rich data is emitted only when
-present, complex reads are serialized into terse round-trippable lines, and writes keep
-`USER_ENTERED` defaults with auto fields masks and index-safe batches.
+All additive on top of v0.1.0; every base signature and test preserved. The tool surface
+grows from 15 to 20: new `data_ops`, `dimensions`, `comments`, `export`, and `read_many`
+tools, plus mask / flag / action extensions to existing tools (`inspect`, `structure`,
+`overview`). `comments` and the slicer actions on `structure` close the last read-only
+gaps into full CRUD.
 
 ### Added
 - **Read richness on `inspect` (per-cell, opt-in, zero cost when off):**
   - Rich-text runs — `include_rich_text` surfaces per-character styled segments
     (`textFormatRuns`) flattened into a `runs` list, including a run-level `link` that takes
-    precedence over the cell hyperlink (the only way to recover multi-link cells). (#1)
+    precedence over the cell hyperlink (the only way to recover multi-link cells).
   - Cell hyperlink — the read-only `hyperlink` field attaches as a flat string (folded into
-    `include_rich_text`). (#8)
+    `include_rich_text`).
   - Pivot-table definition — `include_pivot` attaches a flattened `pivot` (source, rows /
-    columns / values / filters) to the pivot's anchor cell only. Read-only. (#6)
+    columns / values / filters) to the pivot's anchor cell only. Read-only.
 - **Structural reads on `structure(action="read")` (sheet-scoped, emitted only when present):**
   - Native Sheets tables — a `tables` key (name, A1 range, typed columns; a DROPDOWN column
-    renders the same `ValidationRule` one-liner `inspect` uses). (#3)
+    renders the same `ValidationRule` one-liner `inspect` uses).
   - Filter views + basic-filter state — `basicFilter` and `filterViews` keys (sort specs +
-    per-column criteria, reusing the conditional-format condition serializer). (#4)
-  - Banding — a `bandedRanges` key (per-axis header / first / second / footer hex colors). (#9)
-  - Slicers — a `slicers` key (title, data range, filtered column, dashboard anchor). (#16)
+    per-column criteria, reusing the conditional-format condition serializer).
+  - Banding — a `bandedRanges` key (per-axis header / first / second / footer hex colors).
+  - Slicers — a `slicers` key (title, data range, filtered column, dashboard anchor).
 - **Structural writes as new `structure` actions (full CRUD symmetry with the reads above):**
-  - Tables — `add_table` / `update_table` / `delete_table` (captures new `tableId`). (#3)
+  - Tables — `add_table` / `update_table` / `delete_table` (captures new `tableId`).
   - Banding — `add_banding` / `update_banding` / `delete_banding` (captures new
-    `bandedRangeId`). (#9)
+    `bandedRangeId`).
   - Filters — `set_basic_filter` / `clear_basic_filter` and `add_filter_view` /
-    `update_filter_view` / `delete_filter_view` (captures new `filterViewId`). (#4)
+    `update_filter_view` / `delete_filter_view` (captures new `filterViewId`).
   - Slicers — `add_slicer` / `update_slicer` / `delete_slicer` (`add_slicer` takes the data
     range via the top-level `range` or `params.dataRange` and returns the new `slicerId`;
-    `update_slicer` / `delete_slicer` take `params.slicerId`). (#16)
+    `update_slicer` / `delete_slicer` take `params.slicerId`).
   - Spreadsheet properties — `spreadsheet_props` sets `title` / `locale` / `timeZone`
-    (spreadsheet-scoped; auto fields mask). (#12)
+    (spreadsheet-scoped; auto fields mask).
 - **Spreadsheet metadata read on `overview`:** top-level `locale` and `timeZone` (omitted
-  when absent) for correct interpretation of dates and numbers. (#12)
+  when absent) for correct interpretation of dates and numbers.
 - **New `data_ops` tool** — single-request `batchUpdate` data verbs through one dispatch:
-  `find_replace` (#2), `delete_duplicates` and `trim_whitespace` (#11), `sort_range`,
-  `text_to_columns`, and `auto_fill` (#15), and `copy_paste` / `cut_paste` (#14), each
-  returning an action-specific summary (e.g. `find_replace` surfaces
+  `find_replace`, `delete_duplicates`, `trim_whitespace`, `sort_range`,
+  `text_to_columns`, `auto_fill`, and `copy_paste` / `cut_paste`, each returning an
+  action-specific summary (e.g. `find_replace` surfaces
   `occurrencesChanged`/`valuesChanged`/`formulasChanged`).
 - **New `dimensions` tool** — row/column operations: `insert` / `delete` / `move` /
-  `append` (#7), `auto_resize` (#10), `set_props` for pixel size / `hiddenByUser` (#13), and
-  a `read` that reports which rows/columns are hidden (#13).
+  `append`, `auto_resize`, `set_props` for pixel size / `hiddenByUser`, and
+  a `read` that reports which rows/columns are hidden.
 - **New `comments` tool (full CRUD)** — read/create/reply/resolve/delete on the Drive
   threaded comments of the spreadsheet file, via the Drive API. `read` (default) flattens
   each comment to author/content/timestamps/`resolved`/quoted snippet/replies, paginates,
@@ -66,35 +63,32 @@ present, complex reads are serialized into terse round-trippable lines, and writ
   `resolve` posts a reply carrying `action:resolve` (Drive has no standalone resolve
   endpoint). The required Drive `fields` mask is always sent; raises `drive_unavailable`
   when no Drive scope is present. The MCP tool is a write tool (`readOnlyHint=False`,
-  `destructiveHint=True`); the CLI `--action delete` requires `--confirm`. (#5)
+  `destructiveHint=True`); the CLI `--action delete` requires `--confirm`.
 - **New `export` tool** — downloads a spreadsheet to a local file. `pdf`/`xlsx`/`ods`
   render the whole workbook server-side via Drive `files.export` (needs a Drive scope, else
   `drive_unavailable`); `csv`/`tsv` serialize a single named `--sheet` from its values
   through the Sheets API (no Drive scope). Read-only against the spreadsheet — it writes a
-  local file and returns `{format, mimeType, path, bytes}`. (#18)
+  local file and returns `{format, mimeType, path, bytes}`.
 - **New `read_many` tool** — fans one values-or-summary read across many spreadsheets in a
   single call (the cross-file analogue of `overview`/`read_values`). Each request names one
   `spreadsheetId`; a bad id (404, permission denied, bad range) is captured as a per-file
   `{ok:false, error}` entry instead of aborting the batch, so a top-level `ok:true` does not
   mean every file succeeded. Read-only. CLI: ids and ranges live inside `--requests-json`
-  (no positional id, no `--ranges`); the global `--json` flag precedes the subcommand. (#19)
+  (no positional id, no `--ranges`); the global `--json` flag precedes the subcommand.
 - **New pure-core serializer / dispatch modules** (boundary-pure, golden-master tested
   where they serialize): `richtext`, `pivot`, `tables`, `filters`, `banding`, `slicers`,
   `comments`, `dataops`, `dimensions`, `export`, `multiread`. Five new top-level core
   functions (`data_ops`, `dimensions`, `comments`, `export`, `read_many`) are re-exported
   from `gsheets.core`.
-- **Adapter + model parity:** new Pydantic mirror models (`TextRun`, `Pivot*`, `Table`,
-  `BasicFilter`, `FilterView`, `Banding`, `Slicer`, `Comment`, `CommentReply`,
-  `DataOpsResult`, `DimensionsResult`, `CommentsResult`, `ExportResult`, `ReadManyResult`)
-  and extensions to `Cell` / `Run` / `SheetStructure` / `OverviewResult`; five new MCP tools
-  (`sheets_data_ops`, `sheets_dimensions`, `sheets_comments`, `sheets_export`,
-  `sheets_read_many`) plus the `include_rich_text` / `include_pivot` kwargs on
-  `sheets_inspect`; five new CLI subcommands (`data-ops`, `dimensions`, `comments`,
-  `export`, `read-many`) plus `--rich-text` / `--pivot` flags on `inspect`. `comments` adds
-  the `--action {read,create,reply,resolve,delete}` write surface (`--confirm` gates
-  delete); `structure` adds the `add_slicer` / `update_slicer` / `delete_slicer` actions.
-  The global `--json` flag is defined on the top-level parser, so it precedes the
-  subcommand (`gsheets --json read-many …`).
+- **Adapter + model parity:** each new core function gets a matching MCP tool and CLI
+  subcommand. New Pydantic mirror models (`TextRun`, `Pivot*`, `Table`, `BasicFilter`,
+  `FilterView`, `Banding`, `Slicer`, `Comment`, `CommentReply`, `DataOpsResult`,
+  `DimensionsResult`, `CommentsResult`, `ExportResult`, `ReadManyResult`) and extensions
+  to `Cell` / `Run` / `SheetStructure` / `OverviewResult`; the rich-text and pivot reads
+  surface on `inspect` as `include_rich_text` / `include_pivot` kwargs (CLI:
+  `--rich-text` / `--pivot`).
+- **CI** — a GitHub Actions workflow runs the mocked test suite (including the
+  boundary-guard test) on Python 3.11 / 3.12 / 3.13.
 
 ### Changed
 - Re-tiered the bundled skill's reference docs into `skill/references/basic.md` (~80% of tasks),
@@ -105,6 +99,16 @@ present, complex reads are serialized into terse round-trippable lines, and writ
 - `structure(action="read")` now requests `sheets.rowGroups` + `sheets.columnGroups` for the
   dimension-groups read (there is no single `dimensionGroups` field on a `Sheet`); the
   flattened `dimensionGroups` output key is unchanged.
+- MCP self-documentation overhaul: the server now ships server-level instructions, tool
+  schemas carry `Literal` enums and per-argument `Field` descriptions, and tool
+  descriptions were cut ~46%. `sheets_read_many` no longer takes an unused
+  `spreadsheet_id` argument.
+- The default-text CLI renderer caught up with the v0.2 reads: `structure --action read`
+  now renders the `tables` / `basicFilter` / `filterViews` / `bandedRanges` / `slicers`
+  terse lines, `inspect` renders rich-text runs through the canonical `text_runs_line`
+  form, and `overview` shows `(locale=…, tz=…)` on the title line.
+- Dev dependencies moved from `[project.optional-dependencies]` to PEP 735
+  `[dependency-groups]`, so a plain `uv sync` installs them.
 
 ### Fixed
 - `data_ops(action="delete_duplicates")` now reports the correct count: it reads Google's real
@@ -115,11 +119,21 @@ present, complex reads are serialized into terse round-trippable lines, and writ
   top-left or row-0 slicer anchor previously lost its `row`/`col`. The anchor now defaults absent
   indices to `0`, so it always reads back as `{sheet, row, col}` and the terse line always renders
   (e.g. `@ Sheet!E1` for an anchor the API returned as `{columnIndex: 4}` with `rowIndex` omitted).
+- MCP tool annotations now match behavior: `sheets_export` was annotated read-only but
+  overwrites local files, so it is now a write tool with `destructiveHint=True`;
+  `sheets_set_validation` carries `destructiveHint=True` (`rule=None` clears the rule);
+  `sheets_structure` and `sheets_metadata` declare `idempotentHint=False`.
+- The `inspect` text header no longer duplicates the sheet prefix (`Dash!Dash!A1`): core
+  returns `range` already sheet-qualified, and the renderer prepended the sheet again.
+- The single-form `set-conditional-format` text output no longer collapses to
+  `add: sheet=…`: the result was routed through the data-ops action summary, which dropped
+  the `index` and `rule` fields. It now renders all four fields (`action`, `sheet`,
+  `index`, `rule`).
 
 ### Notes
 - Connected Sheets / data sources (`dataSourceTable`, `dataSourceFormula`, spreadsheet
   `dataSources`) are intentionally **not** given a typed tool (low signal, heavy schema);
-  they remain readable through the `batch` / raw `spreadsheets.get` escape hatch. (#17)
+  they remain readable through the `batch` / raw `spreadsheets.get` escape hatch.
 - The `tests_boundary_guard` pytest marker is now registered to silence its
   `PytestUnknownMarkWarning`.
 - The v0.2 capabilities are exercised by live round-trip integration tests

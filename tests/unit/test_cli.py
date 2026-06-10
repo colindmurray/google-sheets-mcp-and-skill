@@ -649,3 +649,162 @@ def test_read_many_render_surfaces_captured_failures(patched, monkeypatch, capsy
     out = capsys.readouterr().out
     assert "A: Alpha (2 sheet(s))" in out
     assert "B: ERROR google_api_error: denied" in out
+
+
+# ===========================================================================================
+# Terse-renderer contracts pinned after the doc-review pass: the default output must actually
+# show what the docs say it shows (locale/tz on overview, the v0.2 structural lines, canonical
+# rich-text segments, and a non-duplicated inspect header).
+
+
+def test_overview_renders_locale_and_timezone(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "overview",
+        lambda services, sid: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "title": "Tracker",
+            "locale": "en_US",
+            "timeZone": "America/New_York",
+            "sheets": [],
+            "namedRanges": [],
+        },
+    )
+    rc = _run(["overview", "ID"])
+    assert rc == 0
+    assert "(locale=en_US, tz=America/New_York)" in capsys.readouterr().out
+
+
+def test_structure_read_renders_v02_object_lines(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "structure",
+        lambda services, sid, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "namedRanges": [],
+            "sheets": [
+                {
+                    "sheet": "Sales",
+                    "sheetId": 12,
+                    "merges": [],
+                    "protectedRanges": [],
+                    "dimensionGroups": [],
+                    "tables": [{"line": 'table "Q3" [Sales!A1:F500] cols: Region:TEXT'}],
+                    "basicFilter": {"line": "basicFilter [Sales!A1:F500] sort C asc"},
+                    "filterViews": [{"line": 'filterView 123 "Open only" [Sales!A1:F500]'}],
+                    "bandedRanges": [{"line": "banding 7 [Sales!A1:F500] rows: hdr #4285F4"}],
+                    "slicers": [{"line": 'slicer 88 "Region" col 0 [Sales!A1:F500] @ Dash!I1'}],
+                }
+            ],
+        },
+    )
+    rc = _run(["structure", "ID", "--action", "read", "--sheet", "Sales"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Sales (id=12)" in out
+    assert 'table "Q3" [Sales!A1:F500]' in out
+    assert "basicFilter [Sales!A1:F500] sort C asc" in out
+    assert 'filterView 123 "Open only"' in out
+    assert "banding 7 [Sales!A1:F500]" in out
+    assert 'slicer 88 "Region" col 0' in out
+
+
+def test_inspect_header_not_duplicated_for_qualified_range(patched, monkeypatch, capsys):
+    # Core returns ``range`` already sheet-qualified; the renderer must not prepend the sheet
+    # again (the old behavior printed "Dash!Dash!A1").
+    monkeypatch.setattr(
+        cli.core,
+        "inspect",
+        lambda services, sid, rng, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "sheet": "Dash",
+            "range": "Dash!A1",
+            "rows": 1,
+            "cols": 1,
+            "merges": [],
+            "cells": [],
+        },
+    )
+    rc = _run(["inspect", "ID", "Dash!A1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Dash!A1  1x1" in out
+    assert "Dash!Dash!" not in out
+
+
+def test_inspect_runs_render_canonical_segments(patched, monkeypatch, capsys):
+    # The runs fragment must come from core's text_runs_line: offsets as start:end, canonical
+    # token order (fg before the boolean styles), and per-run links.
+    monkeypatch.setattr(
+        cli.core,
+        "inspect",
+        lambda services, sid, rng, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "sheet": "Dash",
+            "range": "Dash!A1",
+            "rows": 1,
+            "cols": 1,
+            "merges": [],
+            "cells": [
+                {
+                    "a1": "A1",
+                    "value": "Docs / Sheet",
+                    "runs": [
+                        {
+                            "start": 0,
+                            "text": "Docs",
+                            "format": {"bold": True, "fg": "#1155CC"},
+                            "link": "https://docs.example.com",
+                        },
+                        {"start": 4, "text": " / Sheet", "link": "https://sheet.example.com"},
+                    ],
+                }
+            ],
+        },
+    )
+    rc = _run(["inspect", "ID", "Dash!A1", "--rich-text"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert 'runs: "Docs"[0:4 fg #1155CC bold link https://docs.example.com]' in out
+    assert '" / Sheet"[4:12 link https://sheet.example.com]' in out
+
+
+def test_single_form_cf_result_renders_index_and_rule(patched, monkeypatch, capsys):
+    # The single-form set_conditional_format result carries action+index+rule; it must NOT be
+    # swallowed by the data_ops action-summary path (which would drop index and rule and print
+    # just "add: sheet=Budget") — it falls through to the generic renderer instead.
+    monkeypatch.setattr(
+        cli.core,
+        "set_conditional_format",
+        lambda services, sid, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "action": "add",
+            "sheet": "Budget",
+            "index": 0,
+            "rule": "[Budget!D2:D40] if CUSTOM_FORMULA(=$D2<0) -> bg #F4C7C3 bold",
+        },
+    )
+    rc = _run(
+        [
+            "set-conditional-format",
+            "ID",
+            "--action",
+            "add",
+            "--sheet",
+            "Budget",
+            "--index",
+            "0",
+            "--rule",
+            "[Budget!D2:D40] if CUSTOM_FORMULA(=$D2<0) -> bg #F4C7C3 bold",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "action: add" in out
+    assert "index: 0" in out
+    assert "rule: [Budget!D2:D40] if CUSTOM_FORMULA(=$D2<0) -> bg #F4C7C3 bold" in out

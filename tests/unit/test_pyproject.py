@@ -157,16 +157,20 @@ def test_cli_has_no_argparse_dependency(project: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Dev extras — LOCKED §9
+# Dev dependencies — PEP 735 dependency-groups (plain `uv sync` installs them)
 # --------------------------------------------------------------------------- #
 
 
-def test_dev_extra_present(project: dict) -> None:
-    assert "dev" in project["optional-dependencies"]
+def test_dev_dependency_group_present(pyproject: dict) -> None:
+    # PEP 735 [dependency-groups], NOT [project.optional-dependencies]: uv installs
+    # dependency groups on a plain `uv sync`, so a fresh clone gets pytest without
+    # needing to know about --extra flags.
+    assert "dev" in pyproject.get("dependency-groups", {})
+    assert "optional-dependencies" not in pyproject["project"]
 
 
-def test_dev_extra_includes_pytest_and_cov(project: dict) -> None:
-    dev = _dep_map(project["optional-dependencies"]["dev"])
+def test_dev_dependency_group_includes_pytest_and_cov(pyproject: dict) -> None:
+    dev = _dep_map(pyproject["dependency-groups"]["dev"])
     assert "pytest" in dev
     assert ">=8" in dev["pytest"], dev["pytest"]
     assert "pytest-cov" in dev

@@ -216,26 +216,26 @@ _STRUCTURE_PARAMS: dict[str, set[str]] = {
     "tab_color": {"color"},
     "group": {"dimension", "start", "end"},
     "ungroup": {"dimension", "start", "end"},
-    # tables (#3)
+    # tables
     "add_table": {"name", "columns"},
     "update_table": {"tableId", "name", "columns", "range"},
     "delete_table": {"tableId"},
-    # banding (#9)
+    # banding
     "add_banding": {"rowBanding", "columnBanding"},
     "update_banding": {"bandedRangeId", "rowBanding", "columnBanding", "range"},
     "delete_banding": {"bandedRangeId"},
-    # basic filter (#4)
+    # basic filter
     "set_basic_filter": {"sorted", "criteria"},
     "clear_basic_filter": set(),
-    # filter views (#4)
+    # filter views
     "add_filter_view": {"title", "sorted", "criteria"},
     "update_filter_view": {"filterViewId", "title", "range", "sorted", "criteria"},
     "delete_filter_view": {"filterViewId"},
-    # slicers (#16)
+    # slicers
     "add_slicer": {"title", "dataRange", "columnIndex", "anchor", "criteria"},
     "update_slicer": {"slicerId", "title", "dataRange", "columnIndex", "criteria"},
     "delete_slicer": {"slicerId"},
-    # spreadsheet properties (#12)
+    # spreadsheet properties
     "spreadsheet_props": {"title", "locale", "timeZone"},
 }
 
@@ -434,14 +434,14 @@ def _attach_sheet_features(
     for the two serializers that resolve their own ranges (``tables``/``slicers``), mirroring
     ``_serialize_sheet_structure``'s own range handling (DESIGN §X.0/§X.3).
     """
-    # Tables (#3): serialize_table resolves its own range via services.
+    # Tables: serialize_table resolves its own range via services.
     out["tables"] = [
         _tables.serialize_table(t, services, spreadsheet_id)
         for t in (entry.get("tables", []) or [])
         if isinstance(t, dict)
     ]
 
-    # Basic filter (#4): one per sheet, or null. Resolve its GridRange -> A1 first.
+    # Basic filter: one per sheet, or null. Resolve its GridRange -> A1 first.
     basic_filter = entry.get("basicFilter")
     if isinstance(basic_filter, dict):
         out["basicFilter"] = _filters.serialize_basic_filter(
@@ -451,7 +451,7 @@ def _attach_sheet_features(
     else:
         out["basicFilter"] = None
 
-    # Filter views (#4): array per sheet; each carries its own range.
+    # Filter views: array per sheet; each carries its own range.
     out["filterViews"] = [
         _filters.serialize_filter_view(
             fv, _feature_range_a1(services, spreadsheet_id, fv.get("range"))
@@ -460,7 +460,7 @@ def _attach_sheet_features(
         if isinstance(fv, dict)
     ]
 
-    # Banded ranges (#9): array per sheet; each carries its own range.
+    # Banded ranges: array per sheet; each carries its own range.
     out["bandedRanges"] = [
         _banding.serialize_banding(
             br, _feature_range_a1(services, spreadsheet_id, br.get("range"))
@@ -469,7 +469,7 @@ def _attach_sheet_features(
         if isinstance(br, dict)
     ]
 
-    # Slicers (#16): array per sheet; serialize_slicer resolves its own ranges via services.
+    # Slicers: array per sheet; serialize_slicer resolves its own ranges via services.
     out["slicers"] = [
         _slicers.serialize_slicer(sl, services, spreadsheet_id)
         for sl in (entry.get("slicers", []) or [])

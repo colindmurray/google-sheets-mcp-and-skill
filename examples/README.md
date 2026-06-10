@@ -36,11 +36,13 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action add_slicer --sheet Data --range
 
 ## Prerequisites
 
-1. Install the package (it provides the `gsheets` console script):
+1. Install the package (it provides the `gsheets` console script). It is not on PyPI yet, so
+   install from git, or use `uv sync` from a clone of this repo:
 
    ```sh
+   uv tool install git+https://github.com/colindmurray/google-sheets-mcp-and-skill
+   # or, from the repo root (puts `gsheets` in the project venv; activate it or use `uv run`):
    uv sync
-   # or: pip install -e .
    ```
 
 2. Bootstrap credentials once (OAuth desktop consent, or point at a service account / ADC — see the

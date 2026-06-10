@@ -3,11 +3,11 @@
 One dispatch fn :func:`data_ops` covers the single-request ``batchUpdate`` data verbs that are
 natural AI intents but should not be forced into the raw ``batch`` escape hatch:
 
-- ``find_replace`` (#2) -> ``findReplace``
-- ``delete_duplicates`` / ``trim_whitespace`` (#11) -> ``deleteDuplicates`` / ``trimWhitespace``
-- ``sort_range`` / ``text_to_columns`` / ``auto_fill`` (#15) -> ``sortRange`` / ``textToColumns`` /
+- ``find_replace`` -> ``findReplace``
+- ``delete_duplicates`` / ``trim_whitespace`` -> ``deleteDuplicates`` / ``trimWhitespace``
+- ``sort_range`` / ``text_to_columns`` / ``auto_fill`` -> ``sortRange`` / ``textToColumns`` /
   ``autoFill``
-- ``copy_paste`` / ``cut_paste`` (#14) -> ``copyPaste`` / ``cutPaste``
+- ``copy_paste`` / ``cut_paste`` -> ``copyPaste`` / ``cutPaste``
 
 Each action consumes ONLY its documented ``params`` keys; an unknown key raises
 ``SheetsError("unknown_param")`` (the typed surface stays strict — ``params`` is NOT a raw escape
@@ -112,9 +112,9 @@ def data_ops(
 ) -> dict:
     """Run one ``batchUpdate`` data verb and surface its reply summary (DESIGN §X.2).
 
-    Dispatches over the one-request ``batchUpdate`` data ops: ``find_replace`` (#2),
-    ``delete_duplicates``/``trim_whitespace`` (#11), ``sort_range``/``text_to_columns``/
-    ``auto_fill`` (#15), and ``copy_paste``/``cut_paste`` (#14). Each action consumes only its
+    Dispatches over the one-request ``batchUpdate`` data ops: ``find_replace``,
+    ``delete_duplicates``/``trim_whitespace``, ``sort_range``/``text_to_columns``/
+    ``auto_fill``, and ``copy_paste``/``cut_paste``. Each action consumes only its
     documented ``params`` keys; an unknown key raises ``SheetsError("unknown_param")``. All
     ranges are A1 strings, resolved to ``GridRange`` internally via the addressing layer.
 
@@ -223,7 +223,7 @@ def _first_reply(resp: dict, reply_key: str) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# find_replace (#2)
+# find_replace
 # ---------------------------------------------------------------------------------------
 
 #: ``FindReplaceResponse`` count fields surfaced into the return summary (in canonical order).
@@ -298,7 +298,7 @@ def _data_find_replace(services, spreadsheet_id, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# delete_duplicates (#11)
+# delete_duplicates
 # ---------------------------------------------------------------------------------------
 
 
@@ -385,7 +385,7 @@ def _column_to_index(col: object) -> int:
 
 
 # ---------------------------------------------------------------------------------------
-# trim_whitespace (#11)
+# trim_whitespace
 # ---------------------------------------------------------------------------------------
 
 
@@ -409,7 +409,7 @@ def _data_trim_whitespace(services, spreadsheet_id, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# sort_range (#15)
+# sort_range
 # ---------------------------------------------------------------------------------------
 
 
@@ -473,7 +473,7 @@ def _normalize_col(col: object) -> object:
 
 
 # ---------------------------------------------------------------------------------------
-# text_to_columns (#15)
+# text_to_columns
 # ---------------------------------------------------------------------------------------
 
 
@@ -516,7 +516,7 @@ def _data_text_to_columns(services, spreadsheet_id, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# auto_fill (#15)
+# auto_fill
 # ---------------------------------------------------------------------------------------
 
 
@@ -620,7 +620,7 @@ def _span(gr: dict, start_key: str, end_key: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------------------
-# copy_paste (#14)
+# copy_paste
 # ---------------------------------------------------------------------------------------
 
 
@@ -662,7 +662,7 @@ def _data_copy_paste(services, spreadsheet_id, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# cut_paste (#14)
+# cut_paste
 # ---------------------------------------------------------------------------------------
 
 

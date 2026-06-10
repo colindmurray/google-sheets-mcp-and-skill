@@ -1,4 +1,4 @@
-"""Drive threaded-comments CRUD (DESIGN §X.0g, §X.5 — Feature #5).
+"""Drive threaded-comments CRUD (DESIGN §X.0g, §X.5).
 
 This is the ONE core capability that does NOT touch the Sheets API — Google Sheets has no
 comment surface, so threaded comments live on the **Drive v3** file resource and are read/written

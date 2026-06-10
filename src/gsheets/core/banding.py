@@ -1,7 +1,7 @@
 """Banded-range (``bandedRanges``) read serialization + add/update/delete write builders.
 
-Feature #9 (DESIGN §X.0e, §X.3/§X.9; analysis #9). A ``BandedRange`` paints a rectangle with
-alternating row and/or column band colors (an "this is a deliberate table" hint). The v4 REST
+Covers DESIGN §X.0e and §X.3/§X.9. A ``BandedRange`` paints a rectangle with
+alternating row and/or column band colors (a "this is a deliberate table" hint). The v4 REST
 API exposes them as a per-sheet ``bandedRanges`` array and mutates them via the
 ``addBanding`` / ``updateBanding`` / ``deleteBanding`` ``batchUpdate`` requests. This module
 owns:

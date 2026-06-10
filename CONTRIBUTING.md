@@ -44,23 +44,26 @@ This project uses [`uv`](https://docs.astral.sh/uv/). You need Python **3.11+**.
 git clone https://github.com/<you>/google-sheets-mcp-and-skill.git
 cd google-sheets-mcp-and-skill
 
-# 2. Create the virtualenv and install the package (editable) + dev extras
-uv sync --extra dev
+# 2. Create the virtualenv and install the package (editable) + dev dependencies
+uv sync
 
-# 3. Verify the two console scripts are wired up
-uv run gsheets --help
-uv run google-sheets-mcp --help   # MCP stdio server; Ctrl-C to stop
+# 3. Verify the wiring
+uv run gsheets --help                          # CLI entrypoint
+uv run python -c "import gsheets.mcp_server"   # MCP server module imports cleanly
 ```
 
 `uv sync` reads `pyproject.toml` and `uv.lock`, creates `.venv/`, and installs the
-package as an editable `src`-layout install. Run any tool through `uv run …` so it
-uses the project environment. No global installs are required for development.
+package as an editable `src`-layout install plus the `dev` dependency group (pytest);
+no extra flag is needed. Run any tool through `uv run …` so it uses the project
+environment. No global installs are required for development.
 
 Notes:
 
 - The **CLI** (`gsheets`) uses only stdlib `argparse` — no runtime dependency.
 - The **MCP server** (`google-sheets-mcp`) uses `fastmcp` and `pydantic`. These are
   *adapter-side only*; the core never imports them (see the boundary rule below).
+- `uv run google-sheets-mcp` starts the MCP stdio server itself; it has no `--help` and
+  needs credentials (Ctrl-C to stop). That is why step 3 checks the import instead.
 - Auth credentials are never committed. They come from environment variables / local
   config at runtime (see [Live tests](#live-tests-against-a-real-spreadsheet)). You
   do **not** need credentials to run the unit suite — it runs entirely against a
@@ -85,9 +88,10 @@ The suite includes:
 - **Unit tests** (`tests/unit/`) for every core/auth module, with **golden-master**
   JSON fixtures under `tests/unit/golden/` for the serializers (conditional-format
   serialize + body-only round-trip, `flatten_cell_format`, `build_fields_mask`
-  including the atomic-leaf cases, `a1_to_gridrange`/`gridrange_to_a1`, color
-  hex↔ColorStyle, and more). If you change a serializer's output, update the matching
-  golden file in the same PR and explain why in the description.
+  including the atomic-leaf cases, `a1_to_gridrange`/`gridrange_to_a1`, and more).
+  Color hex↔ColorStyle round-trips are covered inline in `tests/unit/test_colors.py`.
+  If you change a serializer's output, update the matching golden file in the same PR
+  and explain why in the description.
 - **A boundary-guard test** (`tests/unit/test_boundary_guard.py`) that runs in a
   **fresh subprocess** and asserts `import gsheets.core` / `import gsheets.auth` does
   not drag any of `{argparse, fastmcp, mcp, pydantic}` into `sys.modules`. This is the

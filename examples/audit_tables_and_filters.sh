@@ -7,9 +7,10 @@
 # surfaces all of it via `structure --action read`, each serialized to a terse, round-trippable
 # `line` alongside its structured fields (tableId / filterViewId / bandedRangeId / criteria).
 #
-# NOTE: these v0.2 structural reads are surfaced in the `--json` output. The terse (non-json)
-# `structure --action read` prints merges / frozen panes / protected ranges; use `--json` (as
-# below) to see tables / filterViews / basicFilter / bandedRanges / slicers.
+# NOTE: the terse (non-json) `structure --action read` output prints these objects too, one
+# `line` per table / basicFilter / filterView / banding / slicer. This recipe uses `--json`
+# because it also wants the structured ids (tableId / filterViewId / bandedRangeId) that the
+# edit commands at the bottom address.
 #
 # Usage:
 #   export GSHEETS_EXAMPLE_SPREADSHEET_ID='<YOUR_SPREADSHEET_ID>'
@@ -61,7 +62,7 @@ gsheets --json structure "$SPREADSHEET_ID" --action read "${SHEET_ARG[@]}" \
 #   # Sheet1 (id=0)
 #     table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)    [tableId=t_abc]
 #     basicFilter [Sheet1!A1:F500] sort C asc | B: hide Closed, NUMBER_GREATER(0)
-#     filterView 123 "Open only" [Sheet1!A1:F500] | B: hide Closed    [filterViewId=123]
+#     filterView 123 "Open only" [Sheet1!A1:F500] B: hide Closed    [filterViewId=123]
 #     banding 7 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF / #E8F0FE    [bandedRangeId=7]
 #
 # To EDIT what you found here, address it by its id and re-read to verify (full CRUD symmetry):

@@ -30,7 +30,7 @@ def test_overview_mirrors_core_dict():
     data = {
         "ok": True,
         "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
-        "title": "Workout Tracker",
+        "title": "Team Budget",
         "sheets": [
             {
                 "sheetId": 0,
@@ -52,7 +52,7 @@ def test_overview_mirrors_core_dict():
     }
     _roundtrips(models.OverviewResult, data)
     m = models.OverviewResult.model_validate(data)
-    assert "Workout Tracker" in m.terse
+    assert "Team Budget" in m.terse
     assert "12 CF" in m.terse
 
 

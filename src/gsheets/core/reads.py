@@ -180,10 +180,10 @@ def inspect(
 
     Two OPT-IN read enrichments (off by default → base mask + base behavior unchanged, zero
     token cost):
-    - ``include_rich_text`` (DESIGN §X.1, features #1/#8): adds ``textFormatRuns`` + ``hyperlink``
+    - ``include_rich_text`` (DESIGN §X.1): adds ``textFormatRuns`` + ``hyperlink``
       to the per-cell mask; a cell gains ``"runs": [TextRun, …]`` (per styled char-range
       segment) and/or ``"hyperlink": "https://…"`` ONLY when it carries them.
-    - ``include_pivot`` (DESIGN §X.6, feature #6): adds ``pivotTable`` to the per-cell mask; the
+    - ``include_pivot`` (DESIGN §X.6): adds ``pivotTable`` to the per-cell mask; the
       pivot's anchor (top-left) cell gains ``"pivot": {…}`` ONLY when present.
     In compact mode, two cells differing in ``runs``/``hyperlink``/``pivot`` never merge into one
     run (``_run_key`` includes a stable repr of each).
@@ -431,7 +431,7 @@ def _build_cell(
         runs = serialize_text_runs(cell.get("textFormatRuns"), _cell_text(cell))
         if runs:
             out["runs"] = runs
-        # hyperlink is a READ-ONLY Google cell field; attach FLAT only when set (#8).
+        # hyperlink is a READ-ONLY Google cell field; attach FLAT only when set.
         hyperlink = cell.get("hyperlink")
         if isinstance(hyperlink, str) and hyperlink:
             out["hyperlink"] = hyperlink

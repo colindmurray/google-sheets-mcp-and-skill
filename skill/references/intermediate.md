@@ -31,7 +31,7 @@ The v0.2 keys exist to stop you editing a hidden/filtered row by mistake:
   it ends. Terse: `table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)`.
 - `basicFilter` / `filterViews` — active filter state; a filter can *hide rows*. Terse:
   `basicFilter [Sheet1!A1:F500] sort C asc | B: hide Closed` and
-  `filterView 123 "Open only" [Sheet1!A1:F500] | B: hide Closed`.
+  `filterView 123 "Open only" [Sheet1!A1:F500] B: hide Closed`.
 - `bandedRanges` — alternating-color ranges; a "this rectangle is a deliberate table" hint with
   header/first/second/footer hexes. Terse: `banding 7 [Sheet1!A1:F500] rows: hdr #4285F4 / #FFFFFF`.
 - `slicers` — on-grid slicer controls: `slicerId`, `title`, source `range`, filtered `columnIndex`,

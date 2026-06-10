@@ -126,7 +126,7 @@ class TestOverview:
 
     def test_counts_are_len_of_arrays(self):
         payload = {
-            "properties": {"title": "Workout Tracker"},
+            "properties": {"title": "Team Budget"},
             "sheets": [
                 {
                     "properties": {
@@ -160,7 +160,7 @@ class TestOverview:
 
         assert out["ok"] is True
         assert out["spreadsheetId"] == SHEET_ID
-        assert out["title"] == "Workout Tracker"
+        assert out["title"] == "Team Budget"
         assert len(out["sheets"]) == 1
         s = out["sheets"][0]
         assert s == {

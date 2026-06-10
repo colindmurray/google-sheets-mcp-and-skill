@@ -23,11 +23,18 @@ Reads use tight field masks (never `includeGridData`) and offer compact runs. Wr
 
 ## Install & auth
 
+The package is not on PyPI yet, so install it straight from git:
+
 ```sh
-uv sync                       # installs the `gsheets` and `google-sheets-mcp` console scripts
+uv tool install git+https://github.com/colindmurray/google-sheets-mcp-and-skill
 gsheets auth login            # OAuth desktop consent once (or refresh/validate an existing token)
 gsheets auth status           # report resolved auth mode, scopes, token path, expiry
 ```
+
+For a one-off run without installing, `uvx --from
+git+https://github.com/colindmurray/google-sheets-mcp-and-skill gsheets …` works too. Working from
+a clone instead (contributing)? `uv sync` in the repo root installs the same `gsheets` and
+`google-sheets-mcp` console scripts into the project venv; run them as `uv run gsheets …`.
 
 Credentials resolve from environment variables / local config **at runtime** — never committed.
 Supported sources, in precedence order: a service account (`GSHEETS_SERVICE_ACCOUNT_FILE` or
@@ -58,9 +65,8 @@ the real id (the token between `/d/` and `/edit` in the URL) comes from the user
 
 ## The 20 commands at a glance
 
-Every Sheets subcommand takes the spreadsheet id as its first positional arg — except `read-many`,
-whose ids live inside `--requests-json`. `auth` is CLI-only (no MCP equivalent). The MCP server
-registers the same 20 as tools (`sheets_overview`, `sheets_inspect`, …).
+`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 20 as tools
+(`sheets_overview`, `sheets_inspect`, …).
 
 Understand (read-only):
 

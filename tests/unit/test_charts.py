@@ -186,7 +186,7 @@ class TestCreate:
             SHEET_ID,
             action="create",
             spec={
-                "title": "Reps over time",
+                "title": "Spend over time",
                 "type": "LINE",
                 "series": ["Cliff!B1:B100", "Cliff!C1:C100"],
                 "domain": "Cliff!A1:A100",
@@ -211,7 +211,7 @@ class TestCreate:
                     "addChart": {
                         "chart": {
                             "spec": {
-                                "title": "Reps over time",
+                                "title": "Spend over time",
                                 "basicChart": {
                                     "chartType": "LINE",
                                     "series": [
@@ -684,7 +684,7 @@ _READ_GOLDEN = {
                 {
                     "chartId": 11,
                     "spec": {
-                        "title": "Reps over time",
+                        "title": "Spend over time",
                         "basicChart": {"chartType": "LINE"},
                     },
                     "position": {
@@ -740,7 +740,7 @@ class TestRead:
             "charts": [
                 {
                     "chartId": 11,
-                    "title": "Reps over time",
+                    "title": "Spend over time",
                     "type": "LINE",
                     "anchor": {"sheet": "Cliff", "row": 4, "col": 6},
                 },

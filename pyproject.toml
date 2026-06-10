@@ -35,7 +35,9 @@ dependencies = [
     "pydantic>=2",
 ]
 
-[project.optional-dependencies]
+# PEP 735 dependency group — plain `uv sync` installs these (unlike optional-dependencies,
+# which need an explicit --extra and silently leave a fresh clone without pytest).
+[dependency-groups]
 dev = [
     "pytest>=8",
     "pytest-cov",

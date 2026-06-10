@@ -41,14 +41,17 @@ EXPECTED = {
     "sheets_read_values": (True, None, "read"),
     "sheets_read_conditional_formats": (True, None, "read"),
     "sheets_read_many": (True, None, "read"),
-    "sheets_export": (True, None, "read"),
+    # export reads the spreadsheet but WRITES a local file (silently overwriting any existing
+    # one at ``path``), so it must not advertise read-only.
+    "sheets_export": (False, True, "write"),
     "sheets_comments": (False, True, "write"),
     "sheets_write_values": (False, False, "write"),
     "sheets_append_rows": (False, False, "write"),
     "sheets_clear": (False, True, "write"),
     "sheets_format": (False, False, "write"),
     "sheets_set_conditional_format": (False, True, "write"),
-    "sheets_set_validation": (False, False, "write"),
+    # rule=None clears all validation on the range — a destructive path, like clear's.
+    "sheets_set_validation": (False, True, "write"),
     "sheets_structure": (False, True, "write"),
     "sheets_manage_sheets": (False, True, "write"),
     "sheets_metadata": (False, True, "write"),
@@ -87,9 +90,13 @@ def test_context_excluded_from_input_schema(name):
     props = tool.parameters.get("properties", {})
     assert "ctx" not in props
     assert "context" not in props
-    # spreadsheet_id is always the first required arg.
-    assert "spreadsheet_id" in props
-    assert "spreadsheet_id" in tool.parameters.get("required", [])
+    if name == "sheets_read_many":
+        # The cross-file tool deliberately has NO top-level id — each request carries its own.
+        assert "spreadsheet_id" not in props
+    else:
+        # spreadsheet_id is always the first required arg.
+        assert "spreadsheet_id" in props
+        assert "spreadsheet_id" in tool.parameters.get("required", [])
 
 
 @pytest.mark.parametrize("name", ["sheets_overview", "sheets_inspect", "sheets_read_values"])

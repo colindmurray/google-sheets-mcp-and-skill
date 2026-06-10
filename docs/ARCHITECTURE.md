@@ -145,6 +145,18 @@ and instead requires a pre-existing valid/refreshable token.
 Scopes default to the narrowest that work (`spreadsheets` + `drive.file`), with an
 opt-in broad mode.
 
+**Scope reconciliation for cached OAuth tokens.** A cached token is refreshed against
+the scopes it was **originally granted**, never against whatever `GSHEETS_SCOPES`
+currently asks for. Google's refresh grant rejects (with `invalid_scope`) any refresh
+whose scope list isn't a subset of the original consent, so a token consented with the
+broad `drive` scope would fail a refresh that requested the narrow `drive.file` — even
+though `drive` is functionally broader. The resolver therefore (1) loads the token
+without forcing the requested scope list onto it, letting the refresh re-grant against
+the token's own scopes, then (2) checks that the granted scopes **cover** what the
+current request needs (broad `drive` covers `drive.file`). If the grant doesn't cover
+the request, the call fails with a clear `oauth_scope_insufficient` error telling the
+user to re-run `gsheets auth login` with the scopes they need.
+
 ### Adapters — thin
 
 Two adapters wrap the core, each mapping 1:1 to the core function surface:
@@ -345,7 +357,7 @@ cell-level `hyperlink` — multi-link cells are recoverable only through the per
 
 ```
 # terse line (one per cell with runs)
-runs A1: "Click here"[0:10 bold fg #1155CC link https://example.com] + " then plain"[11:22]
+runs A1: "Click here"[0:10 fg #1155CC bold link https://example.com] + " then plain"[10:21]
 ```
 
 Each segment is `"<text>"[<start>:<end> <fmt-tokens> link <uri>]`, fmt-tokens in the same
@@ -412,7 +424,7 @@ the **same** condition serializer as the condformat grammar.
 
 ```
 basicFilter [Sheet1!A1:F500] sort C asc | B: hide Closed, NUMBER_GREATER(0)
-filterView 123 "Open only" [Sheet1!A1:F500] | B: hide Closed
+filterView 123 "Open only" [Sheet1!A1:F500] B: hide Closed
 ```
 
 Writable via the `structure` actions `set_basic_filter` / `clear_basic_filter` and
@@ -500,7 +512,9 @@ enable a Drive scope.
   `read_values(render="plain")` (Drive's csv export only emits the first sheet, so we never use
   it). Sheets scope only; `sheet` is required → `missing_sheet` if omitted.
 
-The MCP tool is `readOnlyHint=True`: it mutates no spreadsheet, it only writes a local file.
+The MCP tool is annotated as a **write** tool with `destructiveHint=True`: it mutates no
+spreadsheet, but it writes to the local filesystem and silently overwrites an existing file
+at `path`.
 
 ### Read across files (`read_many`)
 

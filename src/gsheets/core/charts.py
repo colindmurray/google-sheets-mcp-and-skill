@@ -58,7 +58,8 @@ def charts(
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
         action: ``"create"`` | ``"update"`` | ``"delete"`` | ``"read"``.
-        sheet: Target tab name (for read / anchor resolution).
+        sheet: Target tab name — filters ``read`` only; ignored by create/update/delete
+            (the create anchor tab comes from ``spec["anchor"]["sheet"]``, which is required).
         chart_id: Existing chart id for update/delete.
         spec: Minimal flat chart spec for create/update.
 
@@ -156,7 +157,7 @@ def _read(
     """List embedded charts as METADATA ONLY (chartId/title/type/anchor) (DESIGN §3.3 v1).
 
     Reads a tight mask covering only the chart fields the v1 metadata view surfaces — never
-    the full ``EmbeddedChartSpec`` (token efficiency, invariant #3). Optionally filtered to a
+    the full ``EmbeddedChartSpec`` (the token-efficiency invariant). Optionally filtered to a
     single tab by ``sheet``.
     """
     fields = (

@@ -1,6 +1,6 @@
 """Slicer read serialization + add/update/delete write builders (DESIGN §X.0f, §X.3/§X.16).
 
-Feature #16 (feature-gap-analysis). A *slicer* is an on-grid filter control: it points at a
+A *slicer* is an on-grid filter control: it points at a
 data range, filters one column of it, and is anchored at a cell on a (usually different) sheet.
 The owning read fn (``structure(action="read")``, structure-ext) attaches the serialized dict to
 the host sheet's ``slicers`` list, emitting per-sheet rich data only when present (token-safe).

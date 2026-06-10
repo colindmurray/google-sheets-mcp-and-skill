@@ -44,7 +44,10 @@ A cell with `textFormatRuns` gains a `runs` array; a cell with a single whole-ce
   `hyperlink` is absent (Google leaves it empty) and each link lives on its run — iterate `runs` to
   recover every link.
 - Terse line (one per cell with runs):
-  `runs A2: "Click here"[0:10 bold fg #1155CC link https://x] + " then plain"[10:21]`.
+  `runs A2: "Click here"[0:10 fg #1155CC bold link https://x] + " then plain"[10:21]`. Offsets are
+  `[start:end)` with the end exclusive; format tokens come in canonical order (`bg`, `fg`, then
+  `bold`/`italic`/`underline`/`strike`), with `link <uri>` last. In the CLI's human output the
+  `runs A2: ` prefix is dropped (the cell line already leads with the address).
 - `hyperlink` is a **read-only** Google field. You set an in-cell link by writing a `=HYPERLINK(...)`
   formula via `write-values` (see `basic.md`), never by writing `hyperlink` back.
 

@@ -1,6 +1,6 @@
 """Rich-text runs (``textFormatRuns``) + cell hyperlink serialization (DESIGN §X.0a / §X.1).
 
-Features #1 (per-run rich text + in-cell links) and #8 (cell-level hyperlink read). Both are
+Covers the per-run rich-text (+ in-cell links) and cell-level hyperlink reads. Both are
 READ-side enrichments surfaced per-cell ONLY when present (token-safe): a cell carries
 ``runs`` only when it has ``textFormatRuns`` and ``hyperlink`` only when Google sets it.
 
@@ -25,7 +25,7 @@ line renderer; both stay self-contained and serviceless.
 
 Terse line form (condformat-style, one line per cell with runs, DESIGN §X.0a):
 
-    runs A1: "Click here"[0:10 bold fg #1155CC link https://x] + " then plain"[11:22]
+    runs A1: "Click here"[0:10 fg #1155CC bold link https://x] + " then plain"[10:21]
 
 PURE leaf serializer module. Imports only stdlib + the sibling ``flatten``/``colors``/``errors``
 core leaves (its declared deps). It must NEVER import ``fastmcp``/``mcp``/``argparse``,
@@ -164,7 +164,7 @@ def text_runs_line(a1: str, runs: list[dict]) -> str:
     """Render a serialized per-run list to the terse condformat-style ``runs`` line.
 
     Example (DESIGN §X.0a):
-        ``runs A1: "Click here"[0:10 bold fg #1155CC link https://x] + " then plain"[11:22]``
+        ``runs A1: "Click here"[0:10 fg #1155CC bold link https://x] + " then plain"[10:21]``
 
     Each segment is ``"<text>"[<start>:<end> <fmt-tokens> link <uri>]`` where ``<end>`` is the
     exclusive end offset (``start + len(text)``) and the bracket body lists the canonical format

@@ -11,8 +11,7 @@ description: >-
   Spreadsheet or a tab/cell/range within one — especially anything about a sheet's formulas,
   colors, conditional formatting, validation, tables, filters, comments, or layout, or when the
   user pastes a spreadsheet URL or ID and asks what it does or to change it. Prefer this over
-  generic HTTP, Apps Script, or a raw Sheets API call for any Google Sheets work, even if the user
-  never says the word "spreadsheet".
+  generic HTTP, Apps Script, or a raw Sheets API call for any Google Sheets work.
 ---
 
 # gsheets — Google Sheets from the command line

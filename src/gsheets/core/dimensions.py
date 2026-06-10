@@ -5,15 +5,15 @@ high-frequency intent kept OFF ``manage_sheets`` (which is tab-level) on purpose
 §X.7 decision: a separate pure module keeps both clean and keeps each integration unit
 single-file). The write verbs each map to ONE ``batchUpdate`` request:
 
-- ``insert`` (#7) -> ``insertDimension``
-- ``delete`` (#7) -> ``deleteDimension``
-- ``move`` (#7) -> ``moveDimension``
-- ``append`` (#7) -> ``appendDimension``
-- ``auto_resize`` (#10) -> ``autoResizeDimensions``
-- ``set_props`` (#13) -> ``updateDimensionProperties`` (auto fields mask via
+- ``insert`` -> ``insertDimension``
+- ``delete`` -> ``deleteDimension``
+- ``move`` -> ``moveDimension``
+- ``append`` -> ``appendDimension``
+- ``auto_resize`` -> ``autoResizeDimensions``
+- ``set_props`` -> ``updateDimensionProperties`` (auto fields mask via
   ``build_fields_mask``)
 
-The read verb completes #13's read side:
+The read verb is ``set_props``'s read-side counterpart:
 
 - ``read`` -> ``spreadsheets.get`` over ``data(rowMetadata.hiddenByUser,
   columnMetadata.hiddenByUser, startRow, startColumn)`` -> ``{"hiddenRows":[idx,…],
@@ -88,9 +88,9 @@ def dimensions(
     """Insert/delete/move/append/auto-resize/set-props rows+cols, or read hidden ones.
 
     Dispatches over the row/column dimension verbs (DESIGN §X.7): ``insert``/``delete``/
-    ``move``/``append`` (#7) -> ``insertDimension``/``deleteDimension``/``moveDimension``/
-    ``appendDimension``; ``auto_resize`` (#10) -> ``autoResizeDimensions``; ``set_props``
-    (#13) -> ``updateDimensionProperties`` (auto fields mask); ``read`` -> a tight
+    ``move``/``append`` -> ``insertDimension``/``deleteDimension``/``moveDimension``/
+    ``appendDimension``; ``auto_resize`` -> ``autoResizeDimensions``; ``set_props`` ->
+    ``updateDimensionProperties`` (auto fields mask); ``read`` -> a tight
     ``spreadsheets.get`` over ``rowMetadata``/``columnMetadata`` ``hiddenByUser``.
 
     Every action targets ONE tab, so ``sheet`` is REQUIRED on every action (a missing sheet
@@ -262,7 +262,7 @@ def _batch_update(
 
 
 # ---------------------------------------------------------------------------------------
-# insert (#7)
+# insert
 # ---------------------------------------------------------------------------------------
 
 
@@ -287,7 +287,7 @@ def _dim_insert(services, spreadsheet_id, sheet, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# delete (#7)
+# delete
 # ---------------------------------------------------------------------------------------
 
 
@@ -313,7 +313,7 @@ def _dim_delete(services, spreadsheet_id, sheet, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# move (#7)
+# move
 # ---------------------------------------------------------------------------------------
 
 
@@ -348,7 +348,7 @@ def _dim_move(services, spreadsheet_id, sheet, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# append (#7)
+# append
 # ---------------------------------------------------------------------------------------
 
 
@@ -385,7 +385,7 @@ def _dim_append(services, spreadsheet_id, sheet, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# auto_resize (#10)
+# auto_resize
 # ---------------------------------------------------------------------------------------
 
 
@@ -426,7 +426,7 @@ def _dim_auto_resize(services, spreadsheet_id, sheet, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# set_props (#13)
+# set_props
 # ---------------------------------------------------------------------------------------
 
 
@@ -486,7 +486,7 @@ def _dim_set_props(services, spreadsheet_id, sheet, params) -> dict:
 
 
 # ---------------------------------------------------------------------------------------
-# read (#13 read side — hiddenByUser)
+# read (hiddenByUser — the set_props read side)
 # ---------------------------------------------------------------------------------------
 
 #: Tight read mask: only the per-dimension ``hiddenByUser`` flags + the data block origin.

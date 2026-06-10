@@ -4,7 +4,8 @@ The everyday read → write → verify loop, covering roughly 80% of what you do
 orient, read cells (values + formulas + formatting), read conditional-format rules, write values,
 append rows, clear, format a range, and manage tabs. Reach here first for any ordinary task; drop
 to `intermediate.md` only for the less-common operations (validation, data-ops, dimensions,
-structure, charts, comments, export) and `advanced.md` for fringe features. `gsheets <cmd> --help`
+structure, comments, export) and `advanced.md` for fringe features (rich-text/pivot reads, charts,
+the raw `batch`). `gsheets <cmd> --help`
 is the authoritative, always-current flag source for any single command.
 
 ## Core concepts

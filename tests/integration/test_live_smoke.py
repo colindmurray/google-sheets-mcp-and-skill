@@ -49,7 +49,7 @@ pytestmark = pytest.mark.live
 #
 #   1. Salted SHA-256 hashes of known-Production ids (one-way; the id cannot be recovered from
 #      the digest). A candidate id is hashed with the same salt and compared. This pins the
-#      known workout-tracker Production id without committing it.
+#      a known production id without committing it.
 #   2. An optional runtime denylist via GSHEETS_PRODUCTION_DENYLIST (comma-separated ids), read
 #      from the environment at test time — so an operator can add their own Production ids
 #      locally without ever committing them.
@@ -58,7 +58,7 @@ _DENYLIST_SALT = "gsheets-live-denylist-v1"
 #: ``hashlib.sha256(f"{_DENYLIST_SALT}:{spreadsheet_id}".encode()).hexdigest()``.
 _PRODUCTION_DENYLIST_HASHES = frozenset(
     {
-        # workout-tracker PRODUCTION (internal/task.md §12) — plaintext lives only outside the repo.
+        # A maintainer production spreadsheet — the plaintext id lives only outside the repo.
         "c626b32ea1c7e1b343f9b160b53295ca5606e76f5011762bcae59114a279585b",
     }
 )

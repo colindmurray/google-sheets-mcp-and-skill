@@ -1175,7 +1175,7 @@ def model_for(core_fn_name: str, data: dict[str, Any]) -> _Result:
 
 
 class StructureParams(TypedDict, total=False):
-    """Union of all ``structure`` per-action ``params`` keys (DESIGN §3.3 table)."""
+    """Union of all ``structure`` per-action ``params`` keys (DESIGN §3.3 table + v0.2)."""
 
     mergeType: Literal["MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"]
     name: str
@@ -1189,6 +1189,23 @@ class StructureParams(TypedDict, total=False):
     dimension: Literal["ROWS", "COLUMNS"]
     start: int
     end: int
+    # v0.2 object CRUD (tables / banding / filters / slicers / spreadsheet props)
+    tableId: str
+    columns: list[dict]
+    range: str
+    bandedRangeId: int
+    rowBanding: dict
+    columnBanding: dict
+    sorted: list[dict]
+    criteria: list[dict] | dict
+    filterViewId: int
+    title: str
+    slicerId: int
+    dataRange: str
+    anchor: str
+    columnIndex: int
+    locale: str
+    timeZone: str
 
 
 class ManageSheetsParams(TypedDict, total=False):

@@ -1,6 +1,6 @@
 """Native Sheets Tables (``Table``) read serialization + add/update/delete write builders.
 
-Feature #3 (DESIGN §X.0c, §X.3/§X.4). Native Tables went GA in 2024 and are exposed in the
+Covers DESIGN §X.0c and §X.3/§X.4. Native Tables went GA in 2024 and are exposed in the
 v4 REST API as a per-sheet ``tables`` array. This module owns:
 
 - :func:`serialize_table` — flatten a Google ``Table`` (``name`` / ``range`` /
@@ -33,7 +33,7 @@ from .fieldsmask import build_fields_mask
 from .rules import rule_to_validation, validation_to_rule
 from .service import SheetsServices
 
-#: ``Table.columnProperties[].columnType`` enum (DESIGN §X.0c; analysis #3). A ``DROPDOWN``
+#: ``Table.columnProperties[].columnType`` enum (DESIGN §X.0c). A ``DROPDOWN``
 #: column REQUIRES a ``dataValidationRule`` with a ``ONE_OF_LIST`` condition.
 COLUMN_TYPES: frozenset[str] = frozenset(
     {

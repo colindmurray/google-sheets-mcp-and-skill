@@ -18,6 +18,7 @@ import sys
 
 from . import __version__, auth, core
 from .core.errors import SheetsError
+from .core.richtext import text_runs_line
 
 # Render modes / input modes / action enums mirrored from core so argparse can validate up
 # front (core re-validates and raises SheetsError — these just give nice argparse errors).
@@ -236,13 +237,13 @@ def _add_inspect(sub) -> None:
         "--rich-text",
         dest="include_rich_text",
         action="store_true",
-        help="include per-run rich text (textFormatRuns) + in-cell hyperlinks (#1/#8)",
+        help="include per-run rich text (textFormatRuns) + in-cell hyperlinks",
     )
     p.add_argument(
         "--pivot",
         dest="include_pivot",
         action="store_true",
-        help="include pivot-table definitions on anchor cells (#6)",
+        help="include pivot-table definitions on anchor cells",
     )
     p.set_defaults(func=_cmd_inspect, needs_services=True)
 
@@ -914,7 +915,13 @@ def _render_text(result: dict) -> str:
 
     # overview
     if "title" in result and "sheets" in result and "namedRanges" in result:
-        lines.append(f"{result.get('title', '')}  [{result.get('spreadsheetId', '')}]")
+        meta = []
+        if result.get("locale"):
+            meta.append(f"locale={result['locale']}")
+        if result.get("timeZone"):
+            meta.append(f"tz={result['timeZone']}")
+        suffix = f"  ({', '.join(meta)})" if meta else ""
+        lines.append(f"{result.get('title', '')}  [{result.get('spreadsheetId', '')}]{suffix}")
         for s in result.get("sheets", []):
             extras = []
             if s.get("frozenRows"):
@@ -972,11 +979,27 @@ def _render_text(result: dict) -> str:
                     f"  group: {g.get('dimension')} {g.get('start')}-{g.get('end')} "
                     f"depth={g.get('depth')}"
                 )
+            # v0.2 structural objects: each serializer precomputes a terse ``line``.
+            for t in s.get("tables", []):
+                lines.append(f"  {t.get('line')}")
+            basic_filter = s.get("basicFilter")
+            if basic_filter:
+                lines.append(f"  {basic_filter.get('line')}")
+            for fv in s.get("filterViews", []):
+                lines.append(f"  {fv.get('line')}")
+            for b in s.get("bandedRanges", []):
+                lines.append(f"  {b.get('line')}")
+            for sl in s.get("slicers", []):
+                lines.append(f"  {sl.get('line')}")
         return "\n".join(lines) if lines else "(no structural data)"
 
     # inspect
     if "cells" in result or "runs" in result:
-        header = f"{result.get('sheet')}!{result.get('range')}  " if result.get("sheet") else ""
+        # Core returns ``range`` already sheet-qualified; only prepend the sheet when it isn't.
+        rng = str(result.get("range") or "")
+        if rng and "!" not in rng and result.get("sheet"):
+            rng = f"{result['sheet']}!{rng}"
+        header = f"{rng}  " if rng else ""
         lines.append(f"{header}{result.get('rows')}x{result.get('cols')}")
         for m in result.get("merges", []):
             lines.append(f"merge: {m}")
@@ -1027,7 +1050,15 @@ def _render_text(result: dict) -> str:
         return _render_read_many(result)
 
     # data_ops / dimensions write summary (DESIGN §X.2/§X.7): a terse one-line action summary.
-    if "action" in result and ("sheets" not in result and "cells" not in result):
+    # Single-form set_conditional_format also carries "action" but is the only result with
+    # "index"/"rule" — let it fall through to the generic renderer so neither field is dropped.
+    if (
+        "action" in result
+        and "sheets" not in result
+        and "cells" not in result
+        and "index" not in result
+        and "rule" not in result
+    ):
         summary = _render_action_summary(result)
         if summary is not None:
             return summary
@@ -1075,11 +1106,11 @@ def _inspect_rich_parts(cell: dict) -> list[str]:
     parts: list[str] = []
     runs = cell.get("runs")
     if runs:
-        seg = " + ".join(
-            f"{r.get('text', '')!r}[{r.get('start', 0)}{' link ' + r['link'] if r.get('link') else ''}]"
-            for r in runs
-        )
-        parts.append(f"runs: {seg}")
+        # Use the canonical core renderer (offsets, style tokens, links) and drop its
+        # ``runs <a1>: `` prefix — the cell line already leads with the address.
+        a1 = cell.get("a1") or cell.get("a1Range") or "?"
+        full = text_runs_line(a1, runs)
+        parts.append("runs: " + full[len(f"runs {a1}: "):])
     if cell.get("hyperlink"):
         parts.append(f"link={cell['hyperlink']}")
     pivot = cell.get("pivot")
