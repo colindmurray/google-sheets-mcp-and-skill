@@ -1,6 +1,9 @@
 # Internal build brief / design / research — gitignored (contains real IDs)
 internal/
 
+# Local stress-test issue log + resolutions — contains real spreadsheet IDs (keep out of this public repo)
+ISSUES.md
+
 # Python build & packaging
 build/
 dist/
