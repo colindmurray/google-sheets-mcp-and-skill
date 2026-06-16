@@ -316,6 +316,43 @@ class ValueRange(_Sub):
     computed: Optional[list[list[Any]]] = None
 
 
+class FormulaSample(_Sub):
+    """One sample computed value attached to a formula template in ``formula_patterns`` (SPEC §4.2).
+
+    ``a1`` is the template's first covered cell; ``value`` is its FORMATTED computed value.
+    """
+
+    a1: Optional[str] = None
+    value: Optional[Any] = None
+
+
+class FormulaTemplate(_Sub):
+    """One distinct formula template in a column's ``formula_patterns`` summary (SPEC §4.2).
+
+    ``formula`` is the normalized template (relative rows as ``{r}`` / ``{r±k}``); when the column
+    is non-reducible it is the raw formula verbatim. ``rows`` is the inclusive ``"lo:hi"`` row span,
+    ``cells`` how many cells it covers, ``sample`` the optional one computed value.
+    """
+
+    formula: Optional[str] = None
+    rows: Optional[str] = None
+    cells: Optional[int] = None
+    sample: Optional[FormulaSample] = None
+
+
+class FormulaColumn(_Sub):
+    """One column's distinct formula templates in ``formula_patterns`` (SPEC §4.2).
+
+    ``col`` is the sheet-qualified column (``"Cliff!K"``); ``reduced`` is ``False`` when the column
+    did not collapse cleanly and the templates are the raw formulas verbatim (the honesty flag,
+    SPEC §4.3); ``templates`` is empty for a literal-only column.
+    """
+
+    col: Optional[str] = None
+    reduced: Optional[bool] = None
+    templates: Optional[list[FormulaTemplate]] = None
+
+
 class SheetRef(_Sub):
     """A ``{sheetId, title, index}`` reference returned by ``manage_sheets`` (DESIGN §3.3)."""
 
@@ -765,6 +802,43 @@ class DescribeResult(_Result):
             for r in region.conditionalFormats or []:
                 lines.append(f"  CF {r.index}: {r.line}")
         return "\n".join(lines) if lines else "no regions"
+
+
+class FormulaPatternsResult(_Result):
+    """Mirror of ``core.formula_patterns`` — per-column distinct formula templates (SPEC §4.2).
+
+    ``columns`` is one :class:`FormulaColumn` per column across the requested ranges (left-to-right,
+    request order). The terse render emits the SPEC §4.2 shape — the column header on the first
+    template line, subsequent templates indented under it:
+
+    ::
+
+        Cliff!K  =SUM(J{r}:R{r})        rows 3:52   (50)   K3 -> 185
+                 =IFERROR(K{r-1}+1,0)   rows 53:55  (3)    K53 -> 0
+    """
+
+    spreadsheetId: Optional[str] = None
+    columns: list[FormulaColumn] = []
+
+    @property
+    def terse(self) -> str:
+        lines: list[str] = []
+        for col in self.columns:
+            templates = col.templates or []
+            label = col.col or "?"
+            if not templates:
+                lines.append(f"{label}  (no formulas)")
+                continue
+            indent = " " * len(label)
+            for i, t in enumerate(templates):
+                head = label if i == 0 else indent
+                bits = [f"{head}  {t.formula}", f"rows {t.rows}", f"({t.cells})"]
+                if t.sample is not None and t.sample.a1 is not None:
+                    bits.append(f"{t.sample.a1} -> {t.sample.value}")
+                lines.append("  ".join(bits))
+            if col.reduced is False:
+                lines.append(f"{indent}  (verbatim — not reduced)")
+        return "\n".join(lines) if lines else "no formula columns"
 
 
 class WriteValuesResult(_Result):

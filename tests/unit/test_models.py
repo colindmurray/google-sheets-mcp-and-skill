@@ -143,6 +143,68 @@ def test_describe_result_mirrors_core_dict_and_round_trips():
     assert "CF 0:" in m.terse
 
 
+def test_formula_patterns_result_mirrors_core_dict_and_terse():
+    # FormulaPatternsResult is a mechanical mirror of core.formula_patterns (SPEC §4.2): columns →
+    # templates with the {r}-normalized formula, row span, cell count, and optional sample.
+    core_dict = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "columns": [
+            {
+                "col": "Cliff!K",
+                "reduced": True,
+                "templates": [
+                    {
+                        "formula": "=SUM(J{r}:R{r})",
+                        "rows": "3:52",
+                        "cells": 50,
+                        "sample": {"a1": "K3", "value": 185},
+                    },
+                    {
+                        "formula": "=IFERROR(K{r-1}+1,0)",
+                        "rows": "53:55",
+                        "cells": 3,
+                        "sample": {"a1": "K53", "value": 0},
+                    },
+                ],
+            },
+            {"col": "Cliff!A", "reduced": True, "templates": []},
+        ],
+    }
+    m = models.FormulaPatternsResult.model_validate(core_dict)
+    assert [c.col for c in m.columns] == ["Cliff!K", "Cliff!A"]
+    assert m.columns[0].templates[0].formula == "=SUM(J{r}:R{r})"
+    assert m.columns[0].templates[0].sample.a1 == "K3"
+    # Null-pruned dump reproduces the core dict exactly (mechanical mirror).
+    assert m.model_dump() == core_dict
+    # Terse render follows the SPEC §4.2 shape: header on the first line, sample as "K3 -> 185".
+    terse = m.terse
+    assert "Cliff!K  =SUM(J{r}:R{r})" in terse
+    assert "rows 3:52" in terse
+    assert "(50)" in terse
+    assert "K3 -> 185" in terse
+
+
+def test_formula_patterns_result_non_reducible_flags_verbatim():
+    core_dict = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "columns": [
+            {
+                "col": "Cliff!K",
+                "reduced": False,
+                "templates": [
+                    {"formula": "=A1+B2", "rows": "3:3", "cells": 1},
+                    {"formula": "=Z9+Q3", "rows": "4:4", "cells": 1},
+                ],
+            }
+        ],
+    }
+    m = models.FormulaPatternsResult.model_validate(core_dict)
+    assert m.columns[0].reduced is False
+    assert "not reduced" in m.terse
+
+
 def test_read_values_all_render_has_computed():
     data = {
         "ok": True,

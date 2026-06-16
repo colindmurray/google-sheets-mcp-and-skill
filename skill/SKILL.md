@@ -90,6 +90,11 @@ Understand (read-only):
   (`all` returns formulas and computed values side by side). For big reads: `--diff-only` drops the
   duplicate `computed` matrix on static sheets; `--max-cells N` fails fast instead of blowing the
   token cap (and for pure value dumps, `export csv` is better than either — see the gotchas).
+- `formula-patterns <ID> <RANGE...>` — collapse a region's REPEATED formulas to the distinct
+  templates per column (relative rows normalized to `{r}` / `{r±k}`), with the row span each covers
+  and a sample computed value. Token-cheap on a wide grid where one formula repeats down 50 rows.
+  `--no-sample` skips the computed sample. Lossy-but-honest: a column that won't reduce is shown
+  verbatim (`reduced:false`); for the lossless ground truth use `read-values --render formula`.
 - `read-conditional-formats <ID> [--sheet NAME]` — conditional-format rules as terse, readable,
   round-trippable lines with their positional `index`.
 - `read-many --requests-json '[...]' [--mode {values,summary}]` — read values or summaries across
@@ -151,9 +156,12 @@ Pick the format for what you'll do with the data:
 - `jsonl` — many records to stream or filter line by line. `read-values` emits one `{range,row}`
   per row; a list result (e.g. `read-many`, `comments`) emits one element per line.
 
-Before pulling data, narrow scope: a tight range or `read-many --mode summary` beats dumping a
-whole tab. Move bulk data as a file or pipe (`gsheets --format csv read-values <ID> <RANGE> > out.csv`
-on the CLI), never into context.
+Before pulling data, narrow scope: a tight range, `read-many --mode summary`, or
+`formula-patterns` (one template instead of 50 identical formulas) beats dumping a whole tab. Move
+bulk data as a file or pipe (`gsheets --format csv read-values <ID> <RANGE> > out.csv` on the CLI),
+never into context. Sparse formula/format/note data reads best **address-keyed** (`C5: =SUM(...)`,
+one line per non-empty cell — `read-values --render formula` and `formula-patterns` do this);
+dense numeric grids read best as a rectangle + range anchor (csv/json).
 
 ## Workflow: understanding a sheet
 
@@ -318,11 +326,12 @@ the tier the task calls for (pull in a lower tier first if you haven't):
   `write-values`, `append-rows`, `clear`, `format`; `manage-sheets`. Also the core concepts: A1
   addressing, the global `--json`/`--scopes` placement, `USER_ENTERED`, effective-vs-userEntered
   format, and the conditional-format line grammar. Start here for any ordinary read or edit.
-- **`references/intermediate.md`** — ~15%, when the task needs more than the basics: writing
-  conditional-format rules (`set-conditional-format`) or data validation (`set-validation`);
-  reading or posting Drive `comments`; `export` to a file; `read-many` across spreadsheets; bulk
-  `data-ops` (find/replace, dedupe, sort, split, …); row/column `dimensions`; and the common
-  `structure` edits (merges, named/protected ranges, freeze, groups) plus `structure --action read`.
+- **`references/intermediate.md`** — ~15%, when the task needs more than the basics: collapsing a
+  wide grid's repeated formulas with `formula-patterns`; writing conditional-format rules
+  (`set-conditional-format`) or data validation (`set-validation`); reading or posting Drive
+  `comments`; `export` to a file; `read-many` across spreadsheets; bulk `data-ops` (find/replace,
+  dedupe, sort, split, …); row/column `dimensions`; and the common `structure` edits (merges,
+  named/protected ranges, freeze, groups) plus `structure --action read`.
 - **`references/advanced.md`** — ~5%, the niche surface you rarely need: `inspect --rich-text` /
   `--pivot`; `structure`'s native Tables, banding, filter views, and slicer CRUD plus
   `spreadsheet_props`; developer `metadata`; `charts`; and the raw `batch` escape hatch.

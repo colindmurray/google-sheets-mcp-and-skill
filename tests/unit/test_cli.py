@@ -68,6 +68,11 @@ def patched(monkeypatch):
     )
     monkeypatch.setattr(
         cli.core,
+        "formula_patterns",
+        _make("formula_patterns", {"ok": True, "spreadsheetId": "X", "columns": []}),
+    )
+    monkeypatch.setattr(
+        cli.core,
         "write_values",
         _make("write_values", {"ok": True, "spreadsheetId": "X", "updatedRanges": ["S!A1"], "updatedCells": 1}),
     )
@@ -345,6 +350,100 @@ def test_describe_text_render(patched, monkeypatch, capsys):
     assert "merge: Cliff!B1:C1" in out
 
 
+def test_formula_patterns_maps_ranges_and_sample_default(patched):
+    _run(["formula-patterns", "ID", "Cliff!K3:K52", "Cliff!L3:L52"])
+    assert patched["name"] == "formula_patterns"
+    assert patched["args"][0] == ["Cliff!K3:K52", "Cliff!L3:L52"]
+    assert patched["kwargs"]["sample"] is True  # sample on by default
+
+
+def test_formula_patterns_no_sample_flag(patched):
+    _run(["formula-patterns", "ID", "Cliff!K3:K52", "--no-sample"])
+    assert patched["kwargs"]["sample"] is False
+
+
+def test_formula_patterns_text_render(patched, monkeypatch, capsys):
+    # The text renderer follows the SPEC §4.2 shape: header on the first template line, sample as
+    # "K3 -> 185"; a non-reducible column appends a verbatim marker.
+    monkeypatch.setattr(
+        cli.core,
+        "formula_patterns",
+        lambda *a, **k: {
+            "ok": True,
+            "spreadsheetId": "X",
+            "columns": [
+                {
+                    "col": "Cliff!K",
+                    "reduced": True,
+                    "templates": [
+                        {
+                            "formula": "=SUM(J{r}:R{r})",
+                            "rows": "3:52",
+                            "cells": 50,
+                            "sample": {"a1": "K3", "value": 185},
+                        }
+                    ],
+                },
+                {
+                    "col": "Cliff!M",
+                    "reduced": False,
+                    "templates": [
+                        {"formula": "=A1+B2", "rows": "3:3", "cells": 1},
+                    ],
+                },
+            ],
+        },
+    )
+    rc = cli.main(["formula-patterns", "ID", "Cliff!K3:M52"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Cliff!K  =SUM(J{r}:R{r})" in out
+    assert "rows 3:52" in out
+    assert "(50)" in out
+    assert "K3 -> 185" in out
+    assert "not reduced" in out
+
+
+def test_read_values_formula_render_is_address_keyed(patched, monkeypatch, capsys):
+    # SPEC §4.4: a formula read is SPARSE, so text renders address-keyed ("C5: =SUM(...)") rather
+    # than a dense rectangle. The anchor → absolute-A1 expansion lives in core.format.
+    monkeypatch.setattr(
+        cli.core,
+        "read_values",
+        lambda services, sid, ranges, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "render": "formula",
+            "ranges": [
+                {"range": "Cliff!C5:C6", "values": [["=SUM(A5:B5)"], ["=SUM(A6:B6)"]]}
+            ],
+        },
+    )
+    rc = cli.main(["read-values", "ID", "Cliff!C5:C6", "--render", "formula"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.splitlines() == ["Cliff!C5: =SUM(A5:B5)", "Cliff!C6: =SUM(A6:B6)"]
+
+
+def test_read_values_plain_render_keeps_rectangle(patched, monkeypatch, capsys):
+    # A dense value read keeps the rectangle + range form (only sparse formula reads go addressed).
+    monkeypatch.setattr(
+        cli.core,
+        "read_values",
+        lambda services, sid, ranges, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "render": "plain",
+            "ranges": [{"range": "S!A1:B1", "values": [["a", "b"]]}],
+        },
+    )
+    rc = cli.main(["read-values", "ID", "S!A1:B1"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "render=plain" in out
+    assert "a | b" in out
+
+
 def test_write_values_single_range_form_builds_data(patched):
     _run(["write-values", "ID", "S!A1", "--values-json", "[[1,2]]"])
     assert patched["name"] == "write_values"
@@ -464,6 +563,8 @@ def test_build_parser_registers_every_subcommand():
         "data-ops", "dimensions", "comments",
         # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two MORE NEW subcommands.
         "export", "read-many",
+        # v0.3 reads (SPEC §3/§4): the unified region read + formula-pattern collapse.
+        "describe", "formula-patterns",
     }
     assert expected <= set(choices)
 

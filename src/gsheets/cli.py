@@ -19,6 +19,7 @@ import sys
 from . import __version__, auth, core
 from .core.errors import SheetsError, to_sheets_error
 from .core.format import render as render_format
+from .core.format import render_sparse_values
 from .core.richtext import text_runs_line
 
 # Global --format choices. ``text`` (the default) is the existing terse renderer; the data
@@ -176,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_overview(sub)
     _add_inspect(sub)
     _add_describe(sub)
+    _add_formula_patterns(sub)
     _add_read_values(sub)
     _add_read_conditional_formats(sub)
     _add_write_values(sub)
@@ -280,6 +282,23 @@ def _add_describe(sub) -> None:
         "(default: unlimited)",
     )
     p.set_defaults(func=_cmd_describe, needs_services=True)
+
+
+def _add_formula_patterns(sub) -> None:
+    """NEW v0.3 tool (SPEC §4): collapse a column's repeated formulas to distinct templates."""
+    p = sub.add_parser(
+        "formula-patterns",
+        help="collapse repeated formulas per column to distinct {r}-normalized templates",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument("ranges", nargs="+", help="one or more A1 ranges (multi-sheet allowed)")
+    p.add_argument(
+        "--no-sample",
+        dest="sample",
+        action="store_false",
+        help="skip the sample computed value (no second FORMATTED pass)",
+    )
+    p.set_defaults(func=_cmd_formula_patterns, needs_services=True)
 
 
 def _add_read_values(sub) -> None:
@@ -716,6 +735,15 @@ def _cmd_describe(services, args) -> dict:
     )
 
 
+def _cmd_formula_patterns(services, args) -> dict:
+    return core.formula_patterns(
+        services,
+        args.spreadsheet_id,
+        args.ranges,
+        sample=args.sample,
+    )
+
+
 def _cmd_read_values(services, args) -> dict:
     return core.read_values(
         services,
@@ -1010,6 +1038,10 @@ def _render_text(result: dict) -> str:
     if "regions" in result and isinstance(result.get("regions"), list):
         return _render_describe(result)
 
+    # formula_patterns (SPEC §4): per-column distinct templates. ``columns`` is the distinctive key.
+    if "columns" in result and isinstance(result.get("columns"), list):
+        return _render_formula_patterns(result)
+
     # comments (DESIGN §X.5): a top-level Drive-comments list. Each entry carries a terse
     # ``line`` from serialize_comment; fall back to a constructed line if absent.
     if "comments" in result and "sheets" not in result and "cells" not in result:
@@ -1080,6 +1112,12 @@ def _render_text(result: dict) -> str:
 
     # read_values
     if "ranges" in result and "render" in result:
+        # A formula read is SPARSE — address-keyed lines ("C5: =SUM(...)") read better than a dense
+        # rectangle (SPEC §4.4). The address-keying (anchor → absolute A1) lives in core.format so
+        # both adapters share it; dense numeric grids (plain/unformatted/all) keep the rectangle.
+        if result.get("render") == "formula":
+            addressed = render_sparse_values(result)
+            return addressed if addressed else f"render={result.get('render')}\n(no formulas)"
         lines.append(f"render={result.get('render')}")
         for rng in result["ranges"]:
             lines.append(f"# {rng.get('range')}")
@@ -1221,6 +1259,37 @@ def _render_describe(result: dict) -> str:
         if vs.get("cells"):
             rules = ", ".join(vs.get("rules", []))
             lines.append(f"  validation: {vs['cells']} cell(s) [{rules}]")
+    return "\n".join(lines)
+
+
+def _render_formula_patterns(result: dict) -> str:
+    """Render ``formula_patterns`` (SPEC §4.2): the column header on the first template line.
+
+    Subsequent templates align under the header; each line is
+    ``"<col-or-pad>  <formula>  rows <lo:hi>  (<cells>)  [<a1> -> <value>]"``. A literal-only
+    column shows ``"(no formulas)"``; a non-reducible column appends a ``"(verbatim — not reduced)"``
+    marker so the lossy fallback is explicit.
+    """
+    columns = result.get("columns", [])
+    if not columns:
+        return "(no formula columns)"
+    lines: list[str] = []
+    for col in columns:
+        label = col.get("col") or "?"
+        templates = col.get("templates") or []
+        if not templates:
+            lines.append(f"{label}  (no formulas)")
+            continue
+        indent = " " * len(label)
+        for i, t in enumerate(templates):
+            head = label if i == 0 else indent
+            bits = [f"{head}  {t.get('formula')}", f"rows {t.get('rows')}", f"({t.get('cells')})"]
+            sample = t.get("sample")
+            if sample and sample.get("a1") is not None:
+                bits.append(f"{sample.get('a1')} -> {sample.get('value')}")
+            lines.append("  ".join(bits))
+        if col.get("reduced") is False:
+            lines.append(f"{indent}  (verbatim — not reduced)")
     return "\n".join(lines)
 
 

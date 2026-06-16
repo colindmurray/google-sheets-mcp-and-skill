@@ -173,6 +173,173 @@ def render_grid(rows: list[list], delimiter: str) -> str:
     return buffer.getvalue()
 
 
+# --------------------------------------------------------------------------- address-keyed (§4.4)
+
+
+def render_addressed(cells: list[dict]) -> str:
+    """Render SPARSE cells as address-keyed lines — one ``"<A1>: <body>"`` per cell (SPEC §4.4).
+
+    The natural shape for a sparse formula/format/note read (an inverted index), versus the dense
+    rectangle+range. Each non-empty cell becomes one line: the formula (when set, e.g.
+    ``"C5: =SUM(A5:B5)"``) else its value, with the terse validation one-liner ``[<rule>]`` and a
+    ``note=<repr>`` fragment appended when present. A padded blank cell (a bare ``{"a1": ...}`` with
+    no value/formula/note/validation) contributes NO line — that is what makes the rendering sparse.
+
+    Args:
+        cells: A list of per-cell dicts (each carrying ``a1`` plus optional
+            ``value``/``formula``/``note``/``validation``).
+
+    Returns:
+        The newline-joined address-keyed lines (empty string when no cell carries content).
+    """
+    lines: list[str] = []
+    for cell in cells:
+        line = _addressed_line(cell)
+        if line is not None:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def addressed_records(cells: list[dict]) -> list[dict]:
+    """The jsonl-friendly record form of :func:`render_addressed` — one dict per NON-empty cell.
+
+    Drops the padded blank cells (a bare ``{"a1": ...}``) so a sparse read streams as only the
+    cells that carry content, each keyed by its ``a1`` address (SPEC §4.4).
+    """
+    return [cell for cell in cells if _cell_has_content(cell)]
+
+
+def _addressed_line(cell: dict) -> str | None:
+    """Build one ``"<A1>: <body>"`` line for a cell, or ``None`` if the cell is empty."""
+    if not _cell_has_content(cell):
+        return None
+    a1 = cell.get("a1", "?")
+    formula = cell.get("formula")
+    value = cell.get("value")
+    if formula:
+        body = str(formula)
+    elif value is not None and value != "":
+        body = str(value)
+    else:
+        body = ""
+    parts = [f"{a1}: {body}".rstrip()]
+    validation = cell.get("validation")
+    if validation:
+        parts.append(f"[{validation}]")
+    note = cell.get("note")
+    if note:
+        parts.append(f"note={note!r}")
+    return "  ".join(parts)
+
+
+def render_sparse_values(result: dict) -> str:
+    """Render a SPARSE ``read_values`` result as address-keyed lines (SPEC §4.4).
+
+    A formula read (or any read the caller treats as sparse) reads best as ``"<A1>: <formula>"``
+    lines, not a dense rectangle: each range's rectangular ``values`` grid is expanded to absolute
+    A1 cells (anchored at the range's top-left), and only non-empty cells emit a line. Multiple
+    ranges are rendered back-to-back (each cell already carries its sheet-qualified A1, so no
+    separator is needed). This is the inverted-index shape for sparse data; dense numeric grids keep
+    the rectangle+range form (csv/json) instead.
+    """
+    lines: list[str] = []
+    for entry in result.get("ranges", []) or []:
+        cells = cells_from_value_grid(entry.get("range"), entry.get("values", []) or [])
+        rendered = render_addressed(cells)
+        if rendered:
+            lines.append(rendered)
+    return "\n".join(lines)
+
+
+def cells_from_value_grid(range_a1: str | None, values: list[list]) -> list[dict]:
+    """Expand a rectangular value grid into absolute-A1 cell dicts anchored at ``range_a1`` (§4.4).
+
+    Computes each cell's sheet-qualified A1 from the requested range's top-left anchor (parsed from
+    ``range_a1`` — no ``sheetId`` resolution needed, just the prefix + start cell) so a ``read_values``
+    rectangle becomes the per-cell ``[{a1, value}]`` shape :func:`render_addressed` /
+    :func:`addressed_records` consume. The grid value lands under ``value`` (a formula read stores the
+    formula string there); an empty-string cell still gets its ``a1`` so positional consumers can
+    index, but :func:`render_addressed` drops it from a sparse render.
+    """
+    from .addressing import parse_a1
+
+    if not values:
+        return []
+
+    sheet_prefix = ""
+    start_col0 = 0
+    start_row1 = 1
+    if range_a1:
+        parsed = parse_a1(range_a1)
+        sheet = parsed.get("sheet")
+        if sheet:
+            sheet_prefix = f"{_quote_sheet_prefix(sheet)}!"
+        start = parsed.get("start")
+        if start:
+            c0, r1 = _split_anchor(start)
+            start_col0 = c0 if c0 is not None else 0
+            start_row1 = r1 if r1 is not None else 1
+
+    cells: list[dict] = []
+    for r_off, row in enumerate(values):
+        for c_off, val in enumerate(row):
+            a1 = f"{sheet_prefix}{_col_letters(start_col0 + c_off)}{start_row1 + r_off}"
+            cells.append({"a1": a1, "value": val})
+    return cells
+
+
+def _split_anchor(token: str) -> tuple[int | None, int | None]:
+    """Split a start-cell token (``"C5"``) into ``(col0, row1)`` — 0-based col, 1-based row.
+
+    A column-only anchor (``"C"``, from a whole-column range) yields ``row1=None`` (defaults to 1);
+    a row-only anchor (``"5"``) yields ``col0=None`` (defaults to 0). Pure string math — no API.
+    """
+    col_letters = "".join(ch for ch in token if ch.isalpha())
+    row_digits = "".join(ch for ch in token if ch.isdigit())
+    col0 = _col_to_index(col_letters) if col_letters else None
+    row1 = int(row_digits) if row_digits else None
+    return col0, row1
+
+
+def _col_to_index(col: str) -> int:
+    """Convert column letters (``"A"`` / ``"AA"``) to a 0-based index."""
+    idx = 0
+    for ch in col.upper():
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
+def _col_letters(col0: int) -> str:
+    """Convert a 0-based column index to letters (``0`` -> ``"A"``, ``26`` -> ``"AA"``)."""
+    letters: list[str] = []
+    n = col0 + 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters.append(chr(ord("A") + rem))
+    return "".join(reversed(letters))
+
+
+def _quote_sheet_prefix(title: str) -> str:
+    """Quote a sheet title for an A1 prefix when it is not a bare identifier (mirrors addressing)."""
+    import re
+
+    if title and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", title):
+        return title
+    return "'" + title.replace("'", "''") + "'"
+
+
+def _cell_has_content(cell: dict) -> bool:
+    """True iff a cell carries anything beyond its ``a1`` address (value/formula/note/validation).
+
+    A padded blank cell (``{"a1": ...}``) has no content and is dropped from a sparse render; a
+    cell whose ``value`` is the empty string ``""`` also counts as empty here (a placeholder).
+    """
+    value = cell.get("value")
+    if value is not None and value != "":
+        return True
+    return bool(cell.get("formula") or cell.get("note") or cell.get("validation"))
+
+
 def _is_tabular(result: dict) -> bool:
     """True iff ``result`` is a ``read_values``-style rectangular grid result (SPEC §1.2).
 

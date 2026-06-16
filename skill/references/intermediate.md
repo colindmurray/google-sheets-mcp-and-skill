@@ -74,6 +74,37 @@ top-level `ok:true` does **not** mean every file succeeded; check each `results[
 *malformed* batch (empty list, non-dict item, missing `spreadsheetId`, or a values-mode item missing
 `ranges`) fails fast up front as `bad_requests`.
 
+### `formula-patterns` — collapse repeated formulas per column
+
+A wide tracker is mostly **one formula repeated down many rows**. `formula-patterns` reads only
+formulas (column-major, no computed bloat) and, per column, dedupes to the distinct templates —
+relative row refs normalized to `{r}` / `{r±k}` — with the row span each covers and (by default)
+one sample computed value. Token-cheap where a full formula dump would blow the cap.
+
+```sh
+gsheets formula-patterns <YOUR_SPREADSHEET_ID> 'Cliff!K1:K200'              # one column
+gsheets formula-patterns <YOUR_SPREADSHEET_ID> 'Cliff!A1:CF1' --no-sample   # wide, skip samples
+gsheets --json formula-patterns <YOUR_SPREADSHEET_ID> 'Cliff!K1:M200'       # structured shape
+```
+
+| Flag | Effect |
+|---|---|
+| `--no-sample` | Skip the sample computed value (no second FORMATTED pass). |
+
+Shape: `{ok, spreadsheetId, columns:[{col:"Cliff!K", reduced, templates:[{formula:"=SUM(J{r}:R{r})", rows:"3:52", cells:50, sample:{a1:"K3", value:185}}]}]}`. Terse render:
+
+```
+Cliff!K  =SUM(J{r}:R{r})        rows 3:52   (50)   K3 -> 185
+         =IFERROR(K{r-1}+1,0)   rows 53:55  (3)    K53 -> 0
+```
+
+- **Lossy-but-honest.** Normalization is best-effort: absolute (`$`) rows stay verbatim, and a
+  column whose formulas do not reduce cleanly is emitted **verbatim** with `reduced:false`. For the
+  lossless ground truth use `read-values --render formula` (which renders address-keyed,
+  `C5: =SUM(...)`, for sparse formula reads).
+- Multi-column AND multi-sheet in one call; columns come back left-to-right in request order. A
+  literal-only column has an empty `templates` list.
+
 ### `comments --action read` — Drive threaded comments
 
 Review intent often lives in comments, not the grid. Defaults to `--action read`, listing the

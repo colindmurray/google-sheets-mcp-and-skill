@@ -228,6 +228,98 @@ class TestRenderGuards:
         assert "jsonl" in fmtmod.SUPPORTED
 
 
+# =========================================================================== address-keyed (§4.4)
+
+
+class TestRenderAddressed:
+    """``render_addressed(cells)`` — the address-keyed rendering for SPARSE data (SPEC §4.4).
+
+    A list of per-cell dicts (each carrying ``a1`` plus optional ``value``/``formula``/``note``/
+    ``validation``) becomes one ``"<A1>: <body>"`` line per NON-empty cell — the natural shape for
+    a sparse formula/format/note read (an inverted index), versus the dense rectangle+range.
+    """
+
+    def test_formula_cell_renders_address_keyed_line(self):
+        cells = [{"a1": "C5", "formula": "=SUM(A5:B5)", "value": "12"}]
+        out = fmtmod.render_addressed(cells)
+        assert out == "C5: =SUM(A5:B5)"
+
+    def test_value_only_cell_renders_value(self):
+        cells = [{"a1": "A1", "value": "hello"}]
+        assert fmtmod.render_addressed(cells) == "A1: hello"
+
+    def test_empty_cells_are_skipped(self):
+        # A padded blank cell (bare {"a1": ...}) contributes no line.
+        cells = [
+            {"a1": "A1"},
+            {"a1": "A2", "value": "x"},
+            {"a1": "A3"},
+        ]
+        assert fmtmod.render_addressed(cells) == "A2: x"
+
+    def test_multiple_cells_one_line_each(self):
+        cells = [
+            {"a1": "C5", "formula": "=SUM(A5:B5)", "value": "3"},
+            {"a1": "C6", "formula": "=SUM(A6:B6)", "value": "7"},
+        ]
+        out = fmtmod.render_addressed(cells)
+        assert out.splitlines() == ["C5: =SUM(A5:B5)", "C6: =SUM(A6:B6)"]
+
+    def test_note_and_validation_appended(self):
+        cells = [{"a1": "D7", "value": "Yes", "note": "pick one", "validation": "ONE_OF_LIST(Yes,No)"}]
+        out = fmtmod.render_addressed(cells)
+        assert out.startswith("D7: Yes")
+        assert "[ONE_OF_LIST(Yes,No)]" in out
+        assert "note=" in out
+
+    def test_empty_list_is_empty_string(self):
+        assert fmtmod.render_addressed([]) == ""
+
+    def test_addressed_records_are_dicts(self):
+        # The jsonl-friendly record form keys by a1 (one record per non-empty cell).
+        cells = [{"a1": "C5", "formula": "=SUM(A5:B5)"}, {"a1": "C6"}]
+        records = fmtmod.addressed_records(cells)
+        assert records == [{"a1": "C5", "formula": "=SUM(A5:B5)"}]
+
+
+class TestAddressedGrid:
+    """``cells_from_value_grid`` + the sparse render glue for ``read_values`` (SPEC §4.4).
+
+    A ``read_values`` result is a rectangular grid anchored at the requested range's top-left.
+    For a SPARSE read (a formula read, or ``diff_only`` computed holes) the address-keyed form is
+    the natural rendering — these helpers compute each cell's absolute A1 from the range anchor so
+    the rectangle becomes ``"<A1>: <formula>"`` lines (empties dropped).
+    """
+
+    def test_cells_from_value_grid_computes_absolute_a1(self):
+        # Anchor at C5 (sheet-qualified). A 2x1 formula grid → C5/C6 with their formulas.
+        cells = fmtmod.cells_from_value_grid(
+            "Sheet1!C5:C6", [["=SUM(A5:B5)"], ["=SUM(A6:B6)"]]
+        )
+        assert cells == [
+            {"a1": "Sheet1!C5", "value": "=SUM(A5:B5)"},
+            {"a1": "Sheet1!C6", "value": "=SUM(A6:B6)"},
+        ]
+
+    def test_cells_from_value_grid_skips_blanks_in_keys(self):
+        # A blank cell still gets an a1 (so consumers can index), but render_addressed drops it.
+        cells = fmtmod.cells_from_value_grid("S!A1:B1", [["=X", ""]])
+        rendered = fmtmod.render_addressed(cells)
+        assert rendered == "S!A1: =X"
+
+    def test_render_sparse_values_text(self):
+        result = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "render": "formula",
+            "ranges": [
+                {"range": "S!C5:C6", "values": [["=SUM(A5:B5)"], ["=SUM(A6:B6)"]]}
+            ],
+        }
+        out = fmtmod.render_sparse_values(result)
+        assert out.splitlines() == ["S!C5: =SUM(A5:B5)", "S!C6: =SUM(A6:B6)"]
+
+
 # =========================================================================== purity guard
 
 

@@ -42,6 +42,7 @@ from .core import (
     dimensions as _dimensions,
     export as _export,
     format as _format,
+    formula_patterns as _formula_patterns,
     inspect as _inspect,
     manage_sheets as _manage_sheets,
     metadata as _metadata,
@@ -556,6 +557,78 @@ def sheets_describe(
         ranges,
         out_path=out_path,
         max_cells=max_cells,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Formula patterns (collapse repeated formulas)",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+    tags={"read"},
+)
+def sheets_formula_patterns(
+    spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
+    ranges: Annotated[
+        list[str],
+        Field(
+            min_length=1,
+            description='One or more A1 ranges, e.g. ["Cliff!K1:K200", "Cliff!A1:CF1"] — '
+            "multi-column AND multi-sheet in one call.",
+        ),
+    ],
+    ctx: Context,
+    sample: Annotated[
+        bool,
+        Field(
+            description="Attach one sample computed value per template (a second FORMATTED pass). "
+            "Turn off to skip that pass when you only need the formula shapes."
+        ),
+    ] = True,
+    output_format: Annotated[
+        StructuredFormat,
+        Field(
+            description="Output format: text (default) | json | jsonl. This is a STRUCTURED read "
+            "(per-column templates, not a value grid), so csv/tsv are not offered."
+        ),
+    ] = "text",
+    out_path: Annotated[
+        Optional[str],
+        Field(
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered summary to "
+            "this local file (utf-8, output_format; text resolves to json) and return a small "
+            "handle instead of the payload. The parent directory must already exist (it is never "
+            "created); credential / config paths are refused. The spreadsheet is NOT modified."
+        ),
+    ] = None,
+) -> models.FormulaPatternsResult:
+    """Collapse a region's REPEATED formulas to the distinct templates per column — a token-cheap,
+    lossy-but-honest alternative to dumping every formula.
+
+    A tracker column is usually one formula repeated down many rows (``=SUM(J3:R3)``, ``=SUM(J4:R4)``,
+    …). This reads ONLY formulas (column-major, no computed bloat) and, per column, dedupes to the
+    distinct templates — relative row refs normalized to ``{r}`` / ``{r±k}`` — with the row span each
+    covers and (by default) one sample computed value. A column that does not reduce cleanly is
+    returned VERBATIM with ``reduced=false``; ``sheets_read_values`` with ``render="formula"`` stays
+    the lossless ground truth. Use this to understand a wide grid's logic without pulling thousands
+    of near-identical formula strings into context.
+
+    Returns:
+        ``{ok, spreadsheetId, columns:[{col:"Cliff!K", reduced, templates:[{formula:"=SUM(J{r}:R{r})",
+        rows:"3:52", cells:50, sample:{a1:"K3", value:185}}]}]}`` — columns left-to-right, in request
+        order. With ``out_path`` set, returns the file handle instead.
+    """
+    return _call_formatted(
+        models.FormulaPatternsResult,
+        _formula_patterns,
+        output_format,
+        _services(ctx),
+        spreadsheet_id,
+        ranges,
+        out_path=out_path,
+        sample=sample,
     )
 
 

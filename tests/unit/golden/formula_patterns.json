@@ -1,0 +1,135 @@
+{
+  "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+  "ranges": [
+    "Cliff!K3:M5"
+  ],
+  "sheet_index": {
+    "sheets": [
+      {
+        "properties": {
+          "sheetId": 0,
+          "title": "Cliff",
+          "index": 0
+        }
+      }
+    ]
+  },
+  "formula_response": {
+    "valueRanges": [
+      {
+        "range": "Cliff!K3:M5",
+        "majorDimension": "COLUMNS",
+        "values": [
+          [
+            "=SUM(J3:R3)",
+            "=SUM(J4:R4)",
+            "=IFERROR(K4+1,0)"
+          ],
+          [
+            "1",
+            "2",
+            "3"
+          ],
+          [
+            "=A1+B2",
+            "=Z9+Q3",
+            "=P1*P2"
+          ]
+        ]
+      }
+    ]
+  },
+  "formatted_response": {
+    "valueRanges": [
+      {
+        "range": "Cliff!K3:M5",
+        "majorDimension": "COLUMNS",
+        "values": [
+          [
+            "185",
+            "190",
+            "191"
+          ],
+          [
+            "1",
+            "2",
+            "3"
+          ],
+          [
+            "10",
+            "20",
+            "30"
+          ]
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "ok": true,
+    "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+    "columns": [
+      {
+        "col": "Cliff!K",
+        "reduced": true,
+        "templates": [
+          {
+            "formula": "=SUM(J{r}:R{r})",
+            "rows": "3:4",
+            "cells": 2,
+            "sample": {
+              "a1": "K3",
+              "value": "185"
+            }
+          },
+          {
+            "formula": "=IFERROR(K{r-1}+1,0)",
+            "rows": "5:5",
+            "cells": 1,
+            "sample": {
+              "a1": "K5",
+              "value": "191"
+            }
+          }
+        ]
+      },
+      {
+        "col": "Cliff!L",
+        "reduced": true,
+        "templates": []
+      },
+      {
+        "col": "Cliff!M",
+        "reduced": false,
+        "templates": [
+          {
+            "formula": "=A1+B2",
+            "rows": "3:3",
+            "cells": 1,
+            "sample": {
+              "a1": "M3",
+              "value": "10"
+            }
+          },
+          {
+            "formula": "=Z9+Q3",
+            "rows": "4:4",
+            "cells": 1,
+            "sample": {
+              "a1": "M4",
+              "value": "20"
+            }
+          },
+          {
+            "formula": "=P1*P2",
+            "rows": "5:5",
+            "cells": 1,
+            "sample": {
+              "a1": "M5",
+              "value": "30"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

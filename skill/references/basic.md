@@ -173,7 +173,10 @@ gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' 'Sheet1!F1:F20' --rend
 | `all` | Formula **and** computed value side by side (`values` + `computed`, index-aligned to a common rectangle; terse render shows `formula => computed`). |
 
 A `values` entry that does **not** start with `=` is a **literal**, not a formula (FORMULA render
-passes literals through).
+passes literals through). `--render formula` renders **address-keyed** in text (`C5: =SUM(...)`, one
+line per non-empty cell) — the natural shape for sparse formula data. To understand the formula
+*logic* across a wide grid without pulling thousands of near-identical formulas, reach for
+`formula-patterns` (one template per column; see `intermediate.md`).
 
 Two optional knobs for large reads:
 

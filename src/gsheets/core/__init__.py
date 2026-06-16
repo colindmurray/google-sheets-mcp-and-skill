@@ -1,9 +1,9 @@
 """Pure Google Sheets core library — the shared logic both adapters drive (DESIGN §1, §3).
 
-Re-exports the 20 public core functions so callers can do
+Re-exports the public core functions so callers can do
 ``from gsheets.core import overview, inspect, ...``. (15 base, DESIGN §3.3, plus the 5
 v0.2 extension top-level fns ``data_ops``/``dimensions``/``comments``/``export``/``read_many``,
-DESIGN §Extensions / §3.x.)
+DESIGN §Extensions / §3.x; plus the v0.3 reads ``describe`` and ``formula_patterns``, SPEC §3/§4.)
 
 PURE boundary (enforced; lint-checked, DESIGN §1): this package and its modules import ONLY
 stdlib + ``googleapiclient``/``google.auth*``. They must NEVER import ``fastmcp``, ``mcp``,
@@ -20,6 +20,7 @@ from .dataops import data_ops
 from .dimensions import dimensions
 from .export import export
 from .formatting import format
+from .formula_patterns import formula_patterns
 from .multiread import read_many
 from .reads import describe, inspect, overview, read_conditional_formats
 from .rules import set_conditional_format, set_validation
@@ -30,6 +31,7 @@ __all__ = [
     "overview",
     "inspect",
     "describe",
+    "formula_patterns",
     "read_values",
     "read_conditional_formats",
     "write_values",

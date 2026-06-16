@@ -222,10 +222,11 @@ Two write-side subtleties worth knowing:
 
 ## The function surface
 
-Twenty-one core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
+Twenty-two core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
 auth-only `auth` subcommand that has no core function). The understanding path is
 `overview → describe → inspect → read_conditional_formats` (`describe` is the unified one-call
-region read that subsumes the latter three for a single region); the change path is the writers;
+region read that subsumes the latter three for a single region), with `formula_patterns` as the
+token-cheap "what's the formula logic across this wide grid" read; the change path is the writers;
 the raw escape hatch is presented last.
 
 | Core fn | What it does | Kind |
@@ -233,6 +234,7 @@ the raw escape hatch is presented last.
 | `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`. No grid data. | read |
 | `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
 | `describe` | The unified "understand a region" read: ONE `spreadsheets.get(includeGridData=True)` over a tight union mask returns, per requested range, the cells (reusing `inspect`'s flatten), the sheet's merges, the conditional-format rules **intersecting** that range (range-scoped CF, via `addressing.gridranges_intersect`), its tables / banding / protected ranges (reusing the `structure` serializers), and a validation summary. Multi-range and multi-sheet; collapses 3-4 reads into one. No cache. | read |
+| `formula_patterns` | Collapse a region's REPEATED formulas to the distinct templates per column: reads only formulas (column-major, no computed bloat), dedupes each column to its templates with relative row refs normalized to `{r}` / `{r±k}`, the row span(s) each covers, and (by default) one sample computed value. A column that does not reduce cleanly is emitted VERBATIM with `reduced=false`; `read_values(render="formula")` stays the lossless ground truth. Lossy-but-honest, token-cheap on a wide grid. | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). `diff_only` sparsifies the `render="all"` `computed` matrix against `values` (drops static-cell duplication); `max_cells` fails fast with `result_too_large` instead of blowing the caller's token cap. | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
 | `write_values` | Write/update one or more ranges; `USER_ENTERED` default; multi-range in one call. | write |
@@ -539,6 +541,20 @@ take `output_format` (the rectangular-values `read_values` offers every format, 
 reads offer only `text`/`json`/`jsonl`). For a data format the MCP tool returns the rendered string
 wrapped in a `ToolResult` (which keeps the tool's structured `output_schema` while emitting a plain
 string body — FastMCP refuses a bare string as `structured_content` when a schema is set).
+
+#### Address-keyed rendering for sparse data (SPEC §4.4)
+
+A dense numeric grid reads best as a **rectangle + range anchor** (csv/json — one row per line,
+position carries meaning). **Sparse** data — a formula read, conditional-format/note reads, the
+`diff_only` computed holes — reads best as an **inverted index**: one `"<A1>: <body>"` line per
+non-empty cell, with empty cells dropped entirely. `core/format.py` owns this in pure core:
+`render_addressed(cells)` / `addressed_records(cells)` turn a per-cell list into address-keyed
+lines / records, and `cells_from_value_grid(range_a1, values)` + `render_sparse_values(result)`
+expand a `read_values` rectangle to absolute A1 (anchored at the requested range's top-left, parsed
+from the A1 string — no `sheetId` resolution) so a formula read renders address-keyed. The CLI text
+renderer uses `render_sparse_values` for `read_values --render formula`; `formula_patterns` is
+itself an address-keyed read (per-column templates keyed by `col` + row span). Dense reads keep the
+rectangle — the choice is per shape, not global.
 
 ### File-output escape valve (`out_path`, MCP-only) (`paths`)
 

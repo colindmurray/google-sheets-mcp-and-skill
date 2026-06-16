@@ -40,6 +40,7 @@ EXPECTED = {
     "sheets_overview": (True, None, "read"),
     "sheets_inspect": (True, None, "read"),
     "sheets_describe": (True, None, "read"),
+    "sheets_formula_patterns": (True, None, "read"),
     "sheets_read_values": (True, None, "read"),
     "sheets_read_conditional_formats": (True, None, "read"),
     "sheets_read_many": (True, None, "read"),
@@ -71,7 +72,7 @@ def _tools() -> dict:
 def test_all_tools_register():
     tools = _tools()
     assert set(tools) == set(EXPECTED)
-    assert len(tools) == 21
+    assert len(tools) == 22
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -102,7 +103,14 @@ def test_context_excluded_from_input_schema(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["sheets_overview", "sheets_inspect", "sheets_describe", "sheets_read_values"]
+    "name",
+    [
+        "sheets_overview",
+        "sheets_inspect",
+        "sheets_describe",
+        "sheets_formula_patterns",
+        "sheets_read_values",
+    ],
 )
 def test_read_tools_have_output_schema(name):
     assert _tools()[name].output_schema is not None
@@ -124,7 +132,13 @@ def test_read_values_exposes_diff_only_and_max_cells_optional():
 
 @pytest.mark.parametrize(
     "name",
-    ["sheets_read_values", "sheets_inspect", "sheets_describe", "sheets_read_many"],
+    [
+        "sheets_read_values",
+        "sheets_inspect",
+        "sheets_describe",
+        "sheets_formula_patterns",
+        "sheets_read_many",
+    ],
 )
 def test_output_format_exposed_default_text(name):
     # The shared output-format knob is exposed on every read tool and defaults to text.
@@ -143,7 +157,8 @@ def test_read_values_output_format_offers_all_data_formats():
 
 
 @pytest.mark.parametrize(
-    "name", ["sheets_inspect", "sheets_describe", "sheets_read_many"]
+    "name",
+    ["sheets_inspect", "sheets_describe", "sheets_formula_patterns", "sheets_read_many"],
 )
 def test_structured_reads_restrict_to_text_json_jsonl(name):
     # Structured reads (no rectangular grid) advertise only text/json/jsonl — csv/tsv are absent.
