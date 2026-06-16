@@ -21,7 +21,7 @@ from .dimensions import dimensions
 from .export import export
 from .formatting import format
 from .multiread import read_many
-from .reads import inspect, overview, read_conditional_formats
+from .reads import describe, inspect, overview, read_conditional_formats
 from .rules import set_conditional_format, set_validation
 from .structure import manage_sheets, metadata, structure
 from .values import append_rows, clear, read_values, write_values
@@ -29,6 +29,7 @@ from .values import append_rows, clear, read_values, write_values
 __all__ = [
     "overview",
     "inspect",
+    "describe",
     "read_values",
     "read_conditional_formats",
     "write_values",

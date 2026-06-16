@@ -39,6 +39,7 @@ from gsheets.core.errors import SheetsError
 EXPECTED = {
     "sheets_overview": (True, None, "read"),
     "sheets_inspect": (True, None, "read"),
+    "sheets_describe": (True, None, "read"),
     "sheets_read_values": (True, None, "read"),
     "sheets_read_conditional_formats": (True, None, "read"),
     "sheets_read_many": (True, None, "read"),
@@ -70,7 +71,7 @@ def _tools() -> dict:
 def test_all_tools_register():
     tools = _tools()
     assert set(tools) == set(EXPECTED)
-    assert len(tools) == 20
+    assert len(tools) == 21
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -100,7 +101,9 @@ def test_context_excluded_from_input_schema(name):
         assert "spreadsheet_id" in tool.parameters.get("required", [])
 
 
-@pytest.mark.parametrize("name", ["sheets_overview", "sheets_inspect", "sheets_read_values"])
+@pytest.mark.parametrize(
+    "name", ["sheets_overview", "sheets_inspect", "sheets_describe", "sheets_read_values"]
+)
 def test_read_tools_have_output_schema(name):
     assert _tools()[name].output_schema is not None
 
@@ -119,7 +122,10 @@ def test_read_values_exposes_diff_only_and_max_cells_optional():
 # ----------------------------------------------------------- SPEC §1.3 output_format on reads
 
 
-@pytest.mark.parametrize("name", ["sheets_read_values", "sheets_inspect", "sheets_read_many"])
+@pytest.mark.parametrize(
+    "name",
+    ["sheets_read_values", "sheets_inspect", "sheets_describe", "sheets_read_many"],
+)
 def test_output_format_exposed_default_text(name):
     # The shared output-format knob is exposed on every read tool and defaults to text.
     props = _tools()[name].parameters.get("properties", {})
@@ -136,7 +142,9 @@ def test_read_values_output_format_offers_all_data_formats():
     assert set(enum) == {"text", "json", "jsonl", "csv", "tsv"}
 
 
-@pytest.mark.parametrize("name", ["sheets_inspect", "sheets_read_many"])
+@pytest.mark.parametrize(
+    "name", ["sheets_inspect", "sheets_describe", "sheets_read_many"]
+)
 def test_structured_reads_restrict_to_text_json_jsonl(name):
     # Structured reads (no rectangular grid) advertise only text/json/jsonl — csv/tsv are absent.
     prop = _tools()[name].parameters["properties"]["output_format"]

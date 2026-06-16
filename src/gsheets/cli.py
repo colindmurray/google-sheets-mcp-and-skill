@@ -175,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_overview(sub)
     _add_inspect(sub)
+    _add_describe(sub)
     _add_read_values(sub)
     _add_read_conditional_formats(sub)
     _add_write_values(sub)
@@ -261,6 +262,24 @@ def _add_inspect(sub) -> None:
         help="include pivot-table definitions on anchor cells",
     )
     p.set_defaults(func=_cmd_inspect, needs_services=True)
+
+
+def _add_describe(sub) -> None:
+    """NEW v0.3 tool (SPEC §3): the "understand a region" verb — one-call merged region view."""
+    p = sub.add_parser(
+        "describe",
+        help="one-call merged region view: cells + structure + range-scoped CF, per range",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument("ranges", nargs="+", help="one or more A1 ranges (multi-sheet allowed)")
+    p.add_argument(
+        "--max-cells",
+        type=int,
+        default=None,
+        help="fail with result_too_large if the regions exceed this many cells "
+        "(default: unlimited)",
+    )
+    p.set_defaults(func=_cmd_describe, needs_services=True)
 
 
 def _add_read_values(sub) -> None:
@@ -688,6 +707,15 @@ def _cmd_inspect(services, args) -> dict:
     )
 
 
+def _cmd_describe(services, args) -> dict:
+    return core.describe(
+        services,
+        args.spreadsheet_id,
+        args.ranges,
+        max_cells=args.max_cells,
+    )
+
+
 def _cmd_read_values(services, args) -> dict:
     return core.read_values(
         services,
@@ -978,6 +1006,10 @@ def _render_text(result: dict) -> str:
             lines.append(f"  named: {nr.get('name')} -> {nr.get('range')}")
         return "\n".join(lines)
 
+    # describe (SPEC §3): the one-call merged region view. ``regions`` is the distinctive key.
+    if "regions" in result and isinstance(result.get("regions"), list):
+        return _render_describe(result)
+
     # comments (DESIGN §X.5): a top-level Drive-comments list. Each entry carries a terse
     # ``line`` from serialize_comment; fall back to a constructed line if absent.
     if "comments" in result and "sheets" not in result and "cells" not in result:
@@ -1155,6 +1187,41 @@ def _inspect_rich_parts(cell: dict) -> list[str]:
     if pivot:
         parts.append(pivot.get("line") or f"pivot <- {pivot.get('source', '?')}")
     return parts
+
+
+def _render_describe(result: dict) -> str:
+    """Render a ``describe`` region view (SPEC §3): one block per requested range.
+
+    Each region leads with its A1 range, then the per-cell lines (reusing the inspect cell
+    renderer), then the structural facets that intersect/scope it — merges, the range-scoped
+    conditional-format rules (with their priority index), tables/banding/protected ranges (each
+    serializer precomputes a terse ``line``), and a one-line validation summary.
+    """
+    regions = result.get("regions", [])
+    if not regions:
+        return "(no regions)"
+    lines: list[str] = []
+    for region in regions:
+        lines.append(f"# {region.get('range')}")
+        for m in region.get("merges", []):
+            lines.append(f"  merge: {m}")
+        for cell in region.get("cells", []):
+            lines.append(_render_inspect_cell(cell))
+        for r in region.get("conditionalFormats", []):
+            lines.append(f"  CF [{r.get('index')}]: {r.get('line')}")
+        for t in region.get("tables", []):
+            lines.append(f"  {t.get('line')}")
+        for b in region.get("bandedRanges", []):
+            lines.append(f"  {b.get('line')}")
+        for pr in region.get("protectedRanges", []):
+            lines.append(
+                f"  protected: {pr.get('range')} ({pr.get('description') or 'no desc'})"
+            )
+        vs = region.get("validationSummary") or {}
+        if vs.get("cells"):
+            rules = ", ".join(vs.get("rules", []))
+            lines.append(f"  validation: {vs['cells']} cell(s) [{rules}]")
+    return "\n".join(lines)
 
 
 def _render_read_many(result: dict) -> str:

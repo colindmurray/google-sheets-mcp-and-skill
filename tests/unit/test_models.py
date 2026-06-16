@@ -114,6 +114,35 @@ def test_inspect_compact_runs():
     assert "1 runs" in m.terse and "config" in m.terse
 
 
+def test_describe_result_mirrors_core_dict_and_round_trips():
+    # The DescribeResult mirror validates a describe core dict and (with null pruning) reproduces
+    # it field-for-field — the model is a mechanical mirror, no reshaping (SPEC §3.5 round-trip).
+    import json
+    from pathlib import Path
+
+    golden = json.loads(
+        (Path(__file__).parent / "golden" / "describe_region.json").read_text()
+    )
+    core_dict = golden["expected"]
+    m = models.DescribeResult.model_validate(core_dict)
+    # The two regions mirror through, typed.
+    assert [r.range for r in m.regions] == ["Cliff!A1:C2", "Plan!A1"]
+    region0 = m.regions[0]
+    assert region0.cells[0].formula == "=SUM(B2:C2)"
+    assert region0.cells[0].effectiveFormat.bold is True
+    assert region0.merges == ["Cliff!B1:C1"]
+    # range-scoped CF: only the intersecting rule survives, keeping its index.
+    assert len(region0.conditionalFormats) == 1
+    assert region0.conditionalFormats[0].index == 0
+    assert region0.protectedRanges[0].protectedRangeId == 5
+    assert region0.validationSummary.cells == 0
+    # Null-pruned dump reproduces the core dict exactly (mechanical mirror).
+    assert m.model_dump() == core_dict
+    # Terse render leads with the range + a compact tally.
+    assert "[Cliff!A1:C2]" in m.terse
+    assert "CF 0:" in m.terse
+
+
 def test_read_values_all_render_has_computed():
     data = {
         "ok": True,
@@ -688,6 +717,8 @@ def test_to_model_and_registry_cover_every_core_fn():
     expected = {
         "overview",
         "inspect",
+        # v0.3 unified region read (SPEC §3)
+        "describe",
         "read_values",
         "read_conditional_formats",
         "write_values",

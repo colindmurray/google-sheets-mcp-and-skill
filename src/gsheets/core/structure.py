@@ -395,20 +395,7 @@ def _serialize_sheet_structure(
         except ValueError:
             pass
 
-    protected: list[dict] = []
-    for pr in entry.get("protectedRanges", []) or []:
-        p_entry: dict = {"protectedRangeId": pr.get("protectedRangeId")}
-        gr = pr.get("range")
-        if isinstance(gr, dict):
-            p_entry["range"] = _safe_gridrange_to_a1(services, spreadsheet_id, gr)
-        if pr.get("description") is not None:
-            p_entry["description"] = pr.get("description")
-        if pr.get("editors") is not None:
-            users = (pr.get("editors") or {}).get("users")
-            p_entry["editors"] = list(users) if users else []
-        p_entry["warningOnly"] = bool(pr.get("warningOnly", False))
-        protected.append(p_entry)
-    out["protectedRanges"] = protected
+    out["protectedRanges"] = _serialize_protected(services, spreadsheet_id, entry)
 
     groups: list[dict] = []
     for dim, key in (("ROWS", "rowGroups"), ("COLUMNS", "columnGroups")):
@@ -441,11 +428,7 @@ def _attach_sheet_features(
     ``_serialize_sheet_structure``'s own range handling (DESIGN §X.0/§X.3).
     """
     # Tables: serialize_table resolves its own range via services.
-    out["tables"] = [
-        _tables.serialize_table(t, services, spreadsheet_id)
-        for t in (entry.get("tables", []) or [])
-        if isinstance(t, dict)
-    ]
+    out["tables"] = _serialize_tables(services, spreadsheet_id, entry)
 
     # Basic filter: one per sheet, or null. Resolve its GridRange -> A1 first.
     basic_filter = entry.get("basicFilter")
@@ -467,13 +450,7 @@ def _attach_sheet_features(
     ]
 
     # Banded ranges: array per sheet; each carries its own range.
-    out["bandedRanges"] = [
-        _banding.serialize_banding(
-            br, _feature_range_a1(services, spreadsheet_id, br.get("range"))
-        )
-        for br in (entry.get("bandedRanges", []) or [])
-        if isinstance(br, dict)
-    ]
+    out["bandedRanges"] = _serialize_banding(services, spreadsheet_id, entry)
 
     # Slicers: array per sheet; serialize_slicer resolves its own ranges via services.
     out["slicers"] = [
@@ -481,6 +458,66 @@ def _attach_sheet_features(
         for sl in (entry.get("slicers", []) or [])
         if isinstance(sl, dict)
     ]
+
+
+def _serialize_tables(
+    services: SheetsServices, spreadsheet_id: str, entry: dict
+) -> list[dict]:
+    """Serialize a pre-fetched sheet's ``tables`` array (SPEC §3.3 fetch/serialize split).
+
+    Callable on an already-fetched per-sheet ``entry`` so ``describe`` reuses the SAME
+    ``tables.serialize_table`` flatten (which resolves its own ``range`` ``GridRange`` -> A1 via
+    ``services``), instead of re-implementing it.
+    """
+    return [
+        _tables.serialize_table(t, services, spreadsheet_id)
+        for t in (entry.get("tables", []) or [])
+        if isinstance(t, dict)
+    ]
+
+
+def _serialize_banding(
+    services: SheetsServices, spreadsheet_id: str, entry: dict
+) -> list[dict]:
+    """Serialize a pre-fetched sheet's ``bandedRanges`` array (SPEC §3.3 fetch/serialize split).
+
+    Callable on an already-fetched per-sheet ``entry`` so ``describe`` reuses the SAME
+    ``banding.serialize_banding`` flatten (each banded range's ``GridRange`` resolved to A1 first),
+    instead of re-implementing it.
+    """
+    return [
+        _banding.serialize_banding(
+            br, _feature_range_a1(services, spreadsheet_id, br.get("range"))
+        )
+        for br in (entry.get("bandedRanges", []) or [])
+        if isinstance(br, dict)
+    ]
+
+
+def _serialize_protected(
+    services: SheetsServices, spreadsheet_id: str, entry: dict
+) -> list[dict]:
+    """Serialize a pre-fetched sheet's ``protectedRanges`` array (SPEC §3.3 fetch/serialize split).
+
+    Callable on an already-fetched per-sheet ``entry`` so both ``structure(action="read")`` and
+    ``describe`` produce the IDENTICAL protected-range shape from one place: each entry carries
+    ``protectedRangeId``, the ``range`` (``GridRange`` -> A1), an optional ``description``, the
+    ``editors`` user list (when present), and a ``warningOnly`` flag.
+    """
+    protected: list[dict] = []
+    for pr in entry.get("protectedRanges", []) or []:
+        p_entry: dict = {"protectedRangeId": pr.get("protectedRangeId")}
+        gr = pr.get("range")
+        if isinstance(gr, dict):
+            p_entry["range"] = _safe_gridrange_to_a1(services, spreadsheet_id, gr)
+        if pr.get("description") is not None:
+            p_entry["description"] = pr.get("description")
+        if pr.get("editors") is not None:
+            users = (pr.get("editors") or {}).get("users")
+            p_entry["editors"] = list(users) if users else []
+        p_entry["warningOnly"] = bool(pr.get("warningOnly", False))
+        protected.append(p_entry)
+    return protected
 
 
 def _feature_range_a1(

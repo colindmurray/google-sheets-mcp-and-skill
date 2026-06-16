@@ -1,0 +1,255 @@
+{
+  "response": {
+    "sheets": [
+      {
+        "properties": {
+          "sheetId": 0,
+          "title": "Cliff"
+        },
+        "data": [
+          {
+            "startRow": 0,
+            "startColumn": 0,
+            "rowData": [
+              {
+                "values": [
+                  {
+                    "userEnteredValue": {
+                      "formulaValue": "=SUM(B2:C2)"
+                    },
+                    "formattedValue": "30",
+                    "effectiveFormat": {
+                      "textFormat": {
+                        "bold": true
+                      }
+                    }
+                  },
+                  {
+                    "formattedValue": "10"
+                  },
+                  {
+                    "formattedValue": "20"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "merges": [
+          {
+            "sheetId": 0,
+            "startRowIndex": 0,
+            "endRowIndex": 1,
+            "startColumnIndex": 1,
+            "endColumnIndex": 3
+          }
+        ],
+        "conditionalFormats": [
+          {
+            "ranges": [
+              {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 100,
+                "startColumnIndex": 0,
+                "endColumnIndex": 1
+              }
+            ],
+            "booleanRule": {
+              "condition": {
+                "type": "NUMBER_GREATER",
+                "values": [
+                  {
+                    "userEnteredValue": "0"
+                  }
+                ]
+              },
+              "format": {
+                "backgroundColorStyle": {
+                  "rgbColor": {
+                    "red": 0.78431374,
+                    "green": 0.9019608,
+                    "blue": 0.7882353
+                  }
+                }
+              }
+            }
+          },
+          {
+            "ranges": [
+              {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 100,
+                "startColumnIndex": 25,
+                "endColumnIndex": 26
+              }
+            ],
+            "booleanRule": {
+              "condition": {
+                "type": "TEXT_CONTAINS",
+                "values": [
+                  {
+                    "userEnteredValue": "x"
+                  }
+                ]
+              },
+              "format": {
+                "backgroundColorStyle": {
+                  "rgbColor": {
+                    "red": 1.0,
+                    "green": 0.8039216,
+                    "blue": 0.8235294
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "tables": [],
+        "bandedRanges": [],
+        "protectedRanges": [
+          {
+            "protectedRangeId": 5,
+            "range": {
+              "sheetId": 0,
+              "startRowIndex": 0,
+              "endRowIndex": 1,
+              "startColumnIndex": 0,
+              "endColumnIndex": 3
+            },
+            "description": "header",
+            "warningOnly": false
+          }
+        ]
+      },
+      {
+        "properties": {
+          "sheetId": 7,
+          "title": "Plan"
+        },
+        "data": [
+          {
+            "startRow": 0,
+            "startColumn": 0,
+            "rowData": [
+              {
+                "values": [
+                  {
+                    "formattedValue": "ok"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "sheet_index": {
+    "sheets": [
+      {
+        "properties": {
+          "sheetId": 0,
+          "title": "Cliff",
+          "index": 0
+        }
+      },
+      {
+        "properties": {
+          "sheetId": 7,
+          "title": "Plan",
+          "index": 1
+        }
+      }
+    ]
+  },
+  "ranges": [
+    "Cliff!A1:C2",
+    "Plan!A1"
+  ],
+  "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+  "expected": {
+    "ok": true,
+    "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+    "regions": [
+      {
+        "range": "Cliff!A1:C2",
+        "sheet": "Cliff",
+        "cells": [
+          {
+            "a1": "A1",
+            "value": "30",
+            "formula": "=SUM(B2:C2)",
+            "effectiveFormat": {
+              "bold": true
+            }
+          },
+          {
+            "a1": "B1",
+            "value": "10"
+          },
+          {
+            "a1": "C1",
+            "value": "20"
+          }
+        ],
+        "merges": [
+          "Cliff!B1:C1"
+        ],
+        "conditionalFormats": [
+          {
+            "index": 0,
+            "line": "[Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9",
+            "ranges": [
+              "Cliff!A1:A100"
+            ],
+            "kind": "boolean",
+            "condition": {
+              "type": "NUMBER_GREATER",
+              "values": [
+                "0"
+              ]
+            },
+            "format": {
+              "bg": "#C8E6C9"
+            }
+          }
+        ],
+        "tables": [],
+        "bandedRanges": [],
+        "protectedRanges": [
+          {
+            "protectedRangeId": 5,
+            "range": "Cliff!A1:C1",
+            "description": "header",
+            "warningOnly": false
+          }
+        ],
+        "validationSummary": {
+          "cells": 0,
+          "rules": []
+        }
+      },
+      {
+        "range": "Plan!A1",
+        "sheet": "Plan",
+        "cells": [
+          {
+            "a1": "A1",
+            "value": "ok"
+          }
+        ],
+        "merges": [],
+        "conditionalFormats": [],
+        "tables": [],
+        "bandedRanges": [],
+        "protectedRanges": [],
+        "validationSummary": {
+          "cells": 0,
+          "rules": []
+        }
+      }
+    ]
+  }
+}

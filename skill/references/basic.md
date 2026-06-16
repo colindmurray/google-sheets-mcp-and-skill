@@ -25,7 +25,7 @@ is the authoritative, always-current flag source for any single command.
   | Result shape | Commands | Formats |
   |---|---|---|
   | Rectangular values | `read-values` | text, json, jsonl, csv, tsv |
-  | Structured/rich | `inspect`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl |
+  | Structured/rich | `inspect`, `describe`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl |
   | Small confirmations | every writer, `auth` | text, json |
 
   `csv`/`tsv` need a rectangular value read — asking for them on a structured result is a clean
@@ -35,7 +35,7 @@ is the authoritative, always-current flag source for any single command.
   `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
 - **MCP file-output (`out_path`).** The CLI pipes (`> out.csv`); the MCP tool's output goes into the
   agent's context, so for a big read pass `out_path` to `sheets_read_values` / `sheets_inspect` /
-  `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;
+  `sheets_describe` / `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;
   `text` resolves to `json`) and returns a small handle instead of the payload:
   `{ok, path, format, rows, cols, bytes, preview}` (`preview` = the first ~5 rows/records). The
   parent directory must already exist (it is never created), and credential/config paths are
@@ -57,9 +57,10 @@ is the authoritative, always-current flag source for any single command.
 
 ## Reading
 
-The ladder is `overview` (orient cheaply, no grid data) → `inspect` (rich per-cell read of one
-range) → `read-conditional-formats` (the dynamic-coloring rules a value read never shows). Reading
-formulas and `effectiveFormat`, not just values, is the point.
+The ladder is `overview` (orient cheaply, no grid data) → `describe` (one-call merged region view)
+→ `inspect` (rich per-cell read of one range) → `read-conditional-formats` (the dynamic-coloring
+rules a value read never shows). Reading formulas and `effectiveFormat`, not just values, is the
+point.
 
 ### overview
 
@@ -75,6 +76,41 @@ index, type, row/column counts, frozen rows/cols, tab color, and the **counts**
 spreadsheet `locale` / `timeZone` (e.g. `"en_US"` / `"America/New_York"`, omitted when unset).
 Counts are computed cheaply — overview never pulls full rule bodies, so it stays cheap on any size
 of sheet. Use it to decide which tab/range is worth a closer look.
+
+### describe
+
+The "understand a region" verb: ONE `spreadsheets.get` returns, **per requested range**, a merged
+view — the cells, the sheet's merges, the conditional-format rules that **intersect** that range,
+its native tables, banding, and protected ranges, plus a validation summary. It collapses what used
+to be `inspect` + `structure` + `read-conditional-formats` into a single call, so it is the default
+first move when you want to know what a region IS (not just its raw values).
+
+```sh
+gsheets --json describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50'
+gsheets describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50' 'Plan!A1:B20'   # multi-range, multi-sheet
+```
+
+| Flag | Effect |
+|---|---|
+| `RANGE...` (positional, ≥1) | One or more A1 ranges; multi-range AND multi-sheet in one call. |
+| `--max-cells N` | Fail with `result_too_large` if the regions span more than `N` cells (default: unlimited). describe pulls full per-cell grid data, so narrow the range for a big region. |
+
+Returns `{regions: [...]}`, one entry per requested range in request order:
+
+```jsonc
+{ "range": "Sheet1!A1:F50", "sheet": "Sheet1",
+  "cells": [ /* same flattened Cell shape inspect emits — value, formula, both formats, validation */ ],
+  "merges": ["Sheet1!B1:C1"],
+  "conditionalFormats": [ /* the read-conditional-formats line grammar, ONLY rules whose ranges
+                             intersect this region, each keeping its priority `index` */ ],
+  "tables": [ ... ], "bandedRanges": [ ... ], "protectedRanges": [ ... ],
+  "validationSummary": { "cells": 3, "rules": ["ONE_OF_LIST(Yes,No)"] } }
+```
+
+The conditional-format rules are scoped to the region automatically (range-scoped CF) — and each
+keeps the positional `index` you pass to `set-conditional-format` to edit it. Use `inspect` instead
+when you want one range's rich-text / pivot / compact-runs facets; use `read-conditional-formats`
+when you want every rule on a whole tab regardless of range.
 
 ### inspect
 

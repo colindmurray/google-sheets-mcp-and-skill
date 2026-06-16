@@ -1,6 +1,7 @@
 """Tests for the MCP-only ``out_path`` file-output escape valve (SPEC §2).
 
-The three big-read tools (``sheets_read_values`` / ``sheets_inspect`` / ``sheets_read_many``) gain
+The four big-read tools (``sheets_read_values`` / ``sheets_inspect`` / ``sheets_describe`` /
+``sheets_read_many``) gain
 an optional ``out_path``. When set, the adapter writes ``render(result, output_format)`` to that
 local file (utf-8) and returns a small HANDLE ``{ok, path, format, rows, cols, bytes, preview}``
 INSTEAD of the payload — so a large read costs a handful of tokens, not 400 KB of grid in context.
@@ -55,7 +56,7 @@ def _handle(tool_result: ToolResult) -> dict:
 
 
 @pytest.mark.parametrize(
-    "name", ["sheets_read_values", "sheets_inspect", "sheets_read_many"]
+    "name", ["sheets_read_values", "sheets_inspect", "sheets_describe", "sheets_read_many"]
 )
 def test_out_path_exposed_optional_default_null(name):
     props = _tools()[name].parameters.get("properties", {})
@@ -65,7 +66,7 @@ def test_out_path_exposed_optional_default_null(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["sheets_read_values", "sheets_inspect", "sheets_read_many"]
+    "name", ["sheets_read_values", "sheets_inspect", "sheets_describe", "sheets_read_many"]
 )
 def test_out_path_tools_stay_read_only(name):
     # D-ANNOT: the local write is a caller-named opt-in side effect; these tools modify no remote
@@ -75,7 +76,7 @@ def test_out_path_tools_stay_read_only(name):
 
 
 @pytest.mark.parametrize(
-    "name", ["sheets_read_values", "sheets_inspect", "sheets_read_many"]
+    "name", ["sheets_read_values", "sheets_inspect", "sheets_describe", "sheets_read_many"]
 )
 def test_out_path_documented_in_docstring(name):
     desc = _tools()[name].description or ""

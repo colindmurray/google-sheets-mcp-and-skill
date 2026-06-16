@@ -90,7 +90,7 @@ Helper modules with disjoint responsibilities back the function surface:
 |---|---|
 | `service` | `SheetsServices` — the frozen authed handle (sheets resource, optional drive resource, optional account email). |
 | `errors` | `SheetsError` + `classify_google_error()` — maps a Google `HttpError` to a coded, hinted error. |
-| `addressing` | A1 ↔ `GridRange` and sheet-name → `sheetId` (per-call cached). |
+| `addressing` | A1 ↔ `GridRange` and sheet-name → `sheetId` (per-call cached); `gridranges_intersect()` — the geometric overlap test `describe` uses to scope conditional-format rules to a requested range. |
 | `colors` | hex ↔ `ColorStyle` (`rgbColor` / `themeColor`); reads flatten to hex. |
 | `fieldsmask` | `build_fields_mask(payload)` — the minimal `fields` mask covering exactly the keys present. |
 | `flatten` | `flatten_cell_format()` — Google's nested `CellFormat` → flat shape. |
@@ -222,15 +222,17 @@ Two write-side subtleties worth knowing:
 
 ## The function surface
 
-Twenty core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
+Twenty-one core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
 auth-only `auth` subcommand that has no core function). The understanding path is
-`overview → inspect → read_conditional_formats`; the change path is the writers; the raw escape
-hatch is presented last.
+`overview → describe → inspect → read_conditional_formats` (`describe` is the unified one-call
+region read that subsumes the latter three for a single region); the change path is the writers;
+the raw escape hatch is presented last.
 
 | Core fn | What it does | Kind |
 |---|---|---|
 | `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`. No grid data. | read |
 | `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
+| `describe` | The unified "understand a region" read: ONE `spreadsheets.get(includeGridData=True)` over a tight union mask returns, per requested range, the cells (reusing `inspect`'s flatten), the sheet's merges, the conditional-format rules **intersecting** that range (range-scoped CF, via `addressing.gridranges_intersect`), its tables / banding / protected ranges (reusing the `structure` serializers), and a validation summary. Multi-range and multi-sheet; collapses 3-4 reads into one. No cache. | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). `diff_only` sparsifies the `render="all"` `computed` matrix against `values` (drops static-cell duplication); `max_cells` fails fast with `result_too_large` instead of blowing the caller's token cap. | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
 | `write_values` | Write/update one or more ranges; `USER_ENTERED` default; multi-range in one call. | write |

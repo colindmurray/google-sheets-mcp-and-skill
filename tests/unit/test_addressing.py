@@ -543,6 +543,61 @@ class TestErrorClassification:
 
 
 # --------------------------------------------------------------------------------------
+# gridranges_intersect — used by ``describe`` to filter CF rules to a requested range (SPEC §3.3).
+# --------------------------------------------------------------------------------------
+
+
+from gsheets.core.addressing import gridranges_intersect  # noqa: E402
+
+
+def _gr(sheet_id, r0=None, r1=None, c0=None, c1=None):
+    """Build a GridRange dict, omitting unbounded (None) indices (the open-range convention)."""
+    gr = {"sheetId": sheet_id}
+    if r0 is not None:
+        gr["startRowIndex"] = r0
+    if r1 is not None:
+        gr["endRowIndex"] = r1
+    if c0 is not None:
+        gr["startColumnIndex"] = c0
+    if c1 is not None:
+        gr["endColumnIndex"] = c1
+    return gr
+
+
+class TestGridRangesIntersect:
+    def test_different_sheet_never_intersects(self):
+        assert not gridranges_intersect(_gr(0, 0, 10, 0, 5), _gr(1, 0, 10, 0, 5))
+
+    def test_overlapping_bounded_rectangles_intersect(self):
+        # [rows 0:10, cols 0:5) vs [rows 5:20, cols 2:8): overlap at rows 5:10, cols 2:5.
+        assert gridranges_intersect(_gr(0, 0, 10, 0, 5), _gr(0, 5, 20, 2, 8))
+
+    def test_row_disjoint_does_not_intersect(self):
+        # Same cols, but rows 0:10 vs 10:20 are half-open adjacent (no shared row).
+        assert not gridranges_intersect(_gr(0, 0, 10, 0, 5), _gr(0, 10, 20, 0, 5))
+
+    def test_col_disjoint_does_not_intersect(self):
+        assert not gridranges_intersect(_gr(0, 0, 10, 0, 5), _gr(0, 0, 10, 5, 8))
+
+    def test_unbounded_rows_cover_any_row_band(self):
+        # A whole-column rule (no row indices) intersects any row band on the same sheet/cols.
+        whole_col = _gr(0, c0=0, c1=1)  # column A, all rows
+        assert gridranges_intersect(whole_col, _gr(0, 100, 200, 0, 1))
+
+    def test_unbounded_cols_cover_any_col_band(self):
+        whole_row = _gr(0, r0=4, r1=5)  # row 5, all cols
+        assert gridranges_intersect(whole_row, _gr(0, 4, 5, 50, 60))
+
+    def test_whole_sheet_intersects_everything_on_sheet(self):
+        whole_sheet = _gr(0)
+        assert gridranges_intersect(whole_sheet, _gr(0, 100, 200, 44, 45))
+
+    def test_unbounded_cols_but_disjoint_rows_does_not_intersect(self):
+        whole_row = _gr(0, r0=0, r1=1)  # row 1, all cols
+        assert not gridranges_intersect(whole_row, _gr(0, 5, 10, 0, 1))
+
+
+# --------------------------------------------------------------------------------------
 # Boundary: addressing imports no transport/CLI/pydantic symbols.
 # --------------------------------------------------------------------------------------
 

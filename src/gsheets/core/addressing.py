@@ -201,6 +201,56 @@ def gridrange_to_a1(services: SheetsServices, spreadsheet_id: str, gr: dict) -> 
     return f"{prefix}!{a1}"
 
 
+def gridranges_intersect(a: dict, b: dict) -> bool:
+    """True iff two ``GridRange`` dicts overlap (same sheet + overlapping row & col spans).
+
+    The geometric test ``describe`` uses to keep only the conditional-format rules whose ranges
+    actually touch a requested region (SPEC §3.3 "rules intersecting this range only"). Both
+    inputs are 0-based, half-open ``GridRange`` dicts. A range that omits an index is **unbounded**
+    in that direction (a whole-column range omits the row indices, a whole-row range omits the
+    column indices, a whole-sheet range omits all four), so an omitted bound is treated as
+    covering the entire axis — an unbounded span always overlaps any bounded span on that axis.
+
+    Two ranges on **different sheets** never intersect. On the same sheet, they intersect iff
+    their row spans overlap AND their column spans overlap (half-open: ``[lo, hi)`` overlaps
+    ``[lo2, hi2)`` iff ``lo < hi2 and lo2 < hi``).
+
+    Args:
+        a: A ``GridRange`` dict (must carry ``sheetId``).
+        b: A ``GridRange`` dict (must carry ``sheetId``).
+
+    Returns:
+        ``True`` if the two ranges share at least one cell, else ``False``.
+    """
+    if a.get("sheetId") != b.get("sheetId"):
+        return False
+    return _axis_overlaps(
+        a.get("startRowIndex"), a.get("endRowIndex"),
+        b.get("startRowIndex"), b.get("endRowIndex"),
+    ) and _axis_overlaps(
+        a.get("startColumnIndex"), a.get("endColumnIndex"),
+        b.get("startColumnIndex"), b.get("endColumnIndex"),
+    )
+
+
+def _axis_overlaps(
+    a_lo: int | None, a_hi: int | None, b_lo: int | None, b_hi: int | None
+) -> bool:
+    """True iff two half-open ``[lo, hi)`` spans overlap; ``None`` is unbounded (covers the axis).
+
+    A ``None`` ``lo`` means "from the start"; a ``None`` ``hi`` means "to the end". Either span
+    being fully unbounded (both ``None``) overlaps anything. The half-open overlap test is
+    ``a_lo < b_hi and b_lo < a_hi`` with the unbounded ends substituted so the comparison always
+    holds in the open direction.
+    """
+    # Substitute the unbounded ends so the open direction always compares true.
+    a_lo_v = a_lo if a_lo is not None else -1 << 62
+    a_hi_v = a_hi if a_hi is not None else 1 << 62
+    b_lo_v = b_lo if b_lo is not None else -1 << 62
+    b_hi_v = b_hi if b_hi is not None else 1 << 62
+    return a_lo_v < b_hi_v and b_lo_v < a_hi_v
+
+
 # --------------------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------------------

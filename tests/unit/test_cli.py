@@ -63,6 +63,11 @@ def patched(monkeypatch):
     )
     monkeypatch.setattr(
         cli.core,
+        "describe",
+        _make("describe", {"ok": True, "spreadsheetId": "X", "regions": []}),
+    )
+    monkeypatch.setattr(
+        cli.core,
         "write_values",
         _make("write_values", {"ok": True, "spreadsheetId": "X", "updatedRanges": ["S!A1"], "updatedCells": 1}),
     )
@@ -289,6 +294,55 @@ def test_inspect_include_flags_map_one_to_one(patched):
     assert kw["include_formulas"] is False
     assert kw["include_validation"] is False
     assert kw["include_effective_format"] is True  # untouched default
+
+
+def test_describe_maps_ranges_and_max_cells(patched):
+    _run(["describe", "ID", "Cliff!A1:C2", "Plan!A1", "--max-cells", "500"])
+    assert patched["name"] == "describe"
+    # ranges is the first positional core arg after spreadsheet_id; max_cells is a kwarg.
+    assert patched["args"][0] == ["Cliff!A1:C2", "Plan!A1"]
+    assert patched["kwargs"]["max_cells"] == 500
+
+
+def test_describe_max_cells_defaults_unlimited(patched):
+    _run(["describe", "ID", "Cliff!A1:C2"])
+    assert patched["kwargs"]["max_cells"] is None
+
+
+def test_describe_text_render(patched, monkeypatch, capsys):
+    # The text renderer surfaces per-region cells, range-scoped CF (with index), and merges.
+    monkeypatch.setattr(
+        cli.core,
+        "describe",
+        lambda *a, **k: {
+            "ok": True,
+            "spreadsheetId": "X",
+            "regions": [
+                {
+                    "range": "Cliff!A1:C2",
+                    "sheet": "Cliff",
+                    "cells": [
+                        {"a1": "A1", "value": "30", "formula": "=SUM(B2:C2)"},
+                    ],
+                    "merges": ["Cliff!B1:C1"],
+                    "conditionalFormats": [
+                        {"index": 0, "line": "[Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9"}
+                    ],
+                    "tables": [],
+                    "bandedRanges": [],
+                    "protectedRanges": [],
+                    "validationSummary": {"cells": 0, "rules": []},
+                }
+            ],
+        },
+    )
+    rc = cli.main(["describe", "ID", "Cliff!A1:C2"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "# Cliff!A1:C2" in out
+    assert "=SUM(B2:C2)" in out
+    assert "CF [0]: [Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9" in out
+    assert "merge: Cliff!B1:C1" in out
 
 
 def test_write_values_single_range_form_builds_data(patched):

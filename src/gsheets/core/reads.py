@@ -14,7 +14,7 @@ from __future__ import annotations
 from googleapiclient.errors import HttpError
 
 from . import condformat
-from .addressing import gridrange_to_a1, parse_a1
+from .addressing import a1_to_gridrange, gridrange_to_a1, parse_a1
 from .errors import SheetsError, classify_google_error
 from .flatten import flatten_cell_format
 from .pivot import serialize_pivot
@@ -241,6 +241,78 @@ def inspect(
 
     data_blocks = sheet_obj.get("data") or []
     block = data_blocks[0] if data_blocks else {}
+
+    cell_view = _serialize_cells(
+        block,
+        compact=compact,
+        include_effective_format=include_effective_format,
+        include_user_entered_format=include_user_entered_format,
+        include_formulas=include_formulas,
+        include_validation=include_validation,
+        include_rich_text=include_rich_text,
+        include_pivot=include_pivot,
+        services=services,
+        spreadsheet_id=spreadsheet_id,
+    )
+
+    merges = [
+        gridrange_to_a1(services, spreadsheet_id, m)
+        for m in (sheet_obj.get("merges") or [])
+    ]
+
+    out: dict = {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "sheet": sheet_title,
+        "range": range,
+        "rows": cell_view["rows"],
+        "cols": cell_view["cols"],
+        "merges": merges,
+        "compact": compact,
+    }
+
+    if compact:
+        out["runs"] = cell_view["runs"]
+    else:
+        out["cells"] = cell_view["cells"]
+
+    return out
+
+
+def _serialize_cells(
+    block: dict,
+    *,
+    compact: bool,
+    include_effective_format: bool,
+    include_user_entered_format: bool,
+    include_formulas: bool,
+    include_validation: bool,
+    include_rich_text: bool = False,
+    include_pivot: bool = False,
+    services: SheetsServices | None = None,
+    spreadsheet_id: str | None = None,
+) -> dict:
+    """Serialize a PRE-FETCHED grid data block into the cells/runs view (SPEC §3.3 fetch/serialize).
+
+    The whole serialize half of ``inspect``, callable on an already-fetched
+    ``GridData`` block (``{startRow, startColumn, rowData}``) — so ``describe`` can reuse the exact
+    flatten/colors/compact logic on a slice of its single ``spreadsheets.get`` response instead of
+    re-implementing it (DESIGN "no duplicated logic"). Builds the padded per-cell grid, then emits
+    EITHER ``cells`` (row-major padded rectangle) or ``runs`` (rectangular RLE) per ``compact``.
+
+    Args:
+        block: A Google ``GridData`` block (``startRow``/``startColumn``/``rowData``); an empty
+            dict yields an empty (0x0) view.
+        compact: Collapse identical cells into rectangular runs (else emit a padded cell list).
+        include_*: The same per-cell include flags ``inspect`` exposes (they select which
+            subfields each cell carries, matching the fetched mask).
+        services / spreadsheet_id: Threaded only for the pivot serializer's source-range
+            resolution (used solely when ``include_pivot`` is on).
+
+    Returns:
+        ``{"rows": int, "cols": int, "cells": [...]}`` (non-compact) or
+        ``{"rows": int, "cols": int, "runs": [...]}`` (compact).
+    """
     start_row = block.get("startRow", 0) or 0
     start_col = block.get("startColumn", 0) or 0
     row_data = block.get("rowData") or []
@@ -264,27 +336,11 @@ def inspect(
     n_cols = max((len(r) for r in grid), default=0)
     grid = _pad_grid(grid, n_cols)
 
-    merges = [
-        gridrange_to_a1(services, spreadsheet_id, m)
-        for m in (sheet_obj.get("merges") or [])
-    ]
-
-    out: dict = {
-        "ok": True,
-        "spreadsheetId": spreadsheet_id,
-        "sheet": sheet_title,
-        "range": range,
-        "rows": n_rows,
-        "cols": n_cols,
-        "merges": merges,
-        "compact": compact,
-    }
-
+    out: dict = {"rows": n_rows, "cols": n_cols}
     if compact:
         out["runs"] = _build_runs(grid, start_row=start_row, start_col=start_col)
     else:
         out["cells"] = _flatten_grid_to_cells(grid, start_row=start_row, start_col=start_col)
-
     return out
 
 
@@ -801,19 +857,308 @@ def read_conditional_formats(
         if sheet is not None and title != sheet:
             continue
 
-        rules_out: list[dict] = []
-        for index, raw_rule in enumerate(sheet_obj.get("conditionalFormats") or []):
-            rules_out.append(
-                _serialize_cf_rule(
-                    services, spreadsheet_id, raw_rule or {}, index
-                )
-            )
+        rules_out = _serialize_cf_rules(
+            services, spreadsheet_id, sheet_obj.get("conditionalFormats") or []
+        )
 
         sheets_out.append(
             {"sheet": title, "sheetId": props.get("sheetId"), "rules": rules_out}
         )
 
     return {"ok": True, "spreadsheetId": spreadsheet_id, "sheets": sheets_out}
+
+
+def _serialize_cf_rules(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    raw_rules: list,
+    *,
+    intersecting: dict | None = None,
+) -> list[dict]:
+    """Serialize a sheet's ``conditionalFormats`` array to the read-side rule list (SPEC §3.3).
+
+    The list-level counterpart of :func:`_serialize_cf_rule`, callable on a pre-fetched per-sheet
+    ``conditionalFormats`` array — so ``describe`` reuses the SAME line-grammar serializer instead
+    of re-implementing it. Each rule keeps its ORIGINAL positional ``index`` (priority — 0 highest)
+    regardless of any filtering, so a rule surfaced by ``describe`` still addresses correctly via
+    ``set_conditional_format``.
+
+    When ``intersecting`` (a ``GridRange``) is supplied, only rules whose ranges actually overlap it
+    are emitted (via ``addressing.gridranges_intersect``) — the SPEC §3.3 "rules intersecting this
+    range only" filter that delivers range-scoped CF for free. ``None`` (the default) emits every
+    rule (the standalone ``read_conditional_formats`` behavior, unchanged).
+
+    Args:
+        services: The authed handle (resolves each rule's ``GridRange`` -> A1).
+        spreadsheet_id: Target spreadsheet id.
+        raw_rules: The per-sheet ``conditionalFormats`` array (Google rule dicts).
+        intersecting: A ``GridRange`` to filter against; ``None`` keeps every rule.
+
+    Returns:
+        A list of serialized rule dicts (``index``/``line``/``ranges``/``kind``/…), each carrying
+        its original array index.
+    """
+    out: list[dict] = []
+    for index, raw_rule in enumerate(raw_rules):
+        raw_rule = raw_rule or {}
+        if intersecting is not None and not _rule_intersects(raw_rule, intersecting):
+            continue
+        out.append(_serialize_cf_rule(services, spreadsheet_id, raw_rule, index))
+    return out
+
+
+def _rule_intersects(raw_rule: dict, target: dict) -> bool:
+    """True iff ANY of a Google CF rule's (GridRange) ranges overlaps ``target`` (SPEC §3.3).
+
+    The rule's ranges are still Google ``GridRange`` dicts at this point (serialization to A1
+    happens inside ``_serialize_cf_rule``), so the overlap test runs directly on them via
+    ``addressing.gridranges_intersect`` — no A1 round-trip needed for the filter.
+    """
+    from .addressing import gridranges_intersect
+
+    for gr in raw_rule.get("ranges") or []:
+        if isinstance(gr, dict) and gridranges_intersect(gr, target):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# describe — unified one-call region read (SPEC §3)
+# ---------------------------------------------------------------------------
+
+# The tight UNION mask: the per-cell facets ``inspect`` requests (full per-cell, since describe is
+# the "understand a region" verb) + the structural facets ``structure``/``read_conditional_formats``
+# request — merges, conditionalFormats (whole rule bodies), tables, bandedRanges, protectedRanges.
+# ONE get carries all of them. ``includeGridData`` is a get PARAMETER (set True separately), never a
+# field in this mask. The per-cell ``values(...)`` subfields mirror ``_inspect_fields`` at its full
+# (every-flag-on) form.
+_DESCRIBE_CELL_FIELDS = (
+    "effectiveValue,formattedValue,userEnteredValue,userEnteredFormat,"
+    "effectiveFormat,dataValidation,note"
+)
+_DESCRIBE_FIELDS = (
+    "sheets(properties(sheetId,title),"
+    f"data(rowData(values({_DESCRIBE_CELL_FIELDS})),startRow,startColumn),"
+    "merges,conditionalFormats,"
+    "tables,bandedRanges,"
+    "protectedRanges(protectedRangeId,range,description,editors,warningOnly))"
+)
+
+
+def describe(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    ranges: list[str],
+    *,
+    max_cells: int | None = None,
+) -> dict:
+    """One-call merged region view: cells + structure + CF for one or more ranges (SPEC §3).
+
+    Characterizing one region the old way cost 3-4 reads (``inspect`` + ``structure`` +
+    ``read_conditional_formats`` [+ ``read_values``]). ``describe`` issues ONE
+    ``spreadsheets.get(ranges=[...], includeGridData=True, fields=<tight union mask>)`` — multi-range
+    AND multi-sheet in a single request — then, per requested range, returns a merged view built by
+    reusing the EXISTING serializers (``_serialize_cells``, ``_serialize_cf_rules`` + the addressing
+    intersect filter, ``structure._serialize_{tables,banding,protected}``) on slices of that one
+    response. There is NO cache: the quota win is the single multi-range get, not stored state (a
+    stale read after a write is worse for an agent than a human).
+
+    Per requested range the result carries ``{range, sheet, cells, merges, conditionalFormats,
+    tables, bandedRanges, protectedRanges, validationSummary}``. ``conditionalFormats`` is filtered
+    to ONLY the rules whose ranges intersect that requested range (range-scoped CF for free),
+    each keeping its original priority ``index``. The structural facets (merges/tables/banding/
+    protected) are sheet-scoped — every region on a sheet sees that sheet's full structural set.
+
+    ``max_cells`` (like ``read_values``): when the total cells across all regions exceed it, raise
+    ``result_too_large`` rather than return a payload that only fails at the caller's token cap;
+    ``None`` (default) is unlimited.
+
+    Args:
+        services: The authed handle.
+        spreadsheet_id: Target spreadsheet id.
+        ranges: One or more A1 ranges (multi-sheet allowed).
+        max_cells: Raise ``result_too_large`` past this many cells. Default unlimited.
+
+    Returns:
+        ``{"ok": True, "spreadsheetId": ..., "regions": [{range, sheet, cells, merges,
+        conditionalFormats, tables, bandedRanges, protectedRanges, validationSummary}, ...]}``.
+    """
+    if not ranges:
+        raise SheetsError("empty_ranges", "describe requires at least one range")
+    if max_cells is not None and max_cells < 1:
+        raise SheetsError(
+            "bad_max_cells", f"max_cells must be a positive integer, got {max_cells!r}"
+        )
+
+    # Resolve each requested range to a GridRange up front (validates A1 BEFORE any data get, and
+    # gives the (sheetId, startRow, startColumn) key used to map response blocks back to ranges).
+    resolved = [a1_to_gridrange(services, spreadsheet_id, r) for r in ranges]
+
+    try:
+        resp = (
+            services.sheets.spreadsheets()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                ranges=list(ranges),
+                includeGridData=True,
+                fields=_DESCRIBE_FIELDS,
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+    # Index the response sheets by sheetId; within each sheet, walk its data blocks in order so a
+    # repeated (sheetId, startRow, startColumn) key consumes successive blocks (two requests for the
+    # same anchor each get their own block).
+    sheets_by_id: dict[object, dict] = {}
+    block_cursor: dict[object, int] = {}
+    for sheet_obj in resp.get("sheets") or []:
+        sheet_obj = sheet_obj or {}
+        sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
+        sheets_by_id[sid] = sheet_obj
+        block_cursor[sid] = 0
+
+    regions: list[dict] = []
+    total_cells = 0
+    for a1, gr in zip(ranges, resolved):
+        sid = gr.get("sheetId")
+        sheet_obj = sheets_by_id.get(sid) or {}
+        block = _match_block(sheet_obj, gr, block_cursor, sid)
+        region = _build_region(services, spreadsheet_id, a1, gr, sheet_obj, block)
+        total_cells += _region_cell_count(region)
+        regions.append(region)
+
+    if max_cells is not None and total_cells > max_cells:
+        raise SheetsError(
+            "result_too_large",
+            f"describe spans {total_cells} cells, exceeding max_cells={max_cells}",
+            hint=(
+                "narrow the ranges, or use 'inspect'/'read_values' (render='formula') on a tighter "
+                "region — describe pulls full per-cell grid data for every range"
+            ),
+        )
+
+    return {"ok": True, "spreadsheetId": spreadsheet_id, "regions": regions}
+
+
+def _match_block(
+    sheet_obj: dict, gr: dict, block_cursor: dict, sid: object
+) -> dict:
+    """Return the response grid block for a requested range, mapping by (start row/col) offset.
+
+    With ``includeGridData=True`` and multiple ranges, each sheet's ``data[]`` holds one block per
+    requested range on that sheet (in request order). A block carries ``startRow``/``startColumn``;
+    we match a requested range's resolved ``GridRange`` start to a not-yet-consumed block with the
+    same offset (a 0-based start; an unbounded/whole-sheet range starts at 0,0). Falls back to the
+    next block in order if no offset match is found (defensive — Google preserves request order).
+    """
+    blocks = sheet_obj.get("data") or []
+    want_row = gr.get("startRowIndex", 0) or 0
+    want_col = gr.get("startColumnIndex", 0) or 0
+    # First, an exact (startRow, startColumn) match among un-consumed blocks (preserves order via
+    # the cursor for repeated identical anchors).
+    start = block_cursor.get(sid, 0)
+    for i in range(start, len(blocks)):
+        b = blocks[i] or {}
+        if (b.get("startRow", 0) or 0) == want_row and (
+            (b.get("startColumn", 0) or 0) == want_col
+        ):
+            block_cursor[sid] = i + 1
+            return b
+    # Fallback: consume the next block in order.
+    if start < len(blocks):
+        block_cursor[sid] = start + 1
+        return blocks[start] or {}
+    return {}
+
+
+def _build_region(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    a1: str,
+    gr: dict,
+    sheet_obj: dict,
+    block: dict,
+) -> dict:
+    """Build one region's merged view from the single ``describe`` response (SPEC §3.2).
+
+    Reuses the SAME serializers the standalone reads use — ``_serialize_cells`` (inspect's cell
+    flatten, full per-cell mask), ``_serialize_cf_rules(..., intersecting=gr)`` (the CF line grammar,
+    filtered to rules touching this range), and ``structure._serialize_{tables,banding,protected}``
+    — on slices of the one fetched sheet. ``merges`` are the sheet's merges resolved to A1; the
+    structural facets are sheet-scoped (every region on a sheet sees that sheet's set).
+    """
+    # Reach the ``structure`` MODULE explicitly: ``core/__init__`` re-exports a ``structure``
+    # FUNCTION, so a bare ``from . import structure`` would resolve to the function, not the module
+    # (the same shadow ``paths``/``export`` work around for ``format``). ``import_module`` returns
+    # the real module object carrying ``_serialize_{tables,banding,protected}``.
+    import importlib
+
+    _structure = importlib.import_module("gsheets.core.structure")
+
+    sheet_title = (sheet_obj.get("properties") or {}).get("title")
+
+    cell_view = _serialize_cells(
+        block,
+        compact=False,
+        include_effective_format=True,
+        include_user_entered_format=True,
+        include_formulas=True,
+        include_validation=True,
+        services=services,
+        spreadsheet_id=spreadsheet_id,
+    )
+    cells = cell_view["cells"]
+
+    merges = [
+        gridrange_to_a1(services, spreadsheet_id, m)
+        for m in (sheet_obj.get("merges") or [])
+    ]
+
+    conditional_formats = _serialize_cf_rules(
+        services,
+        spreadsheet_id,
+        sheet_obj.get("conditionalFormats") or [],
+        intersecting=gr,
+    )
+
+    return {
+        "range": a1,
+        "sheet": sheet_title,
+        "cells": cells,
+        "merges": merges,
+        "conditionalFormats": conditional_formats,
+        "tables": _structure._serialize_tables(services, spreadsheet_id, sheet_obj),
+        "bandedRanges": _structure._serialize_banding(services, spreadsheet_id, sheet_obj),
+        "protectedRanges": _structure._serialize_protected(
+            services, spreadsheet_id, sheet_obj
+        ),
+        "validationSummary": _validation_summary(cells),
+    }
+
+
+def _validation_summary(cells: list[dict]) -> dict:
+    """Summarize the data-validation across a region's cells (SPEC §3.2 ``validationSummary``).
+
+    Token-cheap rollup rather than per-cell repetition: how many cells carry a validation rule, and
+    the DISTINCT terse one-liners present (in first-seen order). The per-cell ``validation`` /
+    ``validationRule`` keys are still on the ``cells`` themselves for full fidelity.
+    """
+    count = 0
+    distinct: list[str] = []
+    for cell in cells:
+        line = cell.get("validation")
+        if line:
+            count += 1
+            if line not in distinct:
+                distinct.append(line)
+    return {"cells": count, "rules": distinct}
+
+
+def _region_cell_count(region: dict) -> int:
+    """Count a region's serialized cells (for the ``max_cells`` guard)."""
+    return len(region.get("cells") or [])
 
 
 def _serialize_cf_rule(

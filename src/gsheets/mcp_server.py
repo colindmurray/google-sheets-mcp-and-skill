@@ -38,6 +38,7 @@ from .core import (
     clear as _clear,
     comments as _comments,
     data_ops as _data_ops,
+    describe as _describe,
     dimensions as _dimensions,
     export as _export,
     format as _format,
@@ -473,6 +474,88 @@ def sheets_inspect(
         include_validation=include_validation,
         include_rich_text=include_rich_text,
         include_pivot=include_pivot,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Describe a region (one-call merged view)",
+        readOnlyHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+    tags={"read"},
+)
+def sheets_describe(
+    spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
+    ranges: Annotated[
+        list[str],
+        Field(
+            min_length=1,
+            description='One or more A1 ranges to characterize, e.g. ["Cliff!A1:F50", '
+            '"Plan!A1:B20"] — multi-range AND multi-sheet in one call.',
+        ),
+    ],
+    ctx: Context,
+    max_cells: Annotated[
+        Optional[int],
+        Field(
+            description="Fail with result_too_large if the regions span more than this many cells, "
+            "instead of returning a payload that only fails at the token cap. null = unlimited. "
+            "describe pulls full per-cell grid data, so narrow the ranges for a big region."
+        ),
+    ] = None,
+    output_format: Annotated[
+        StructuredFormat,
+        Field(
+            description="Output format: text (default) | json | jsonl. This is a STRUCTURED read "
+            "(merged cells + structure + CF, not a rectangular value grid), so csv/tsv are not "
+            "offered — use sheets_read_values for those."
+        ),
+    ] = "text",
+    out_path: Annotated[
+        Optional[str],
+        Field(
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered region view to "
+            "this local file (utf-8, output_format; text resolves to json) and return a small handle "
+            "{ok, path, format, rows, cols, bytes, preview} INSTEAD of the payload. The parent "
+            "directory must already exist (it is never created); credential / config paths are "
+            "refused. The spreadsheet is NOT modified."
+        ),
+    ] = None,
+) -> models.DescribeResult:
+    """Understand a region in ONE call: per requested range, the cells (values + formulas + both
+    formats + validation), the sheet's merges, the conditional-format rules that INTERSECT that
+    range, its native tables, banding, and protected ranges, plus a validation summary.
+
+    This is the "understand a region" verb: it collapses what used to be 3-4 calls
+    (``sheets_inspect`` + ``sheets_structure`` + ``sheets_read_conditional_formats``) into one
+    ``spreadsheets.get`` — cheaper against the read-quota wall and self-consistent. The
+    conditional-format rules are scoped to each requested range automatically (only rules whose
+    ranges touch it), and each keeps its priority ``index`` so you can edit it with
+    ``sheets_set_conditional_format``. For a plain bulk value dump use ``sheets_read_values``; for
+    just the rules across a whole tab use ``sheets_read_conditional_formats``.
+
+    Setting ``out_path`` writes the rendered view to a LOCAL FILE (utf-8) and returns a small handle
+    instead of the payload — an opt-in local side effect; the spreadsheet itself is never modified,
+    so this tool stays read-only.
+
+    Returns:
+        ``{ok, spreadsheetId, regions:[{range, sheet, cells:[{a1, value, formula, userEnteredFormat,
+        effectiveFormat, note, validation, validationRule}], merges, conditionalFormats:[{index,
+        line, ranges, kind, ...}], tables, bandedRanges, protectedRanges, validationSummary:{cells,
+        rules}}]}`` — one region per requested range, in request order. With ``out_path`` set,
+        returns the file handle ``{ok, path, format, rows, cols, bytes, preview}`` instead.
+    """
+    return _call_formatted(
+        models.DescribeResult,
+        _describe,
+        output_format,
+        _services(ctx),
+        spreadsheet_id,
+        ranges,
+        out_path=out_path,
+        max_cells=max_cells,
     )
 
 

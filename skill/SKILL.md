@@ -74,10 +74,18 @@ Understand (read-only):
 - `overview <ID>` — cheap orientation: title, tabs, sizes, frozen panes, per-sheet
   protected/conditional-format counts, named ranges, and the spreadsheet `locale` / `timeZone`
   (date/number interpretation signal). No grid data. Start here.
+- `describe <ID> <RANGE...>` — the "understand a region" verb: ONE call returns, per range, the
+  cells (values + formulas + both formats + validation), the sheet's merges, the conditional-format
+  rules that INTERSECT that range, its tables, banding, and protected ranges, plus a validation
+  summary. Multi-range AND multi-sheet. Collapses what used to be `inspect` + `structure` +
+  `read-conditional-formats` into one `spreadsheets.get` — start here to characterize a region.
+  `--max-cells N` fails fast on a region that is too big.
 - `inspect <ID> <RANGE>` — flagship rich read: per-cell values + formulas + userEntered &
   effective formats + merges + validation. `--compact` collapses repeats into rectangular runs.
   `--rich-text` adds per-run rich text (styled segments + in-cell links) and the cell `hyperlink`;
-  `--pivot` adds pivot-table definitions (both attached only to the cells that have them).
+  `--pivot` adds pivot-table definitions (both attached only to the cells that have them). Reach for
+  `inspect` when you want one tab/range richly (or the rich-text / pivot / compact-runs facets);
+  `describe` when you want the region's structure + CF scoped alongside the cells.
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
   (`all` returns formulas and computed values side by side). For big reads: `--diff-only` drops the
   duplicate `computed` matrix on static sheets; `--max-cells N` fails fast instead of blowing the
@@ -136,7 +144,7 @@ Pick the format for what you'll do with the data:
 - `text` (default) — terse, address-anchored lines. Reading a small region and reasoning in place.
 - `csv` / `tsv` — pipe into pandas/duckdb/jq to compute, join, or filter. Don't reason over a big
   table in context — process it. Only on a rectangular value read (`read-values`); a structured
-  read (`inspect`, `structure`, `read-conditional-formats`, `read-many`) returns a clean
+  read (`inspect`, `describe`, `structure`, `read-conditional-formats`, `read-many`) returns a clean
   `format_unsupported` error. A single range is plain CSV; multiple ranges emit one `# range: <A1>`
   block per range.
 - `json` — a caller will parse the structure (the full result dict, pretty-printed).
@@ -157,15 +165,19 @@ conditional-format results).
 # 1. Orient: cheap, no grid data — tabs, sizes, frozen panes, CF/protected counts.
 gsheets --json overview <YOUR_SPREADSHEET_ID>
 
-# 2. Drill into a tab/range: values + formulas + both formats + validation.
+# 2. Characterize a region in ONE call: cells + merges + range-scoped CF + tables/banding/
+#    protected + a validation summary. The default first move for "what is this region?".
+gsheets --json describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50'
+
+# 3. Or drill into a tab/range richly: values + formulas + both formats + validation.
 #    --compact collapses identical cells into rectangular runs for large/repetitive blocks.
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20'
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:Z1000' --compact
 
-# 3. See formula AND computed value side by side:
+# 4. See formula AND computed value side by side:
 gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --render all
 
-# 4. Read the conditional-format rules that color cells dynamically:
+# 5. Read the conditional-format rules that color cells dynamically (or use describe for a region):
 gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 #    -> [Sheet1!A2:A100] if CUSTOM_FORMULA(=$B2>10) -> bg #FFCDD2 bold      (index 0)
 
@@ -301,11 +313,11 @@ The command map above summarizes the whole surface. Full per-command details liv
 split by how often a task needs them and each organized Reading / Writing / Operations. Read only
 the tier the task calls for (pull in a lower tier first if you haven't):
 
-- **`references/basic.md`** — ~80% of tasks, the everyday loop. `overview`, `inspect` (core flags),
-  `read-values`, `read-conditional-formats`; `write-values`, `append-rows`, `clear`, `format`;
-  `manage-sheets`. Also the core concepts: A1 addressing, the global `--json`/`--scopes` placement,
-  `USER_ENTERED`, effective-vs-userEntered format, and the conditional-format line grammar. Start
-  here for any ordinary read or edit.
+- **`references/basic.md`** — ~80% of tasks, the everyday loop. `overview`, `describe` (the
+  "understand a region" verb), `inspect` (core flags), `read-values`, `read-conditional-formats`;
+  `write-values`, `append-rows`, `clear`, `format`; `manage-sheets`. Also the core concepts: A1
+  addressing, the global `--json`/`--scopes` placement, `USER_ENTERED`, effective-vs-userEntered
+  format, and the conditional-format line grammar. Start here for any ordinary read or edit.
 - **`references/intermediate.md`** — ~15%, when the task needs more than the basics: writing
   conditional-format rules (`set-conditional-format`) or data validation (`set-validation`);
   reading or posting Drive `comments`; `export` to a file; `read-many` across spreadsheets; bulk

@@ -269,6 +269,40 @@ class SheetCFRules(_Sub):
     rules: Optional[list[CFRule]] = None
 
 
+class ValidationSummary(_Sub):
+    """The per-region validation rollup in ``describe`` (SPEC §3.2 ``validationSummary``).
+
+    Mirrors ``core.reads._validation_summary``: ``cells`` is how many cells in the region carry a
+    data-validation rule; ``rules`` is the DISTINCT terse one-liners present (first-seen order).
+    Token-cheap — the per-cell ``validation``/``validationRule`` keys still ride each cell.
+    """
+
+    cells: Optional[int] = None
+    rules: Optional[list[str]] = None
+
+
+class DescribeRegion(_Sub):
+    """One requested range's merged region view in ``describe`` (SPEC §3.2).
+
+    Mirrors ``core.reads.describe``'s per-region dict — built by REUSING the existing serializers,
+    so each field is the SAME shape the standalone read emits: ``cells`` are :class:`Cell` (inspect's
+    full per-cell flatten), ``conditionalFormats`` are :class:`CFRule` (filtered to rules
+    INTERSECTING this range, each keeping its priority ``index``), ``tables``/``bandedRanges``/
+    ``protectedRanges`` are the structure read shapes, ``merges`` are A1 strings, and
+    ``validationSummary`` is the token-cheap rollup.
+    """
+
+    range: Optional[str] = None
+    sheet: Optional[str] = None
+    cells: Optional[list[Cell]] = None
+    merges: Optional[list[str]] = None
+    conditionalFormats: Optional[list[CFRule]] = None
+    tables: Optional[list["Table"]] = None
+    bandedRanges: Optional[list["Banding"]] = None
+    protectedRanges: Optional[list[ProtectedRange]] = None
+    validationSummary: Optional[ValidationSummary] = None
+
+
 class ValueRange(_Sub):
     """One range entry in ``read_values`` output (DESIGN §3.3 read_values).
 
@@ -692,6 +726,45 @@ class ConditionalFormatReport(_Result):
             for r in rules:
                 lines.append(f"  {r.index}: {r.line}")
         return "\n".join(lines) if lines else "no conditional-format rules"
+
+
+class DescribeResult(_Result):
+    """Mirror of ``core.describe`` — one-call merged region view (SPEC §3.2).
+
+    ``regions`` is one :class:`DescribeRegion` per requested range (multi-range AND multi-sheet),
+    each merging cells + structure + range-scoped conditional formats from a SINGLE
+    ``spreadsheets.get``. The terse render leads with the range and a compact per-region tally.
+    """
+
+    spreadsheetId: Optional[str] = None
+    regions: list[DescribeRegion] = []
+
+    @property
+    def terse(self) -> str:
+        lines: list[str] = []
+        for region in self.regions:
+            cells = region.cells or []
+            non_empty = sum(
+                1 for c in cells if c.value is not None or c.formula is not None
+            )
+            bits = [f"{non_empty}/{len(cells)} cells"]
+            if region.merges:
+                bits.append(f"{len(region.merges)} merge(s)")
+            if region.conditionalFormats:
+                bits.append(f"{len(region.conditionalFormats)} CF")
+            if region.tables:
+                bits.append(f"{len(region.tables)} table(s)")
+            if region.bandedRanges:
+                bits.append(f"{len(region.bandedRanges)} banding")
+            if region.protectedRanges:
+                bits.append(f"{len(region.protectedRanges)} protected")
+            vs = region.validationSummary
+            if vs and vs.cells:
+                bits.append(f"{vs.cells} validated")
+            lines.append(f"[{region.range}] {', '.join(bits)}")
+            for r in region.conditionalFormats or []:
+                lines.append(f"  CF {r.index}: {r.line}")
+        return "\n".join(lines) if lines else "no regions"
 
 
 class WriteValuesResult(_Result):
@@ -1139,6 +1212,7 @@ class ReadManyResult(_Result):
 RESULT_MODELS: dict[str, type[_Result]] = {
     "overview": OverviewResult,
     "inspect": InspectResult,
+    "describe": DescribeResult,
     "read_values": ReadValuesResult,
     "read_conditional_formats": ConditionalFormatReport,
     "write_values": WriteValuesResult,
@@ -1351,6 +1425,7 @@ __all__ = [
     # per-core-fn result models
     "OverviewResult",
     "InspectResult",
+    "DescribeResult",
     "ReadValuesResult",
     "ConditionalFormatReport",
     "WriteValuesResult",
@@ -1384,6 +1459,8 @@ __all__ = [
     "CFCondition",
     "CFRule",
     "SheetCFRules",
+    "ValidationSummary",
+    "DescribeRegion",
     "ValueRange",
     "SheetRef",
     "AppendUpdates",
