@@ -62,9 +62,9 @@ Conventions:
   the URL they paste (the token between `/d/` and `/edit`), or the environment.
 - `--format`, `--json`, and `--scopes` are GLOBAL flags defined on the top-level parser, so they go
   *before* the subcommand: `gsheets --json overview <ID>`, not `gsheets overview <ID> --json` (the
-  latter is an argparse error). `--format {text,json,jsonl,csv,tsv}` (default `text`) chooses the
-  output serialization; `--json` is a permanent alias for `--format json`. See "Choosing an output
-  format" below.
+  latter is an argparse error). `--format {text,json,jsonl,csv,tsv,markdown}` (default `text`)
+  chooses the output serialization; `--json` is a permanent alias for `--format json`. See "Choosing
+  an output format" below.
 - `gsheets <cmd> --help` is the source of truth for the exact, current flags of any command.
 
 ## Command map (Understand → Change → Escape hatch)
@@ -152,6 +152,10 @@ Pick the format for what you'll do with the data:
   read (`inspect`, `describe`, `structure`, `read-conditional-formats`, `read-many`) returns a clean
   `format_unsupported` error. A single range is plain CSV; multiple ranges emit one `# range: <A1>`
   block per range.
+- `markdown` — a small table you'll read directly, when a header row carries meaning. A value read
+  renders a GitHub table (embedded `|` and newlines are escaped so a cell never corrupts the table);
+  a structured read renders `field: value` key/value lines instead. Unlike csv/tsv it never errors
+  on a structured read — but for bulk data prefer csv to a file/pipe (markdown is verbose).
 - `json` — a caller will parse the structure (the full result dict, pretty-printed).
 - `jsonl` — many records to stream or filter line by line. `read-values` emits one `{range,row}`
   per row; a list result (e.g. `read-many`, `comments`) emits one element per line.

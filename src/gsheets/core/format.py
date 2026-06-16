@@ -15,6 +15,16 @@ byte-identical.
   A single-range read is plain RFC-4180 CSV; a multi-range read emits each range as a block
   preceded by a ``# range: <A1>`` comment line. A non-tabular (structured) result raises
   ``SheetsError("format_unsupported")``.
+* ``markdown`` — a GitHub-flavored markdown TABLE over the rectangular value grid(s) (SPEC §6,
+  D-MD). This is a small CUSTOM renderer (NOT ``tabulate``): ``tabulate`` does not escape an
+  embedded ``|`` or newline, so a cell containing either silently corrupts the table. The custom
+  renderer escapes ``\\`` -> ``\\\\``, an embedded newline -> the two-char ``\\n``, and ``|`` ->
+  ``\\|`` so each row stays on ONE physical line and every cell round-trips unambiguously. A
+  multi-range read emits one ``### range: <A1>`` heading per block. A non-tabular result raises
+  ``format_unsupported`` (use :func:`render_kv` for a record/cell view of a structured result).
+  :func:`render_kv` is the markdown KEY/VALUE counterpart (one ``field: value`` line per record,
+  same newline escaping), exposed to the adapters for structured shapes where a record view reads
+  better than a grid.
 
 ``text`` is NOT handled here — it is the adapters' existing terse renderer (SPEC §1.5).
 
@@ -30,9 +40,10 @@ import json
 
 from .errors import SheetsError
 
-#: The data formats this module serializes. ``text`` lives in the adapters (SPEC §1.5);
-#: ``markdown`` is gated to a later phase (SPEC §6) and is intentionally absent here.
-SUPPORTED: tuple[str, ...] = ("json", "jsonl", "csv", "tsv")
+#: The data formats this module serializes. ``text`` lives in the adapters (SPEC §1.5).
+#: ``markdown`` (SPEC §6, D-MD) renders a table over a rectangular grid; :func:`render_kv` is its
+#: key/value counterpart for structured shapes.
+SUPPORTED: tuple[str, ...] = ("json", "jsonl", "csv", "tsv", "markdown")
 
 #: Normalized format -> the csv-module delimiter for the tabular renderers.
 _DELIMITER: dict[str, str] = {"csv": ",", "tsv": "\t"}
@@ -60,10 +71,12 @@ def render(result: dict, fmt: str) -> str:
         return _render_jsonl(result)
     if fmt in _DELIMITER:
         return _render_tabular(result, fmt)
+    if fmt == "markdown":
+        return _render_markdown(result)
     raise SheetsError(
         "format_unsupported",
         f"unknown output format {fmt!r}",
-        hint="use one of: text, json, jsonl, csv, tsv",
+        hint="use one of: text, json, jsonl, csv, tsv, markdown",
     )
 
 
@@ -171,6 +184,126 @@ def render_grid(rows: list[list], delimiter: str) -> str:
     for row in rows:
         writer.writerow(row)
     return buffer.getvalue()
+
+
+# --------------------------------------------------------------------------- markdown (§6, D-MD)
+
+
+def _render_markdown(result: dict) -> str:
+    """Render a result as markdown — a TABLE for a rectangular grid, KEY/VALUE for structured (D-MD).
+
+    A ``read_values`` (rectangular) result renders as a GitHub markdown TABLE per range: a single
+    range -> one table (no heading); multiple ranges -> each range as a block preceded by a
+    ``### range: <A1>`` heading. A structured (non-tabular) result has no rectangular grid, so it
+    falls back to the markdown KEY/VALUE form (:func:`render_kv`) — "markdown" thus works on any read
+    (table where there is a grid, record view otherwise), so both adapters call ``render`` with one
+    body and never branch on shape. An empty grid renders to the empty string (matching csv/tsv).
+    """
+    if not _is_tabular(result):
+        return render_kv(result)
+    ranges = result.get("ranges") or []
+    if len(ranges) == 1:
+        return render_markdown_table(ranges[0].get("values", []) or [])
+
+    blocks: list[str] = []
+    for entry in ranges:
+        a1 = entry.get("range")
+        body = render_markdown_table(entry.get("values", []) or [])
+        if body:
+            blocks.append(f"### range: {a1}\n\n{body}")
+        else:
+            blocks.append(f"### range: {a1}\n")
+    return "\n\n".join(blocks)
+
+
+def render_markdown_table(rows: list[list]) -> str:
+    """Serialize one rectangular grid to a GitHub-flavored markdown table (SPEC §6, D-MD).
+
+    The first row is the header; the rest are body rows. Each cell is escaped (:func:`_md_escape`)
+    so an embedded ``|`` or newline cannot corrupt the table: ``\\`` -> ``\\\\``, newline ->
+    the two-char ``\\n``, ``|`` -> ``\\|``. Every row keeps its column count (short rows pad with
+    empty cells to the widest row) so the table is rectangular and reparses unambiguously. An empty
+    grid yields the empty string (no header, no rule). This is a deliberate CUSTOM renderer rather
+    than ``tabulate``, which escapes neither ``|`` nor newlines (SPEC §6).
+
+    Args:
+        rows: A list of rows (each a list of cell values); the first row is the header.
+
+    Returns:
+        The markdown table string (``""`` for an empty grid).
+    """
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    header = _md_row(rows[0], width)
+    rule = "| " + " | ".join(["---"] * width) + " |"
+    body = [_md_row(row, width) for row in rows[1:]]
+    return "\n".join([header, rule, *body])
+
+
+def _md_row(row: list, width: int) -> str:
+    """Render one grid row to a ``| a | b |`` markdown line, padded/escaped to ``width`` columns."""
+    cells = [_md_escape(row[i]) if i < len(row) else "" for i in range(width)]
+    return "| " + " | ".join(cells) + " |"
+
+
+def _md_escape(value: object) -> str:
+    """Escape a cell value for a markdown table so ``|`` / newline / backslash round-trip (D-MD).
+
+    Order matters: escape the backslash FIRST (so the escapes we introduce next are not
+    double-escaped on reparse), then the newline (-> the two-char ``\\n``) and the pipe (-> ``\\|``).
+    The result is a single physical line with no unescaped ``|``, so it cannot corrupt the table and
+    reverses cleanly with the inverse substitution.
+    """
+    text = "" if value is None else str(value)
+    text = text.replace("\\", "\\\\")
+    text = text.replace("\r\n", "\\n").replace("\r", "\\n").replace("\n", "\\n")
+    text = text.replace("|", "\\|")
+    return text
+
+
+def render_kv(result: dict) -> str:
+    """Render a structured result as markdown KEY/VALUE blocks — one ``field: value`` per line (D-MD).
+
+    The markdown counterpart to :func:`render_markdown_table` for a NON-tabular shape: each record
+    (the result's primary list, e.g. ``comments``; or the whole result dict when it is not
+    list-shaped) becomes a block of ``field: value`` lines, blocks separated by a blank line. Values
+    are escaped with the SAME collision-resistant scheme as the table (``\\`` -> ``\\\\``, newline ->
+    ``\\n``) so a multi-line value never breaks the one-field-per-line invariant and reverses
+    cleanly. A nested list/dict value is JSON-encoded (compact) so it stays on one line.
+
+    Args:
+        result: A plain core result dict.
+
+    Returns:
+        The newline-blank-line-joined key/value blocks.
+    """
+    records = _kv_records(result)
+    blocks = [_kv_block(rec) for rec in records]
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _kv_records(result: dict) -> list:
+    """The records to KV-render: the primary record list, else the whole dict as one record."""
+    list_value = _primary_list(result)
+    if list_value is not None:
+        return list(list_value)
+    return [result]
+
+
+def _kv_block(record: object) -> str:
+    """Render one record to ``field: value`` lines (a non-dict record renders as a single value)."""
+    if not isinstance(record, dict):
+        return _md_escape(record)
+    lines = [f"{key}: {_kv_value(val)}" for key, val in record.items()]
+    return "\n".join(lines)
+
+
+def _kv_value(value: object) -> str:
+    """Escape one KV value: scalars via :func:`_md_escape`; a list/dict as compact JSON on one line."""
+    if isinstance(value, (list, dict)):
+        return _md_escape(json.dumps(value, ensure_ascii=False))
+    return _md_escape(value)
 
 
 # --------------------------------------------------------------------------- address-keyed (§4.4)

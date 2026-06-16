@@ -60,11 +60,12 @@ from .core.format import render as render_format
 from .core.paths import write_file_handle
 from .core.service import SheetsServices
 
-# Output-format Literals (SPEC §1.3). A rectangular-values read accepts every data format; a
-# structured read accepts only text/json/jsonl (csv/tsv need a value grid). text/json return the
-# mirror model as today; the data formats return the shared ``render()`` string.
-ValueFormat = Literal["text", "json", "jsonl", "csv", "tsv"]
-StructuredFormat = Literal["text", "json", "jsonl"]
+# Output-format Literals (SPEC §1.3, §6). A rectangular-values read accepts every data format; a
+# structured read accepts text/json/jsonl + markdown (csv/tsv need a value grid; markdown renders a
+# table for a grid, key/value lines for a structured read). text/json return the mirror model as
+# today; the data formats return the shared ``render()`` string.
+ValueFormat = Literal["text", "json", "jsonl", "csv", "tsv", "markdown"]
+StructuredFormat = Literal["text", "json", "jsonl", "markdown"]
 
 
 # --------------------------------------------------------------------------- error envelope
@@ -423,9 +424,9 @@ def sheets_inspect(
     output_format: Annotated[
         StructuredFormat,
         Field(
-            description="Output format: text (default) | json | jsonl. This is a STRUCTURED read "
-            "(no rectangular value grid), so csv/tsv are not offered — use sheets_read_values for "
-            "those."
+            description="Output format: text (default) | json | jsonl | markdown. This is a "
+            "STRUCTURED read (no rectangular value grid), so csv/tsv are not offered — use "
+            "sheets_read_values for those; markdown renders key/value lines for a structured read."
         ),
     ] = "text",
     out_path: Annotated[
@@ -509,9 +510,10 @@ def sheets_describe(
     output_format: Annotated[
         StructuredFormat,
         Field(
-            description="Output format: text (default) | json | jsonl. This is a STRUCTURED read "
-            "(merged cells + structure + CF, not a rectangular value grid), so csv/tsv are not "
-            "offered — use sheets_read_values for those."
+            description="Output format: text (default) | json | jsonl | markdown. This is a "
+            "STRUCTURED read (merged cells + structure + CF, not a rectangular value grid), so "
+            "csv/tsv are not offered — use sheets_read_values for those; markdown renders "
+            "key/value lines for a structured read."
         ),
     ] = "text",
     out_path: Annotated[
@@ -590,8 +592,9 @@ def sheets_formula_patterns(
     output_format: Annotated[
         StructuredFormat,
         Field(
-            description="Output format: text (default) | json | jsonl. This is a STRUCTURED read "
-            "(per-column templates, not a value grid), so csv/tsv are not offered."
+            description="Output format: text (default) | json | jsonl | markdown. This is a "
+            "STRUCTURED read (per-column templates, not a value grid), so csv/tsv are not offered; "
+            "markdown renders key/value lines."
         ),
     ] = "text",
     out_path: Annotated[
@@ -671,10 +674,11 @@ def sheets_read_values(
     output_format: Annotated[
         ValueFormat,
         Field(
-            description="Output format: text (default) | json | jsonl | csv | tsv. csv/tsv emit "
-            "the rectangular value grid (one '# range:' block per range when multiple); jsonl "
-            "emits one {range,row} record per row. Don't reason over a big table in context — "
-            "render csv and process it."
+            description="Output format: text (default) | json | jsonl | csv | tsv | markdown. "
+            "csv/tsv emit the rectangular value grid (one '# range:' block per range when "
+            "multiple); markdown emits a GitHub table (embedded | and newlines escaped) for a small "
+            "grid you'll read directly; jsonl emits one {range,row} record per row. Don't reason "
+            "over a big table in context — render csv and process it."
         ),
     ] = "text",
     out_path: Annotated[
@@ -792,9 +796,9 @@ def sheets_read_many(
     output_format: Annotated[
         StructuredFormat,
         Field(
-            description="Output format: text (default) | json | jsonl. This is a cross-file "
-            "envelope (not a single rectangular grid), so csv/tsv are not offered; jsonl emits "
-            "one per-file result element per line."
+            description="Output format: text (default) | json | jsonl | markdown. This is a "
+            "cross-file envelope (not a single rectangular grid), so csv/tsv are not offered; "
+            "jsonl emits one per-file result element per line; markdown renders key/value lines."
         ),
     ] = "text",
     out_path: Annotated[

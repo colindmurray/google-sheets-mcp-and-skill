@@ -25,7 +25,7 @@ from .core.richtext import text_runs_line
 # Global --format choices. ``text`` (the default) is the existing terse renderer; the data
 # formats are serialized by the shared core layer (``gsheets.core.format.render``). ``--json``
 # stays a permanent documented alias for ``--format json`` (SPEC §1.3, D-FMTFLAG).
-_FORMAT_CHOICES = ("text", "json", "jsonl", "csv", "tsv")
+_FORMAT_CHOICES = ("text", "json", "jsonl", "csv", "tsv", "markdown")
 
 # Render modes / input modes / action enums mirrored from core so argparse can validate up
 # front (core re-validates and raises SheetsError — these just give nice argparse errors).
@@ -155,8 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="output_format",
         choices=_FORMAT_CHOICES,
         default=None,
-        help="output format: text (default, terse) | json | jsonl | csv | tsv "
-        "(csv/tsv need a rectangular value read, e.g. read-values)",
+        help="output format: text (default, terse) | json | jsonl | csv | tsv | markdown "
+        "(csv/tsv need a rectangular value read, e.g. read-values; markdown renders a table for "
+        "a value grid, key/value lines for a structured read)",
     )
     parser.add_argument(
         "--json",

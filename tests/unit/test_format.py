@@ -20,6 +20,7 @@ import csv
 import importlib
 import io
 import json
+import re
 
 import pytest
 
@@ -221,11 +222,227 @@ class TestRenderGuards:
             fmtmod.render(_read_values([("D", [["a"]])]), "text")
 
     def test_supported_tuple_present(self):
-        # The module advertises its supported data formats (markdown gated to a later phase).
+        # The module advertises its supported data formats.
         assert "csv" in fmtmod.SUPPORTED
         assert "tsv" in fmtmod.SUPPORTED
         assert "json" in fmtmod.SUPPORTED
         assert "jsonl" in fmtmod.SUPPORTED
+        # markdown is wired in (Phase 5 / SPEC §6, D-MD).
+        assert "markdown" in fmtmod.SUPPORTED
+
+
+# =========================================================================== markdown (§6, D-MD)
+
+
+def _unescape_md_cell(cell: str) -> str:
+    """Reverse the markdown-table cell escaping (``\\\\`` / ``\\n`` / ``\\|``) for round-trip asserts.
+
+    The renderer escapes a backslash as ``\\\\``, an embedded newline as the two-char ``\\n``, and a
+    pipe as ``\\|``. Reversing it must honor the backslash-escape so ``"a\\\\nb"`` (literal
+    backslash-n) is NOT mistaken for a newline. A small state machine over the characters does that.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(cell):
+        ch = cell[i]
+        if ch == "\\" and i + 1 < len(cell):
+            nxt = cell[i + 1]
+            if nxt == "n":
+                out.append("\n")
+            elif nxt == "\\":
+                out.append("\\")
+            elif nxt == "|":
+                out.append("|")
+            else:
+                out.append(nxt)
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _parse_md_table(out: str) -> list[list[str]]:
+    """Parse a GitHub markdown table back into rows of (unescaped) cells, dropping the rule row.
+
+    Splits each physical line on UNescaped ``|`` (a ``\\|`` is a literal pipe inside a cell, not a
+    column separator), strips the leading/trailing empty cells from the pipe-bracketed row, drops the
+    ``|---|---|`` separator row, and unescapes each cell. This proves the rendering is unambiguous:
+    every embedded ``|`` / newline survives the reparse.
+    """
+    rows: list[list[str]] = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        # Split on a pipe that is NOT preceded by a backslash.
+        cells = re.split(r"(?<!\\)\|", line)
+        # A markdown row is bracketed by pipes -> leading/trailing empty strings; drop them.
+        cells = cells[1:-1]
+        # The header-rule row is all dashes -> skip it.
+        if cells and all(set(c.strip()) <= {"-"} and c.strip() for c in cells):
+            continue
+        rows.append([_unescape_md_cell(c.strip()) for c in cells])
+    return rows
+
+
+class TestMarkdownTable:
+    """``render(result, "markdown")`` over a rectangular value grid -> a GitHub markdown table.
+
+    The headline escaping test: a literal ``|`` and a literal newline inside a cell must NOT
+    corrupt the table — they must be escaped so the rendering is unambiguous and reparses to the
+    original cells. (tabulate does NOT escape either, so this is a custom renderer — SPEC §6.)
+    """
+
+    def test_markdown_table_basic_shape(self):
+        result = _read_values([("Data", [["a", "b"], ["c", "d"]])])
+        out = fmtmod.render(result, "markdown")
+        lines = out.splitlines()
+        # Header row, separator (---) row, then the data rows.
+        assert lines[0].startswith("|") and lines[0].endswith("|")
+        assert set(lines[1].replace("|", "").replace(" ", "")) == {"-"}
+        assert "| a" in lines[0]
+
+    def test_markdown_table_embedded_pipe_is_escaped_and_unambiguous(self):
+        # A literal "|" in a cell must NOT read as a column separator.
+        result = _read_values([("Data", [["Name", "Note"], ["a|b", "ok"]])])
+        out = fmtmod.render(result, "markdown")
+        # The raw pipe is escaped in the body.
+        assert r"a\|b" in out
+        # Reparsing yields exactly two columns on the data row (not three).
+        rows = _parse_md_table(out)
+        assert rows == [["Name", "Note"], ["a|b", "ok"]]
+
+    def test_markdown_table_embedded_newline_is_escaped_and_unambiguous(self):
+        # A literal newline must NOT split one record across two physical lines.
+        result = _read_values([("Data", [["Name", "Note"], ["multi\nline", "x"]])])
+        out = fmtmod.render(result, "markdown")
+        # Header rule + header + one data row = 3 physical lines (the newline did not add a line).
+        assert len(out.splitlines()) == 3
+        assert r"multi\nline" in out
+        rows = _parse_md_table(out)
+        assert rows == [["Name", "Note"], ["multi\nline", "x"]]
+
+    def test_markdown_table_pipe_and_newline_together_round_trip(self):
+        # The literal "|" and newline in ONE cell (the SPEC's stress case) round-trip cleanly.
+        result = _read_values([("Data", [["h1", "h2"], ["a|b\nc", "plain"]])])
+        out = fmtmod.render(result, "markdown")
+        rows = _parse_md_table(out)
+        assert rows == [["h1", "h2"], ["a|b\nc", "plain"]]
+
+    def test_markdown_table_backslash_is_escaped(self):
+        # A literal backslash must be escaped so "a\nb" (backslash-n) is not read as a newline.
+        result = _read_values([("Data", [["h"], ["a\\nb"]])])
+        out = fmtmod.render(result, "markdown")
+        rows = _parse_md_table(out)
+        assert rows == [["h"], ["a\\nb"]]
+
+    def test_markdown_table_jagged_rows_padded(self):
+        # Short rows pad to the widest row's column count (so the table is rectangular).
+        result = _read_values([("Data", [["a", "b", "c"], ["x"]])])
+        out = fmtmod.render(result, "markdown")
+        rows = _parse_md_table(out)
+        assert rows == [["a", "b", "c"], ["x", "", ""]]
+
+    def test_markdown_on_structured_result_falls_back_to_kv(self):
+        # Unlike csv/tsv (which require a grid), "markdown" works on any read: a structured result
+        # has no rectangular grid, so it renders as the markdown KEY/VALUE form instead of erroring.
+        structured = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "comments": [{"id": "A", "content": "hi"}],
+        }
+        out = fmtmod.render(structured, "markdown")
+        # KV shape, not a "| ... |" table.
+        assert "id: A" in out
+        assert "content: hi" in out
+
+    def test_markdown_table_empty_grid_is_empty_string(self):
+        out = fmtmod.render(_read_values([("Data", [])]), "markdown")
+        assert out == ""
+
+    def test_markdown_table_multi_range_emits_range_headers(self):
+        result = _read_values(
+            [("S!A1:B1", [["a", "b"]]), ("S!D1:E1", [["c", "d"]])]
+        )
+        out = fmtmod.render(result, "markdown")
+        # Each range gets a markdown heading so the blocks are distinguishable.
+        assert "S!A1:B1" in out
+        assert "S!D1:E1" in out
+        assert out.index("S!A1:B1") < out.index("S!D1:E1")
+
+
+class TestMarkdownKV:
+    """``render_kv(result)`` — markdown key/value lines (one ``field: value`` per cell/record).
+
+    The structured (non-tabular) counterpart to the markdown table: a small custom renderer with
+    collision-resistant newline escaping. Used where a record/cell view reads better than a grid.
+    """
+
+    def test_kv_renders_field_value_lines(self):
+        result = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "comments": [
+                {"id": "A", "author": "Jane", "content": "hi"},
+            ],
+        }
+        out = fmtmod.render_kv(result)
+        assert "id: A" in out
+        assert "author: Jane" in out
+        assert "content: hi" in out
+
+    def test_kv_escapes_embedded_newline(self):
+        # A newline inside a value must NOT break the one-field-per-line invariant.
+        result = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "comments": [{"id": "A", "content": "line1\nline2"}],
+        }
+        out = fmtmod.render_kv(result)
+        # The value's newline is escaped to the two-char \n; no physical line break inside it.
+        assert r"content: line1\nline2" in out
+        # The content line is a single physical line.
+        content_lines = [l for l in out.splitlines() if l.startswith("content:")]
+        assert content_lines == [r"content: line1\nline2"]
+
+    def test_kv_records_separated(self):
+        # Multiple records render as separate blocks (a blank line between them).
+        result = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "comments": [
+                {"id": "A", "content": "one"},
+                {"id": "B", "content": "two"},
+            ],
+        }
+        out = fmtmod.render_kv(result)
+        blocks = [b for b in out.split("\n\n") if b.strip()]
+        assert len(blocks) == 2
+        assert "id: A" in blocks[0]
+        assert "id: B" in blocks[1]
+
+    def test_kv_round_trips_value(self):
+        # The escaped value reverses cleanly (collision-resistant: backslash-escaped).
+        result = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "rows": [{"note": "a\\nb\nreal-newline"}],
+        }
+        out = fmtmod.render_kv(result)
+        line = next(l for l in out.splitlines() if l.startswith("note:"))
+        value = line[len("note: "):]
+        assert _unescape_md_cell(value) == "a\\nb\nreal-newline"
+
+    def test_kv_via_render_dispatch(self):
+        # "markdown" on a structured result routes to KV (no error), since a table needs a grid.
+        result = {
+            "ok": True,
+            "spreadsheetId": "<ID>",
+            "comments": [{"id": "A", "content": "hi"}],
+        }
+        # render() with markdown on a tabular result -> table; this is the KV helper directly.
+        out = fmtmod.render_kv(result)
+        assert "id: A" in out
 
 
 # =========================================================================== address-keyed (§4.4)

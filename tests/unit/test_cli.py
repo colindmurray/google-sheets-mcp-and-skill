@@ -252,6 +252,35 @@ def test_format_jsonl_on_read_values_one_record_per_row(patched, monkeypatch, ca
     ]
 
 
+def test_format_markdown_on_read_values_renders_table(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "read_values",
+        lambda services, sid, ranges, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "render": "plain",
+            "ranges": [{"range": "S!A1:B2", "values": [["Name", "Note"], ["a|b", "x"]]}],
+        },
+    )
+    rc = _run(["--format", "markdown", "read-values", "ID", "S!A1:B2"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # GitHub markdown table with a header rule; the embedded pipe is escaped (not a separator).
+    assert "| Name | Note |" in out
+    assert "| --- | --- |" in out
+    assert r"a\|b" in out
+
+
+def test_format_markdown_on_structured_result_renders_kv(patched, capsys):
+    # markdown on a structured read (overview) does NOT error — it renders key/value lines.
+    rc = _run(["--format", "markdown", "overview", "SHEET_ID"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "title: T" in out
+    assert "ok: True" in out
+
+
 def test_format_csv_on_structured_result_errors_format_unsupported(patched, capsys):
     # overview is structured; asking for csv is a clean format_unsupported error (exit 1), not a
     # traceback or silent fallback.

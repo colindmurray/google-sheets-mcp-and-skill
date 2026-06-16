@@ -18,21 +18,23 @@ is the authoritative, always-current flag source for any single command.
   gsheets --json overview <YOUR_SPREADSHEET_ID>     # correct
   gsheets overview <YOUR_SPREADSHEET_ID> --json     # WRONG -> "unrecognized arguments: --json" (exit 2)
   ```
-  `--format {text,json,jsonl,csv,tsv}` (default `text`) selects the output serialization; `--json`
-  is a permanent alias for `--format json`. `--scopes {default,broad}` sets the auth scope.
+  `--format {text,json,jsonl,csv,tsv,markdown}` (default `text`) selects the output serialization;
+  `--json` is a permanent alias for `--format json`. `--scopes {default,broad}` sets the auth scope.
   Supported formats by result shape:
 
   | Result shape | Commands | Formats |
   |---|---|---|
-  | Rectangular values | `read-values` | text, json, jsonl, csv, tsv |
-  | Structured/rich | `inspect`, `describe`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl |
+  | Rectangular values | `read-values` | text, json, jsonl, csv, tsv, markdown |
+  | Structured/rich | `inspect`, `describe`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl, markdown |
   | Small confirmations | every writer, `auth` | text, json |
 
   `csv`/`tsv` need a rectangular value read — asking for them on a structured result is a clean
   `format_unsupported` error, not a silent fallback. A single range pipes as plain CSV; multiple
   ranges emit one `# range: <A1>` block each. `jsonl` emits one `{range,row}` per row (or one list
-  element per line for list results). For bulk values, pipe to a file:
-  `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
+  element per line for list results). `markdown` renders a GitHub table for a value read (embedded
+  `|`/newlines escaped so a cell never corrupts the table) and `field: value` key/value lines for a
+  structured read — it never errors on a structured shape, but it is verbose, so for bulk values
+  prefer csv to a file: `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
 - **MCP file-output (`out_path`).** The CLI pipes (`> out.csv`); the MCP tool's output goes into the
   agent's context, so for a big read pass `out_path` to `sheets_read_values` / `sheets_inspect` /
   `sheets_describe` / `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;

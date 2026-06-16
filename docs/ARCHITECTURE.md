@@ -528,19 +528,38 @@ at `path`.
 `core/format.py` is a pure stdlib helper (`csv` · `io` · `json`) that serializes a core result
 dict to a string in one shared place, so both adapters and `export` produce byte-identical output.
 `render(result, fmt)` covers the data formats — `json` (pretty `json.dumps`), `jsonl` (one
-`{range,row}` record per row for `read_values`, one list element per line otherwise), and `csv` /
+`{range,row}` record per row for `read_values`, one list element per line otherwise), `csv` /
 `tsv` (the rectangular value grid via the stdlib `csv` module, RFC-4180 `\r\n`; a single range is
-clean CSV, multiple ranges emit one `# range: <A1>` block each). A tabular format requested on a
-structured result raises `SheetsError("format_unsupported")` — the agent learns to use a value
-read. `text` is **not** handled here: it stays the adapters' existing terse renderer (the CLI text
-renderer / the Pydantic model render), which differs by adapter and predates this layer.
+clean CSV, multiple ranges emit one `# range: <A1>` block each), and `markdown` (below). A tabular
+format (`csv`/`tsv`) requested on a structured result raises `SheetsError("format_unsupported")` —
+the agent learns to use a value read. `text` is **not** handled here: it stays the adapters'
+existing terse renderer (the CLI text renderer / the Pydantic model render), which differs by
+adapter and predates this layer.
 
 The adapters wire it identically: the CLI promotes `--json` to a global `--format
-{text,json,jsonl,csv,tsv}` (`--json` is a permanent alias for `--format json`); the MCP read tools
-take `output_format` (the rectangular-values `read_values` offers every format, the structured
-reads offer only `text`/`json`/`jsonl`). For a data format the MCP tool returns the rendered string
-wrapped in a `ToolResult` (which keeps the tool's structured `output_schema` while emitting a plain
-string body — FastMCP refuses a bare string as `structured_content` when a schema is set).
+{text,json,jsonl,csv,tsv,markdown}` (`--json` is a permanent alias for `--format json`); the MCP
+read tools take `output_format` (the rectangular-values `read_values` offers every format, the
+structured reads offer `text`/`json`/`jsonl`/`markdown` — markdown's KV form fits any shape, but
+csv/tsv need a grid). For a data format the MCP tool returns the rendered string wrapped in a
+`ToolResult` (which keeps the tool's structured `output_schema` while emitting a plain string body —
+FastMCP refuses a bare string as `structured_content` when a schema is set).
+
+#### Markdown (SPEC §6, D-MD)
+
+`markdown` renders a **GitHub-flavored table** over a rectangular value grid, and **key/value
+lines** for a structured (non-tabular) result — so `markdown` "just works" on any read (a table
+where there is a grid, a record view otherwise) and both adapters call `render` with one body, never
+branching on shape. The table is a deliberate **custom** renderer, not `tabulate`: `tabulate`
+escapes neither an embedded `|` (it reads as a column separator and corrupts the row) nor an
+embedded newline (it splits one row across two physical lines), so a cell carrying either is
+silently mangled. The custom escaper maps `\` → `\\`, an embedded newline → the two-char `\n`, and
+`|` → `\|`, keeping every row on one physical line with no unescaped pipe, so the table is
+unambiguous and reverses cleanly. A multi-range value read emits one `### range: <A1>` heading per
+block. `render_kv(result)` is the key/value form: one `field: value` line per record (the result's
+primary record list, e.g. `comments`; else the whole dict), the same collision-resistant newline
+escaping, blocks separated by a blank line; a nested list/dict value is JSON-encoded compactly so it
+stays on one line. The MCP file-output handle (`out_path`) carries `markdown` like the other data
+formats; `markdown` on a structured read never errors (it falls back to KV), unlike `csv`/`tsv`.
 
 #### Address-keyed rendering for sparse data (SPEC §4.4)
 

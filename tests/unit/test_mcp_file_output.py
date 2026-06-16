@@ -244,6 +244,51 @@ def test_call_formatted_out_path_credential_target_raises_tool_error(tmp_path):
     assert not target.exists()
 
 
+def test_call_formatted_out_path_markdown_handle(tmp_path):
+    # markdown over a value grid writes a GitHub table; bytes on disk == render(result, "markdown").
+    rows = [["Name", "Note"], ["a|b", "line1\nline2"]]
+    payload = _read_values_payload(rows)
+    target = tmp_path / "out.md"
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult,
+        lambda s, sid, rngs, **kw: payload,
+        "markdown",
+        object(),
+        "<ID>",
+        ["S!A1:B2"],
+        out_path=str(target),
+    )
+    handle = _handle(out)
+    assert handle["format"] == "markdown"
+    from gsheets.core.format import render
+
+    on_disk = target.read_text(encoding="utf-8")
+    assert on_disk == render(payload, "markdown")
+    # The embedded pipe and newline are escaped (one physical line per row, no corruption).
+    assert r"a\|b" in on_disk
+    assert r"line1\nline2" in on_disk
+
+
+def test_call_formatted_markdown_no_out_path_returns_string_body(tmp_path):
+    # Without out_path, output_format="markdown" returns the rendered string body (ToolResult),
+    # byte-identical to the shared render() — the MCP/CLI parity guarantee.
+    rows = [["a", "b"], ["c", "d"]]
+    payload = _read_values_payload(rows)
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult,
+        lambda s, sid, rngs, **kw: payload,
+        "markdown",
+        object(),
+        "<ID>",
+        ["S!A1:B2"],
+        out_path=None,
+    )
+    assert isinstance(out, ToolResult)
+    from gsheets.core.format import render
+
+    assert out.content[0].text == render(payload, "markdown")
+
+
 def test_call_formatted_out_path_csv_on_structured_raises_before_write(tmp_path):
     # csv on a structured (inspect-shaped) result -> format_unsupported, no half-written file.
     structured = {

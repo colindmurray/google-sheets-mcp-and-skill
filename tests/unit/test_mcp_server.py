@@ -149,23 +149,24 @@ def test_output_format_exposed_default_text(name):
 
 
 def test_read_values_output_format_offers_all_data_formats():
-    # The rectangular-values read accepts every data format (text/json/jsonl/csv/tsv).
+    # The rectangular-values read accepts every data format (text/json/jsonl/csv/tsv/markdown).
     prop = _tools()["sheets_read_values"].parameters["properties"]["output_format"]
     enum = prop.get("enum") or (prop.get("anyOf") and None)
     assert enum is not None
-    assert set(enum) == {"text", "json", "jsonl", "csv", "tsv"}
+    assert set(enum) == {"text", "json", "jsonl", "csv", "tsv", "markdown"}
 
 
 @pytest.mark.parametrize(
     "name",
     ["sheets_inspect", "sheets_describe", "sheets_formula_patterns", "sheets_read_many"],
 )
-def test_structured_reads_restrict_to_text_json_jsonl(name):
-    # Structured reads (no rectangular grid) advertise only text/json/jsonl — csv/tsv are absent.
+def test_structured_reads_restrict_to_text_json_jsonl_markdown(name):
+    # Structured reads (no rectangular grid) advertise text/json/jsonl + markdown (KV) — csv/tsv
+    # are absent (those need a value grid; SPEC §6, D-MD).
     prop = _tools()[name].parameters["properties"]["output_format"]
     enum = prop.get("enum")
     assert enum is not None
-    assert set(enum) == {"text", "json", "jsonl"}
+    assert set(enum) == {"text", "json", "jsonl", "markdown"}
 
 
 def test_call_formatted_text_returns_model():
@@ -226,6 +227,37 @@ def test_call_formatted_jsonl_returns_string():
     assert isinstance(out, ToolResult)
     lines = [l for l in out.content[0].text.splitlines() if l.strip()]
     assert len(lines) == 2
+
+
+def test_call_formatted_markdown_returns_table_string():
+    # markdown over a value grid returns a GitHub table string (embedded pipe escaped).
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "render": "plain",
+        "ranges": [{"range": "S!A1:B2", "values": [["Name", "Note"], ["a|b", "x"]]}],
+    }
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult, lambda s, sid, rngs, **kw: payload, "markdown", object(), "<ID>", ["S!A1:B2"]
+    )
+    assert isinstance(out, ToolResult)
+    text = out.content[0].text
+    assert "| Name | Note |" in text
+    assert "| --- | --- |" in text
+    assert r"a\|b" in text  # the embedded pipe is escaped, not a column separator
+
+
+def test_call_formatted_markdown_on_structured_result_returns_kv():
+    # markdown on a structured (inspect-shaped) result does NOT error — it renders KV lines.
+    structured = {"ok": True, "spreadsheetId": "<ID>", "sheet": "S", "range": "A1", "rows": 1,
+                  "cols": 1, "cells": [{"a1": "A1"}], "merges": []}
+    out = srv._call_formatted(
+        srv.models.InspectResult, lambda s, sid, rng, **kw: structured, "markdown", object(), "<ID>", "A1"
+    )
+    assert isinstance(out, ToolResult)
+    text = out.content[0].text
+    assert "sheet: S" in text
+    assert "ok: True" in text
 
 
 def test_call_formatted_csv_on_structured_result_raises_tool_error():
