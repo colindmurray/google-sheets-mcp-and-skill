@@ -33,6 +33,14 @@ is the authoritative, always-current flag source for any single command.
   ranges emit one `# range: <A1>` block each. `jsonl` emits one `{range,row}` per row (or one list
   element per line for list results). For bulk values, pipe to a file:
   `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
+- **MCP file-output (`out_path`).** The CLI pipes (`> out.csv`); the MCP tool's output goes into the
+  agent's context, so for a big read pass `out_path` to `sheets_read_values` / `sheets_inspect` /
+  `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;
+  `text` resolves to `json`) and returns a small handle instead of the payload:
+  `{ok, path, format, rows, cols, bytes, preview}` (`preview` = the first ~5 rows/records). The
+  parent directory must already exist (it is never created), and credential/config paths are
+  refused (`bad_out_path`). These tools modify no spreadsheet, so they stay read-only. The CLI has
+  no `out_path` — it pipes stdout instead.
 - **The positional `spreadsheet_id` is always the first argument** of every Sheets subcommand.
 - **`USER_ENTERED` is the write default.** Input is parsed like a user typing: `=SUM(B:B)` becomes
   a live formula, `5`/`$10`/`50%`/`2026-06-09` coerce to typed values. `--input raw` stores the

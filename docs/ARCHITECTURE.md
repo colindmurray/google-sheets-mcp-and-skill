@@ -538,6 +538,27 @@ reads offer only `text`/`json`/`jsonl`). For a data format the MCP tool returns 
 wrapped in a `ToolResult` (which keeps the tool's structured `output_schema` while emitting a plain
 string body — FastMCP refuses a bare string as `structured_content` when a schema is set).
 
+### File-output escape valve (`out_path`, MCP-only) (`paths`)
+
+The CLI pipes its rendered output (`> file`, `| pandas`); the MCP tool's output lands in the
+agent's context, so for a large read the dominant cost is dumping the grid into the conversation.
+The three big-read MCP tools — `sheets_read_values`, `sheets_inspect`, `sheets_read_many` — take an
+optional `out_path`. When set, the adapter writes `render(result, output_format)` to that local file
+(utf-8) and returns a small **handle** — `{ok, path, format, rows, cols, bytes, preview}`, with
+`preview` the first ~5 rows (csv/tsv) or records (jsonl/json) — *instead of* the payload. It is the
+same shared `render()` plus a file write, so the file is byte-identical to a CLI `--format` pipe.
+`out_path` is the **only** sanctioned MCP-specific parameter (the CLI doesn't need it — its stdout
+pipes); `output_format="text"` has no file representation, so under `out_path` it resolves to `json`.
+
+The path safety and handle construction live in **pure core** (`core/paths.py`, stdlib `fnmatch` ·
+`os` · `pathlib`): `resolve_out_path` resolves a relative path against the cwd, **errors**
+(`bad_out_path`) if the parent directory does not exist (it never `mkdir`s), and **hard-refuses**
+any path under `~/.config/google-sheets-mcp/` or `~/.secrets/`, or matching a credential glob
+(`*token*.json`, `gcp-oauth.keys.json`, `service-account*.json`, `credentials.json`, `*.pem`,
+`.env*`) — so a read can never clobber credentials. These tools keep `readOnlyHint=True` (the local
+write is a caller-named, opt-in side effect that modifies no spreadsheet/remote state; the side
+effect is documented in each tool's docstring — decision D-ANNOT).
+
 ### Read across files (`read_many`)
 
 `read_many` fans one read across many spreadsheets in a single call. It takes a list of request

@@ -55,6 +55,7 @@ from .core import (
 )
 from .core.errors import SheetsError, to_sheets_error
 from .core.format import render as render_format
+from .core.paths import write_file_handle
 from .core.service import SheetsServices
 
 # Output-format Literals (SPEC §1.3). A rectangular-values read accepts every data format; a
@@ -243,30 +244,59 @@ def _call_formatted(
     fn: Callable[..., dict],
     output_format: str,
     *args: Any,
+    out_path: Optional[str] = None,
     **kwargs: Any,
 ) -> Any:
-    """Run one core fn and shape its result per ``output_format`` (SPEC §1.3) — a read tool body.
+    """Run one core fn and shape its result per ``output_format`` / ``out_path`` — a read tool body.
 
-    Branches identically to the CLI: ``text``/``json`` return the mirror model (FastMCP emits
-    ``structuredContent`` + a terse ``content`` block, exactly as today); the data formats
-    (``jsonl``/``csv``/``tsv``) return ``core.format.render(result, output_format)`` as a plain
-    STRING, so MCP data output is byte-identical to the CLI's piped output and to ``export``. A
-    csv/tsv request on a structured result raises ``format_unsupported`` -> a clean ``ToolError``.
+    Three branches (the third is the MCP-only SPEC §2 file-output escape valve):
+
+    * **``out_path`` set** (the file-output escape valve): write ``render(result, fmt)`` to the
+      local file and return a small HANDLE (``{ok, path, format, rows, cols, bytes, preview}``)
+      INSTEAD of the payload, so a large read costs a handful of tokens rather than dumping the
+      whole grid into the agent's context (SPEC §2.2). ``text`` is not a file format, so under
+      ``out_path`` a ``text`` request resolves to ``json`` (the universal structured serializer) —
+      file output never silently no-ops. The path is resolved + safety-checked in PURE core
+      (:func:`gsheets.core.paths.write_file_handle`); a bad/credential/missing-parent path fails as
+      ``bad_out_path`` BEFORE anything is written. The handle is wrapped in a ``ToolResult`` so
+      FastMCP still emits it as the tool's ``structuredContent``.
+    * **``text``/``json`` (no ``out_path``)**: return the mirror model (FastMCP emits
+      ``structuredContent`` + a terse ``content`` block, exactly as today).
+    * **data formats ``jsonl``/``csv``/``tsv`` (no ``out_path``)**: return
+      ``core.format.render(result, output_format)`` as a plain STRING (byte-identical to the CLI's
+      piped output and to ``export``). A csv/tsv request on a structured result raises
+      ``format_unsupported`` -> a clean ``ToolError``.
 
     Args:
-        model_cls: The mirror result model (used for the text/json path).
+        model_cls: The mirror result model (used for the text/json non-file path).
         fn: The pure core function.
         output_format: ``text`` | ``json`` | ``jsonl`` | ``csv`` | ``tsv``.
+        out_path: MCP-only (SPEC §2). When set, redirect the rendered output to this local file and
+            return a handle. ``None`` (the default) keeps the in-context behavior above.
         *args: ``services`` followed by the core positional args.
         **kwargs: The core keyword args.
 
     Returns:
-        A populated ``model_cls`` instance (text/json — FastMCP emits structuredContent), or a
-        ``ToolResult`` carrying the serialized string as a single text block (data formats). The
-        ``ToolResult`` wrapper keeps the tool's structured ``output_schema`` intact while
-        returning a plain string body (FastMCP refuses to put a bare string into
-        ``structured_content`` when an output_schema is set).
+        A ``ToolResult`` carrying the file-output handle (``out_path`` set) or a serialized string
+        (data formats), or a populated ``model_cls`` instance (text/json, no ``out_path``).
     """
+    if out_path is not None:
+        # The serialized file is bytes on disk, not context: text has no file representation, so
+        # resolve it to json (the universal serializer). Everything else writes as requested.
+        file_format = "json" if output_format == "text" else output_format
+        try:
+            result = fn(*args, **kwargs)
+            handle = write_file_handle(result, file_format, out_path)
+            # Return the handle as a JSON-string body (the same ``ToolResult(content=...)`` shape the
+            # data-format branch uses). This deliberately bypasses the tool's declared
+            # ``output_schema`` (the mirror model) — the handle has a different shape, and a bare
+            # string body is exactly how FastMCP wants a non-schema payload returned.
+            return ToolResult(content=render_format(handle, "json"))
+        except SheetsError as exc:
+            raise to_tool_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001 - turn ANY failure into a structured ToolError
+            raise to_tool_error(to_sheets_error(exc)) from exc
+
     if output_format in ("text", "json"):
         return _call(model_cls, fn, *args, **kwargs)
     try:
@@ -396,6 +426,17 @@ def sheets_inspect(
             "those."
         ),
     ] = "text",
+    out_path: Annotated[
+        Optional[str],
+        Field(
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered read to this "
+            "local file (utf-8, output_format; text resolves to json) and return a small handle "
+            "{ok, path, format, rows, cols, bytes, preview} INSTEAD of the payload — so a large "
+            "read costs a handful of tokens, not the whole grid in context. The parent directory "
+            "must already exist (it is never created); credential / config paths are refused. The "
+            "spreadsheet is NOT modified."
+        ),
+    ] = None,
 ) -> models.InspectResult:
     """Read a range richly: values and formulas, both userEntered & effective formats, merges,
     notes, and structured data-validation — in one call, with a tight fields mask.
@@ -405,12 +446,17 @@ def sheets_inspect(
     straight back into ``sheets_set_validation``. Rich-text and pivot reads are opt-in and
     attach per-cell only when present, so they cost nothing on a plain sheet.
 
+    Setting ``out_path`` writes the rendered read to a LOCAL FILE (utf-8) and returns a small
+    handle instead of the payload — an opt-in local side effect; the spreadsheet itself is never
+    modified, so this tool stays read-only.
+
     Returns:
         ``{ok, spreadsheetId, sheet, range, rows, cols, cells:[{a1,value,formula,
         userEnteredFormat,effectiveFormat,note,validation,validationRule,runs,hyperlink,pivot}],
         merges, compact}``. With ``compact=True`` the top-level ``cells`` array is replaced by
         rectangular ``runs`` blocks; independently of that, the per-cell rich-text ``runs`` /
-        ``hyperlink`` / ``pivot`` keys appear only on cells that carry them.
+        ``hyperlink`` / ``pivot`` keys appear only on cells that carry them. With ``out_path`` set,
+        returns the file handle ``{ok, path, format, rows, cols, bytes, preview}`` instead.
     """
     return _call_formatted(
         models.InspectResult,
@@ -419,6 +465,7 @@ def sheets_inspect(
         _services(ctx),
         spreadsheet_id,
         range,
+        out_path=out_path,
         compact=compact,
         include_effective_format=include_effective_format,
         include_user_entered_format=include_user_entered_format,
@@ -474,6 +521,17 @@ def sheets_read_values(
             "render csv and process it."
         ),
     ] = "text",
+    out_path: Annotated[
+        Optional[str],
+        Field(
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered values to this "
+            "local file (utf-8, output_format; text resolves to json) and return a small handle "
+            "{ok, path, format, rows, cols, bytes, preview} INSTEAD of the payload — the way to "
+            "move a big table out of context (render csv to a file, then process it with "
+            "pandas/duckdb). The parent directory must already exist (it is never created); "
+            "credential / config paths are refused. The spreadsheet is NOT modified."
+        ),
+    ] = None,
 ) -> models.ReadValuesResult:
     """Read plain values for one or more A1 ranges, with a selectable render mode.
 
@@ -487,13 +545,15 @@ def sheets_read_values(
     equals ``values`` almost everywhere. Pass ``diff_only=true`` to null out the equal cells and
     drop ``computed`` where nothing differs — roughly halving the payload while staying
     index-aligned (a ``null`` in ``computed`` means "same as values"). For a huge VALUE-only dump,
-    ``sheets_export`` (csv/tsv) is far better than this tool — it writes a local file and never
-    hits the token cap; ``max_cells`` guards against an accidental token-cap blow-up here.
+    set ``out_path`` (or use ``sheets_export``) to write csv/tsv to a LOCAL FILE and get back a
+    small handle instead of the grid — neither hits the token cap; ``max_cells`` guards against an
+    accidental token-cap blow-up on the in-context path.
 
     Returns:
         ``{ok, spreadsheetId, render, ranges:[{range, values:[[...]], computed:[[...]]}]}``
         (``computed`` present only when ``render="all"``; with ``diff_only`` it is sparse/absent;
-        rows padded to a rectangle).
+        rows padded to a rectangle). With ``out_path`` set, returns the file handle
+        ``{ok, path, format, rows, cols, bytes, preview}`` instead.
     """
     return _call_formatted(
         models.ReadValuesResult,
@@ -502,6 +562,7 @@ def sheets_read_values(
         _services(ctx),
         spreadsheet_id,
         ranges,
+        out_path=out_path,
         render=render,
         diff_only=diff_only,
         max_cells=max_cells,
@@ -580,6 +641,17 @@ def sheets_read_many(
             "one per-file result element per line."
         ),
     ] = "text",
+    out_path: Annotated[
+        Optional[str],
+        Field(
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered cross-file "
+            "result to this local file (utf-8, output_format; text resolves to json) and return a "
+            "small handle {ok, path, format, rows, cols, bytes, preview} INSTEAD of the payload — "
+            "so a wide fan-out doesn't dump every file's data into context. The parent directory "
+            "must already exist (it is never created); credential / config paths are refused. No "
+            "spreadsheet is modified."
+        ),
+    ] = None,
 ) -> models.ReadManyResult:
     """Fan one values-or-summary read across many spreadsheets, capturing per-file errors.
 
@@ -590,11 +662,16 @@ def sheets_read_many(
     (the fan-out ran) and does NOT mean every file succeeded — check ``partialFailure`` /
     ``failed`` (or each ``results[]`` entry's ``ok``).
 
+    Setting ``out_path`` writes the rendered cross-file result to a LOCAL FILE (utf-8) and returns
+    a small handle instead of the payload — an opt-in local side effect; no spreadsheet is
+    modified, so this tool stays read-only.
+
     Returns:
         ``{ok, mode, count, succeeded, failed, partialFailure, results:[...]}`` — ``partialFailure``
         is true when any file failed; each entry is either a success dict
         (``{ok:True, spreadsheetId, ...}``, a values or summary shape) or a captured failure, one
-        per request in request order.
+        per request in request order. With ``out_path`` set, returns the file handle
+        ``{ok, path, format, rows, cols, bytes, preview}`` instead.
     """
     return _call_formatted(
         models.ReadManyResult,
@@ -602,6 +679,7 @@ def sheets_read_many(
         output_format,
         _services(ctx),
         requests,
+        out_path=out_path,
         mode=mode,
     )
 
