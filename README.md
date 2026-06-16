@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/colindmurray/google-sheets-mcp-and-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/colindmurray/google-sheets-mcp-and-skill/actions/workflows/ci.yml)
 
-Read a Google Sheet the way it actually works — formulas, real colors, conditional-format rules, native tables, filter state, in-cell rich text, and the comments humans left on it — then write it back safely, or export the whole thing to PDF, Excel, or CSV. One core library, exposed as both an MCP server and a CLI (with a bundled skill).
+Read a Google Sheet the way it actually works — formulas, real colors, conditional-format rules, native tables, filter state, in-cell rich text, and the comments humans left on it — then write it back safely, or export the whole thing to PDF, Excel, or CSV. Render any read as text, JSON, JSONL, CSV, TSV, or Markdown. One core library, exposed as both an MCP server and a CLI (with a bundled skill).
 
 ## The problem
 
@@ -61,6 +61,9 @@ The official spreadsheet skill in [`anthropics/skills`](https://github.com/anthr
 
 - **Auditing or documenting a formula- and conditional-formatting-driven sheet** — read the logic instead of guessing from a screenshot.
 - **Understanding a sheet you didn't build** — `overview` → `inspect` → `read-conditional-formats` → `structure --action read` gives you formulas, real colors, CF rules, table schemas, filter state, banding, and named/protected ranges in one cheap pass.
+- **Reading a whole region in one call** — `describe` folds values, formulas, formats, merges, notes, validation, and structure for a range (or developer-metadata-addressed block) into a single structured read, with a `--max-cells` guard that fails fast before returning an oversized payload.
+- **Seeing a column's formula logic without reading every cell** — `formula-patterns` dedupes the formulas down a column into distinct R1C1-relative patterns plus their row spans, so a 10,000-row derived column reads as a handful of patterns.
+- **Choosing the output shape the consumer needs** — render any read as text, JSON, JSONL, CSV, TSV, or Markdown (`--format` on the CLI; `output_format` per read tool over MCP), so a value grid can drop straight into a CSV pipeline or a Markdown table.
 - **Not editing the wrong row** — read the active filter view and basic filter first, so an agent knows which rows are hidden before it touches anything.
 - **Round-tripping conditional-format rules** — read a rule as a readable line, edit the line, write it back at the same priority index.
 - **Recovering multi-link cells and styled text** — per-run rich text plus in-cell hyperlinks, the only way to read a cell holding more than one link.
@@ -96,6 +99,8 @@ The MCP server needs a **pre-existing, valid or refreshable token**: it never op
 
 The server registers one `sheets_*` tool per core function — the full list is in the [command / tool reference](#command--tool-reference) below. Read tools are annotated `readOnlyHint`; destructive paths carry `destructiveHint`. Set `ENABLED_TOOLS` to a comma-separated allowlist to register only a subset.
 
+The read tools (`sheets_read_values`, `sheets_inspect`, `sheets_describe`, `sheets_formula_patterns`, `sheets_read_many`) take an `output_format` arg to pick the rendering — `read_values` accepts `text`/`json`/`jsonl`/`csv`/`tsv`/`markdown`; the structured reads accept `text`/`json`/`jsonl`/`markdown` (no `csv`/`tsv`). Those same five tools accept `out_path`: an MCP-only escape valve that writes the rendered read to a local file and returns a small handle (path, format, row/col counts, byte size, a short preview) instead of streaming the whole payload back through the model. Paths are resolved and safety-checked — credential-shaped filenames and the config/secrets subtrees are refused, and the parent directory must already exist.
+
 ### B. CLI + skill
 
 The same surface as a command-line tool. Install gives you `gsheets`:
@@ -121,12 +126,20 @@ render=all
   Spent => Spent | Remaining => Remaining
   =SUM(C5:C40) => $1,824.00 | =B2-C2 => $676.00
 
-# Read the conditional-format rules that color cells dynamically.
+# Fold a whole region — values, formulas, formats, merges, notes, validation, structure — into one read.
+$ gsheets describe <YOUR_SPREADSHEET_ID> 'Budget!A1:E40' --max-cells 5000
+
+# Dedupe a column's formulas into distinct patterns + their row spans.
+$ gsheets formula-patterns <YOUR_SPREADSHEET_ID> 'Budget!E2:E40'
+
+# Read the conditional-format rules that color cells dynamically (whole sheet, or scope to a range).
 $ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Budget
 # Budget (id=0)
   [0] [Budget!D2:D40] if CUSTOM_FORMULA(=$D2<0) -> bg #F4C7C3 bold
   [1] [Budget!C2:C40] if NUMBER_GREATER(500) -> fg #B45309 bold
   [2] [Budget!E2:E40] gradient min=#FFFFFF | max=#0B8043
+
+$ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --range 'Budget!D2:D40'  # only rules overlapping this range
 
 # The full structural picture: tables, filters, banding, slicers, protected ranges.
 $ gsheets structure <YOUR_SPREADSHEET_ID> --action read --sheet Budget
@@ -149,7 +162,7 @@ $ gsheets comments <YOUR_SPREADSHEET_ID>
 comment AAABcZwq8jM by Dana Kim: "Can we split Utilities out of Misc?" (open, 1 reply)
 ```
 
-Add `--json` (before the subcommand) to get the exact machine shape — the raw core dict — for piping to `jq`.
+Add `--json` (before the subcommand) to get the exact machine shape — the raw core dict — for piping to `jq`. `--json` is an alias for the global `--format json`; the full axis is `--format {text,json,jsonl,csv,tsv,markdown}` (default `text`), uniform across subcommands. `csv`/`tsv` only render a rectangular value grid (`read-values`) — on a structured read they raise `format_unsupported`. `read-values` also takes `--major {rows,columns}` and, like `describe`, can address by `--data-filter-json` (an A1, `gridRange`, or `developerMetadataLookup` selector) instead of a positional range.
 
 Writing follows the same read → write → read-back rhythm:
 
@@ -257,8 +270,10 @@ Each CLI subcommand maps 1:1 to a core function and to the matching `sheets_*` M
 |---|---|---|
 | `overview` | `sheets_overview` | Cheap orientation: title, locale/timeZone, tabs, sizes, frozen panes, per-sheet protected/conditional-format **counts**, named ranges. No grid data. Call this first. |
 | `inspect` | `sheets_inspect` | Rich read of a range: per-cell values + formulas + userEntered & effective formats + merges + notes + structured validation. `--rich-text` adds per-run styled text and in-cell links; `--pivot` adds pivot definitions on anchor cells; `--compact` collapses repeats into rectangular runs. |
-| `read-values` | `sheets_read_values` | Plain values for one or more ranges; `--render` = `plain` \| `unformatted` \| `formula` \| `all` (formula + computed side by side). |
-| `read-conditional-formats` | `sheets_read_conditional_formats` | Conditional-format rules serialized to readable lines, each with its positional `index`. The read this project was built around; most Sheets tooling can't read these rules at all. |
+| `describe` | `sheets_describe` | One-call region read: folds values, formulas, formats, merges, notes, validation, and the structure overlapping the range into a single structured result. Address by range(s) or by developer-metadata-addressed block (`--data-filter-json`); `--max-cells` fails fast before returning an oversized payload. |
+| `formula-patterns` | `sheets_formula_patterns` | Dedupe a column's formulas into distinct R1C1-relative patterns and their row spans (column-major), so a long derived column reads as a few patterns instead of thousands of cells. `--no-sample` skips the sampled computed-value pass. |
+| `read-values` | `sheets_read_values` | Plain values for one or more ranges; `--render` = `plain` \| `unformatted` \| `formula` \| `all` (formula + computed side by side). `--major rows\|columns` flips the orientation; `--data-filter-json` addresses by selector instead of A1. |
+| `read-conditional-formats` | `sheets_read_conditional_formats` | Conditional-format rules serialized to readable lines, each with its positional `index`. Scope to one sheet (`--sheet`) or just the rules overlapping a range (`--range`). The read this project was built around; most Sheets tooling can't read these rules at all. |
 | `read-many` | `sheets_read_many` | Read values or summaries across **several spreadsheets** in one call; a bad id becomes a per-file error instead of failing the batch. |
 | `comments` | `sheets_comments` | Drive threaded comments — **read, create, reply, resolve, delete** (`--action`). Uses the Drive API. |
 | `export` | `sheets_export` | Download the workbook to PDF / XLSX / ODS (whole file, via Drive), or a single tab to CSV / TSV. Writes a local file and reports the path + byte count. |
@@ -285,6 +300,8 @@ A few behaviors worth knowing:
 - **Conditional-format rules are addressed by positional index** (0 = highest priority; there's no stable rule id). When mutating several rules in separate calls, go high index → low, or use the batch form, which orders them for you.
 - **Format / clear / structure / dimension writes auto-build their field mask** from the payload, so a partial update never wipes unspecified subfields.
 - **Rich reads are opt-in and per-cell.** `--rich-text` (runs + hyperlinks) and `--pivot` add fields to the mask only when set, and attach data only to cells that have it — a plain sheet pays nothing.
+- **Output rendering is its own axis.** The CLI's global `--format {text,json,jsonl,csv,tsv,markdown}` (and the read tools' MCP `output_format`) wraps the same result in a different shape; `csv`/`tsv` only apply to a rectangular value grid (`read-values`) and raise `format_unsupported` on a structured read. This is independent of `read-values --render` (which picks values vs. formulas) and of `export --format` (which picks an export backend: PDF/XLSX/ODS via Drive, CSV/TSV per-tab).
+- **Reads can address by selector, not just A1.** `read-values` and `describe` accept a data filter — an `a1`, `gridRange`, or `developerMetadataLookup` selector — so a metadata-anchored block survives row inserts that would move its A1 address.
 - **Anything writable is readable back.** Read a rule, validation, format, table, banding, filter, or slicer, edit it, write it back. The remaining read-only surfaces are deliberate v1 scope: charts read returns metadata (write the full spec via `batch`); pivot definitions and rich-text runs/hyperlinks are read-only; Connected Sheets / data sources stay batch-only.
 
 ## Build from source

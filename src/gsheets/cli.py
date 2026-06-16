@@ -287,7 +287,8 @@ def _add_describe(sub) -> None:
         type=_json_arg,
         default=None,
         help="symbolic addressing INSTEAD of positional ranges: a JSON list of selectors, "
-        'e.g. \'[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]\' (or @file.json)',
+        'e.g. \'[{"a1":"Sheet1!A1:B10"},{"developerMetadataLookup":{"metadataKey":"block:totals"}}]\' '
+        "(or @file.json). Mutually exclusive with the ranges positional.",
     )
     p.add_argument(
         "--max-cells",
@@ -321,7 +322,11 @@ def _add_read_values(sub) -> None:
     _spreadsheet_id_arg(p)
     # ``ranges`` is OPTIONAL (nargs="*") because --data-filter-json is an alternative addressing
     # path (SPEC §6 P2); core enforces "exactly one of ranges / data_filters".
-    p.add_argument("ranges", nargs="*", help="one or more A1 ranges (omit when using --data-filter-json)")
+    p.add_argument(
+        "ranges",
+        nargs="*",
+        help="one or more A1 ranges (multi-sheet allowed; omit when using --data-filter-json)",
+    )
     p.add_argument(
         "--render",
         choices=_RENDER_CHOICES,

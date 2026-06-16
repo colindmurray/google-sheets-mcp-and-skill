@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "google-sheets-mcp-and-skill"
-version = "0.2.0"
-description = "Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness — values + formulas, cell formatting, and conditional-format rules — as the thesis."
+version = "0.3.0"
+description = "Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness — values + formulas, cell formatting, and conditional-format rules — as the thesis. v0.3 adds structure-aware reads (describe, formula-patterns), multi-format output (text/json/jsonl/csv/tsv/markdown), and MCP file-output handles."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Colin Murray" }]
-keywords = ["google-sheets", "mcp", "cli", "spreadsheets", "ai", "skill", "conditional-formatting"]
+keywords = ["google-sheets", "mcp", "cli", "spreadsheets", "ai", "skill", "conditional-formatting", "formula-patterns", "csv", "markdown"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",

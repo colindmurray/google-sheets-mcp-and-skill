@@ -43,12 +43,13 @@ Five invariants follow from that thesis and are not negotiable:
                            ▼                             ▼
                 ┌─────────────────────────────────────────────────────┐
                 │                  PURE CORE  (gsheets.core)           │
-                │  values · reads · formatting · rules · structure ·   │
-                │  charts · batch · data_ops · dimensions · comments · │
-                │  export · multiread                                  │
+                │  values · reads · formula_patterns · formatting ·    │
+                │  rules · structure · charts · batch · data_ops ·     │
+                │  dimensions · comments · export · multiread          │
                 │    +   helpers:                                      │
                 │  addressing · colors · fieldsmask · flatten ·        │
-                │  condformat · errors · service · format   +          │
+                │  condformat · dataselector · errors · service ·      │
+                │  format · paths   +                                  │
                 │                          serializers:                │
                 │  richtext · pivot · tables · filters · banding ·     │
                 │  slicers · comments                                  │
@@ -95,6 +96,9 @@ Helper modules with disjoint responsibilities back the function surface:
 | `fieldsmask` | `build_fields_mask(payload)` — the minimal `fields` mask covering exactly the keys present. |
 | `flatten` | `flatten_cell_format()` — Google's nested `CellFormat` → flat shape. |
 | `condformat` | (de)serialize conditional-format rules ↔ readable lines (see grammar below). |
+| `dataselector` | `build_data_filters()` — validate + resolve the `data_filters` selector grammar (metadata-/grid-/A1-addressed reads); see below. |
+| `format` | `render()` / `render_grid` / `render_kv` / `render_addressed` — the shared pure output-format layer (json/jsonl/csv/tsv/markdown + address-keyed sparse rendering); see below. |
+| `paths` | `resolve_out_path()` + `write_file_handle()` — the MCP `out_path` safety check and file-output handle; see below. |
 
 Seven additional pure serializer modules (added in v0.2) flatten the richer read surface
 into the same terse, structured, round-trippable line style. Each takes already-resolved
@@ -579,22 +583,28 @@ rectangle — the choice is per shape, not global.
 
 The CLI pipes its rendered output (`> file`, `| pandas`); the MCP tool's output lands in the
 agent's context, so for a large read the dominant cost is dumping the grid into the conversation.
-The three big-read MCP tools — `sheets_read_values`, `sheets_inspect`, `sheets_read_many` — take an
-optional `out_path`. When set, the adapter writes `render(result, output_format)` to that local file
-(utf-8) and returns a small **handle** — `{ok, path, format, rows, cols, bytes, preview}`, with
-`preview` the first ~5 rows (csv/tsv) or records (jsonl/json) — *instead of* the payload. It is the
-same shared `render()` plus a file write, so the file is byte-identical to a CLI `--format` pipe.
-`out_path` is the **only** sanctioned MCP-specific parameter (the CLI doesn't need it — its stdout
-pipes); `output_format="text"` has no file representation, so under `out_path` it resolves to `json`.
+The five read MCP tools that go through `_call_formatted` — `sheets_read_values`, `sheets_inspect`,
+`sheets_describe`, `sheets_formula_patterns`, `sheets_read_many` — take an optional `out_path`. When
+set, the adapter writes `render(result, output_format)` to that local file (utf-8) and returns a
+small **handle** — `{ok, path, format, rows, cols, bytes, preview}`, with `preview` the first ~5 rows
+(csv/tsv) or records (jsonl/json) — *instead of* the payload. It is the same shared `render()` plus a
+file write, so the file is byte-identical to a CLI `--format` pipe. `out_path` is the **only**
+sanctioned MCP-specific parameter (the CLI doesn't need it — its stdout pipes);
+`output_format="text"` has no file representation, so under `out_path` it resolves to `json` (the
+universal structured serializer).
 
 The path safety and handle construction live in **pure core** (`core/paths.py`, stdlib `fnmatch` ·
 `os` · `pathlib`): `resolve_out_path` resolves a relative path against the cwd, **errors**
-(`bad_out_path`) if the parent directory does not exist (it never `mkdir`s), and **hard-refuses**
-any path under `~/.config/google-sheets-mcp/` or `~/.secrets/`, or matching a credential glob
+(`bad_out_path`) if the parent directory does not exist (it never `mkdir`s — the agent named the
+file; core does not invent directory trees), and **hard-refuses** any path under
+`~/.config/google-sheets-mcp/` or `~/.secrets/`, or whose basename matches a credential glob
 (`*token*.json`, `gcp-oauth.keys.json`, `service-account*.json`, `credentials.json`, `*.pem`,
-`.env*`) — so a read can never clobber credentials. These tools keep `readOnlyHint=True` (the local
-write is a caller-named, opt-in side effect that modifies no spreadsheet/remote state; the side
-effect is documented in each tool's docstring — decision D-ANNOT).
+`.env`, `.env.*`) — so a read can never clobber credentials. `write_file_handle` then renders the
+result, writes it utf-8, and builds the `{ok, path, format, rows, cols, bytes, preview}` handle
+(`rows`/`cols` describe the value grid for csv/tsv; for jsonl/json `rows` is the record count and
+`cols` is 0; `preview` is capped at the first ~5 rows/records). These tools keep `readOnlyHint=True`
+(the local write is a caller-named, opt-in side effect that modifies no spreadsheet/remote state;
+the side effect is documented in each tool's docstring — decision D-ANNOT).
 
 ### Read across files (`read_many`)
 
@@ -605,6 +615,29 @@ Validation of the request list is up front (a malformed batch is a caller bug), 
 failure on one id (404, permission denied, bad range) is **caught per file** and recorded as a
 `{spreadsheetId, ok: false, error}` entry — the other files still read. It is read-only by design:
 the Sheets API has no cross-file atomic write, so a multi-file mutation could only half-apply.
+
+### Data-filter selectors (`dataselector`)
+
+`read_values`, `describe`, and the per-request `values` mode of `read_many` accept a `data_filters`
+list as an **alternative to literal `ranges`** — the durable, position-independent way to address a
+region (a `metadata`-tagged block survives row/column inserts that would shift an A1 range). Core
+enforces **exactly one of `ranges` / `data_filters`** per call; the CLI surfaces the selector list as
+`--data-filter-json` (with `@file.json` support), the MCP as a `data_filters: list[dict]` arg. The
+grammar lives in pure core (`core/dataselector.py`); each selector is **exactly one** of:
+
+```jsonc
+{ "a1": "Sheet1!A1:B10" }                                   // resolved A1 → GridRange inside core
+{ "gridRange": { "sheetId": 0, "startRowIndex": 0, ... } }  // a raw Google GridRange, passed through
+{ "developerMetadataLookup": { "metadataKey": "block:totals" } }  // matches a metadata-tagged block
+```
+
+`build_data_filters()` validates the list and resolves each selector; the `a1` form reuses the same
+A1 → `GridRange` resolution as the literal-`ranges` path, while `gridRange` / `developerMetadataLookup`
+pass through verbatim (the `developerMetadataLookup` shape is the one `metadata` already uses for its
+CRUD). An empty list, a non-list, or a selector carrying none / more than one of the three keys raises
+`SheetsError("bad_data_filters")` with an example hint. CLI `ranges` positionals are `nargs="*"` and
+collapse to `None` when empty, so `--data-filter-json` can be the addressing path without colliding
+with a positional range.
 
 ---
 

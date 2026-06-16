@@ -225,6 +225,18 @@ gsheets metadata <YOUR_SPREADSHEET_ID> --action delete --metadata-id 7
 - `--visibility` is `DOCUMENT` (default) or `PROJECT`.
 - `read` returns `{"ok": true, "action": "read", "metadata": [...]}`; `create` captures the assigned
   `metadataId`. `delete` is **destructive**.
+- **Address reads by the key, not A1.** Once anchored, a metadata key is a data-filter selector:
+  `read-values` / `describe` / `read-many` accept `{"developerMetadataLookup":{"metadataKey":"section"}}`
+  in place of an A1 range, so the read resolves to whatever range the anchor currently covers after
+  inserts/deletes — the payoff for using metadata over hard-coded A1.
+
+```sh
+gsheets --json read-values <YOUR_SPREADSHEET_ID> \
+  --data-filter-json '[{"developerMetadataLookup":{"metadataKey":"section"}}]'
+```
+
+  See `intermediate.md`'s read-path data-filter grammar for the full selector forms (`a1` /
+  `gridRange` / `developerMetadataLookup`).
 
 ### Charts
 

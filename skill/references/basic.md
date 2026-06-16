@@ -25,7 +25,7 @@ is the authoritative, always-current flag source for any single command.
   | Result shape | Commands | Formats |
   |---|---|---|
   | Rectangular values | `read-values` | text, json, jsonl, csv, tsv, markdown |
-  | Structured/rich | `inspect`, `describe`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl, markdown |
+  | Structured/rich | `inspect`, `describe`, `formula-patterns`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl, markdown |
   | Small confirmations | every writer, `auth` | text, json |
 
   `csv`/`tsv` need a rectangular value read — asking for them on a structured result is a clean
@@ -36,13 +36,15 @@ is the authoritative, always-current flag source for any single command.
   structured read — it never errors on a structured shape, but it is verbose, so for bulk values
   prefer csv to a file: `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
 - **MCP file-output (`out_path`).** The CLI pipes (`> out.csv`); the MCP tool's output goes into the
-  agent's context, so for a big read pass `out_path` to `sheets_read_values` / `sheets_inspect` /
-  `sheets_describe` / `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;
-  `text` resolves to `json`) and returns a small handle instead of the payload:
-  `{ok, path, format, rows, cols, bytes, preview}` (`preview` = the first ~5 rows/records). The
-  parent directory must already exist (it is never created), and credential/config paths are
-  refused (`bad_out_path`). These tools modify no spreadsheet, so they stay read-only. The CLI has
-  no `out_path` — it pipes stdout instead.
+  agent's context, so for a big read pass `out_path` to one of the five `output_format` read tools —
+  `sheets_read_values` / `sheets_inspect` / `sheets_describe` / `sheets_formula_patterns` /
+  `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;
+  `text` is not a file format, so it resolves to `json`) and returns a small handle instead of the
+  payload: `{ok, path, format, rows, cols, bytes, preview}` where `format` is one of
+  `csv|tsv|jsonl|json`, `rows`/`cols` describe the value grid (jsonl/json set `rows` = record count,
+  `cols` = 0), and `preview` is the first ~5 rows/records. The parent directory must already exist
+  (it is never created), and credential/config paths are refused (`bad_out_path`). These tools modify
+  no spreadsheet, so they stay read-only. `out_path` is MCP-only — the CLI pipes stdout instead.
 - **The positional `spreadsheet_id` is always the first argument** of every Sheets subcommand.
 - **`USER_ENTERED` is the write default.** Input is parsed like a user typing: `=SUM(B:B)` becomes
   a live formula, `5`/`$10`/`50%`/`2026-06-09` coerce to typed values. `--input raw` stores the

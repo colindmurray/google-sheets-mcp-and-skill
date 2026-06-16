@@ -42,6 +42,53 @@ This is the read side; the base write actions are in [Operations](#operations) a
 filter/slicer object CRUD is advanced. Pair with `dimensions --action read` to see what rows/cols a
 viewer actually has hidden.
 
+### `read-values` — major dimension & non-A1 addressing
+
+The everyday `read-values` (range list, `--render`) is in `basic.md`. Two intermediate-tier knobs:
+
+**Transpose the grid (`--major`).** Read column-major instead of the default row-major — handy when a
+column *is* the record and you want each column as one inner array.
+
+```sh
+gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D100' --major columns
+```
+
+`--major {rows,columns}` (default `rows`). MCP names the same knob `major_dimension` (Google's own
+`majorDimension` spelling). The result echoes the chosen mode back under `"major"`.
+
+**Address by data filter (`--data-filter-json`).** Instead of A1 `ranges`, select cells by **grid
+range** or **developer metadata** — read a named block without knowing its current A1 (rows shift,
+the metadata key doesn't). Each selector is **exactly one** of:
+
+```sh
+gsheets --json read-values <YOUR_SPREADSHEET_ID> --data-filter-json '[
+  {"a1":"Sheet1!A1:B10"},
+  {"gridRange":{"sheetId":0,"startRowIndex":0,"endRowIndex":10}},
+  {"developerMetadataLookup":{"metadataKey":"block:totals"}}
+]'
+```
+
+`ranges` and `--data-filter-json` are the **two mutually exclusive addressing paths** — pass exactly
+one (CLI accepts `@file.json`; MCP arg is `data_filters`). An invalid selector → `bad_data_filters`.
+`describe` takes the same selector grammar; `read-many` accepts per-request `data_filters` in values
+mode. Pair developer-metadata addressing with `metadata` (advanced) to set the keys you look up here.
+
+`--max-cells N` caps the read up front: it fails with `result_too_large` **before** returning a
+payload, instead of letting an oversized read fail only at the token cap.
+
+### `read-conditional-formats --range` — scope CF reads to a rectangle
+
+`read-conditional-formats` (CF rules with their priority index; in `basic.md`) defaults to every
+sheet, or `--sheet NAME` for one tab. `--range` narrows further: only rules **whose range overlaps**
+the given A1 rectangle, with their original sheet-level indices preserved (so an index you read here
+still addresses the right rule in `set-conditional-format`).
+
+```sh
+gsheets --json read-conditional-formats <YOUR_SPREADSHEET_ID> --range 'Sheet1!A1:C50'
+```
+
+`--range` carries its own sheet, so it is **mutually exclusive with `--sheet`** (both → `conflicting_args`).
+
 ### `read-many` — cross-file fan-out
 
 Read values or summaries across **many spreadsheets** in one call, capturing each file's failure as

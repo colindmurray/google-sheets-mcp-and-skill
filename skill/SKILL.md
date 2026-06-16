@@ -1,13 +1,15 @@
 ---
 name: gsheets
 description: >-
-  Read and write Google Sheets from the command line with the `gsheets` CLI: read values AND
-  formulas side by side, cell formatting and colors (including effectiveFormat / what actually
-  renders), conditional-formatting rules, data validation, merged cells, named and protected
-  ranges, frozen rows/cols, native tables, filter views, banding, pivots, slicers, and developer
-  metadata; read and reply to Drive comments; export a sheet to PDF/Excel/CSV; read across many
-  spreadsheets in one call; and write values, formatting, rules, tables, slicers, and structure
-  back safely. Use when a task involves inspecting, understanding, auditing, or editing a Google
+  Read and write Google Sheets from the command line with the `gsheets` CLI: characterize a whole
+  region in one call (cells + merges + range-scoped conditional formats + tables); read values AND
+  formulas side by side, collapse a region's repeated formulas to per-column templates, read cell
+  formatting and colors (including effectiveFormat / what actually renders), conditional-formatting
+  rules, data validation, merged cells, named and protected ranges, frozen rows/cols, native tables,
+  filter views, banding, pivots, slicers, and developer metadata; read and reply to Drive comments;
+  export a sheet to PDF/Excel/CSV; read across many spreadsheets in one call; and write values,
+  formatting, rules, tables, slicers, and structure back safely. Output any read as text, JSON,
+  JSONL, CSV, TSV, or markdown. Use when a task involves inspecting, understanding, auditing, or editing a Google
   Spreadsheet or a tab/cell/range within one — especially anything about a sheet's formulas,
   colors, conditional formatting, validation, tables, filters, comments, or layout, or when the
   user pastes a spreadsheet URL or ID and asks what it does or to change it. Prefer this over
@@ -65,6 +67,10 @@ Conventions:
   latter is an argparse error). `--format {text,json,jsonl,csv,tsv,markdown}` (default `text`)
   chooses the output serialization; `--json` is a permanent alias for `--format json`. See "Choosing
   an output format" below.
+- Writing a big read straight to a file is MCP-only. The MCP read tools (`read_values`, `inspect`,
+  `describe`, `formula_patterns`, `read_many`) take an `out_path` arg that writes the rendered read
+  to disk and returns a tiny handle instead of the payload. The CLI has no `out_path` — redirect
+  with the shell instead (`gsheets --format csv read-values <ID> <RANGE> > out.csv`).
 - `gsheets <cmd> --help` is the source of truth for the exact, current flags of any command.
 
 ## Command map (Understand → Change → Escape hatch)
@@ -79,7 +85,9 @@ Understand (read-only):
   rules that INTERSECT that range, its tables, banding, and protected ranges, plus a validation
   summary. Multi-range AND multi-sheet. Collapses what used to be `inspect` + `structure` +
   `read-conditional-formats` into one `spreadsheets.get` — start here to characterize a region.
-  `--max-cells N` fails fast on a region that is too big.
+  `--max-cells N` fails fast on a region that is too big. Address by A1 ranges OR by
+  `--data-filter-json` (exactly one) — the latter selects by gridRange or a developer-metadata key
+  (`{"developerMetadataLookup":{"metadataKey":"block:totals"}}`).
 - `inspect <ID> <RANGE>` — flagship rich read: per-cell values + formulas + userEntered &
   effective formats + merges + validation. `--compact` collapses repeats into rectangular runs.
   `--rich-text` adds per-run rich text (styled segments + in-cell links) and the cell `hyperlink`;
@@ -87,16 +95,21 @@ Understand (read-only):
   `inspect` when you want one tab/range richly (or the rich-text / pivot / compact-runs facets);
   `describe` when you want the region's structure + CF scoped alongside the cells.
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
-  (`all` returns formulas and computed values side by side). For big reads: `--diff-only` drops the
-  duplicate `computed` matrix on static sheets; `--max-cells N` fails fast instead of blowing the
-  token cap (and for pure value dumps, `export csv` is better than either — see the gotchas).
+  (`all` returns formulas and computed values side by side). `--major {rows,columns}` (default
+  `rows`; MCP `major_dimension`) transposes the read so a column-oriented region comes back keyed by
+  column. Address by A1 ranges OR by `--data-filter-json` (exactly one), same selector grammar as
+  `describe`. For big reads: `--diff-only` drops the duplicate `computed` matrix on static sheets;
+  `--max-cells N` fails fast instead of blowing the token cap (and for pure value dumps, `export
+  csv` is better than either — see the gotchas).
 - `formula-patterns <ID> <RANGE...>` — collapse a region's REPEATED formulas to the distinct
   templates per column (relative rows normalized to `{r}` / `{r±k}`), with the row span each covers
   and a sample computed value. Token-cheap on a wide grid where one formula repeats down 50 rows.
   `--no-sample` skips the computed sample. Lossy-but-honest: a column that won't reduce is shown
   verbatim (`reduced:false`); for the lossless ground truth use `read-values --render formula`.
-- `read-conditional-formats <ID> [--sheet NAME]` — conditional-format rules as terse, readable,
-  round-trippable lines with their positional `index`.
+- `read-conditional-formats <ID> [--sheet NAME | --range A1]` — conditional-format rules as terse,
+  readable, round-trippable lines with their positional `index`. `--sheet` scopes to one tab;
+  `--range` (the range carries its own sheet) returns only the rules that intersect that range
+  (the two are mutually exclusive).
 - `read-many --requests-json '[...]' [--mode {values,summary}]` — read values or summaries across
   many spreadsheets in one call. The ids live inside `--requests-json` (one per request); there is
   no positional id and no `--ranges` flag. A bad id is captured as a per-file `{ok:false,error}`
@@ -315,6 +328,11 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 - Theme colors read back as `theme:NAME` (e.g. `theme:ACCENT1`), not a resolved hex. If you compare
   a read-back color against a literal `#RRGGBB`, a theme-colored cell will not match — that is
   expected, not a bug.
+- Read by a durable anchor when A1 shifts. `read-values` and `describe` accept `--data-filter-json`
+  (MCP `data_filters`) instead of A1 — each selector is exactly one of `{"a1":...}`,
+  `{"gridRange":...}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`. Pair it with
+  a `metadata --action create` anchor so a region survives inserted rows/cols that would break a
+  hard-coded A1 range. You pass A1 ranges OR a data filter, never both (core enforces exactly one).
 - Single-quote A1 ranges in the shell. A range like `'WEEK-TEMPLATES!AS$START'` contains `!` and
   `$`, which zsh/bash will history-expand or variable-expand if unquoted, silently corrupting the
   argument. Always wrap A1 ranges in single quotes.

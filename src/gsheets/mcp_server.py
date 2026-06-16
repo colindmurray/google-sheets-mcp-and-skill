@@ -840,7 +840,8 @@ def sheets_read_many(
         list[dict],
         Field(
             min_length=1,
-            description='Each item: {"spreadsheetId": "<id>", "ranges": ["Sheet1!A1:B10"], '
+            description='Each item: {"spreadsheetId": "<YOUR_SPREADSHEET_ID>", '
+            '"ranges": ["Sheet1!A1:B10"], '
             '"render": "plain", "major": "rows"}. In values mode each item needs EITHER "ranges" '
             'OR "data_filters" (symbolic selectors, e.g. [{"developerMetadataLookup": '
             '{"metadataKey": "block:totals"}}]); "render"/"major" are optional.',

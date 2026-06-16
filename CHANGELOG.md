@@ -10,6 +10,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.3.0] - 2026-06-16
+
+Additive on top of v0.2.0; every base signature and test preserved. The core surface grows
+from 20 to 22 functions with two new structure-aware reads (`describe`, `formula_patterns`).
+Output formatting becomes a uniform multi-format axis (text / json / jsonl / csv / tsv /
+markdown) over one shared pure renderer, and the MCP read tools gain a file-output escape
+valve.
+
+### Added
+- **New `describe` core fn / `sheets_describe` tool / `describe` CLI subcommand** — a
+  structure-aware read that summarizes one or more ranges (or a `data_filters` selection).
+  Optional `ranges` (CLI nargs `*`; `None` ⇒ whole spreadsheet), `--data-filter-json` /
+  MCP `data_filters`, and `--max-cells` / MCP `max_cells` (fails `result_too_large` before
+  returning an over-cap payload). Core enforces exactly one of `ranges` / `data_filters`.
+  Read-only.
+- **New `formula_patterns` core fn / `sheets_formula_patterns` tool / `formula-patterns`
+  CLI subcommand** — clusters a range's formulas into shared patterns. Required `ranges`
+  (CLI nargs `+`), `--no-sample` (CLI) / `sample` (MCP, default `True`) to skip the second
+  FORMATTED pass. Always reads FORMULA, column-major; exposes no major axis. Read-only.
+- **`data_filters` selector grammar** (`core/dataselector.py`) — each selector is exactly one
+  of `{"a1": "Sheet1!A1:B10"}` / `{"gridRange": {...}}` /
+  `{"developerMetadataLookup": {"metadataKey": "block:totals"}}`. Used by `read_values`,
+  `describe`, and per-request inside `read_many`. CLI `--data-filter-json` (with
+  `@file.json` support); MCP `data_filters: list[dict]`. Invalid selector → `bad_data_filters`.
+- **`read_values` reach extensions** — `--data-filter-json` / `data_filters` as an
+  alternative addressing path (exactly one of `ranges` / `data_filters`), `--major` (CLI) /
+  `major_dimension` (MCP) `rows` | `columns` (wire/core/result key is `major`; `rows` is
+  Google's default and is omitted on the wire), `--diff-only` / `diff_only` (`render="all"`
+  only — nulls out computed cells equal to their values), and `--max-cells` / `max_cells`.
+- **Range-scoped conditional-format reads** — `read_conditional_formats` gains a `--range`
+  flag, mutually exclusive with `--sheet` (the range carries its own sheet; passing both
+  raises `conflicting_args`).
+- **Multi-format output as a uniform axis** over one shared pure renderer
+  (`core.format.render`, supporting `json` / `jsonl` / `csv` / `tsv` / `markdown`; `text` is
+  the adapters' own terse renderer):
+  - **CLI** — one global `--format {text,json,jsonl,csv,tsv,markdown}` (default `text`)
+    applied to every subcommand; `--json` is a permanent alias for `--format json` (an
+    explicit conflicting `--format` raises `conflicting_args`). csv/tsv on a structured
+    (non-grid) result raises `format_unsupported`.
+  - **MCP** — a per-tool `output_format` arg on the read tools that render through
+    `_call_formatted`. `sheets_read_values` accepts the full `ValueFormat` (text / json /
+    jsonl / csv / tsv / markdown); `sheets_inspect`, `sheets_describe`,
+    `sheets_formula_patterns`, and `sheets_read_many` accept `StructuredFormat` (text / json
+    / jsonl / markdown — no csv/tsv).
+- **MCP `out_path` file-output handle** — an MCP-only arg (not a CLI flag, not a core param)
+  on the five `_call_formatted` read tools (`sheets_read_values`, `sheets_inspect`,
+  `sheets_describe`, `sheets_formula_patterns`, `sheets_read_many`). When set, the rendered
+  read is written utf-8 to a local file and a small handle
+  (`{ok, path, format, rows, cols, bytes, preview}`, preview capped at 5) is returned instead
+  of the payload (`text` resolves to `json`). The path is resolved + safety-checked in pure
+  core (`core/paths.py`): the parent dir must already exist (never `mkdir`), and
+  credential-shaped basenames plus the `~/.config/google-sheets-mcp/` and `~/.secrets/`
+  subtrees are hard-refused with `bad_out_path` before any write. The spreadsheet is never
+  modified.
+
+### Changed
+- The package now reports version `0.3.0`. The pyproject description and keywords were
+  refreshed for the v0.3 surface (`describe`, `formula-patterns`, multi-format output).
+- Output formatting is centralized in the pure `core.format.render`; both adapters drive it
+  (CLI `--format`/`--json`, MCP `output_format`). There is no `output_format` parameter on any
+  core function — output remains strictly adapter-side.
+- Adapter + model parity: the two new core functions get matching MCP tools and CLI
+  subcommands, and `models.py`'s `RESULT_MODELS` registry maps all 22 names to mirror models.
+  The new read tools carry `readOnlyHint=True, idempotentHint=True` and `tags={"read"}`.
+
 ## [0.2.0] - 2026-06-09
 
 All additive on top of v0.1.0; every base signature and test preserved. The tool surface
@@ -216,6 +281,7 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/releases/tag/v0.1.0

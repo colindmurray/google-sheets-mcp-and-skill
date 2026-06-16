@@ -47,25 +47,31 @@ See the README's Authentication section for the full env-var table.
 
 ## Global flags (placement matters)
 
-`--json` and `--scopes` are **global** flags on the top-level parser, so they go **before** the
-subcommand, never after it:
+`--format`, `--json`, and `--scopes` are **global** flags on the top-level parser, so they go
+**before** the subcommand, never after it:
 
 ```sh
 gsheets --json overview <YOUR_SPREADSHEET_ID>     # correct
 gsheets overview <YOUR_SPREADSHEET_ID> --json     # WRONG: "error: unrecognized arguments: --json"
 ```
 
-- `--json` emits the raw core result dict as pretty JSON (ideal for `jq`); the default is terse
-  readable text.
+- `--format {text,json,jsonl,csv,tsv,markdown}` chooses the output rendering, uniformly across
+  **every** subcommand (default `text`, the terse readable renderer). `json`/`jsonl` emit the raw
+  core result; `markdown` is a GitHub table for a value grid or key/value blocks for a structured
+  result; `csv`/`tsv` are only meaningful on a rectangular value grid (`read-values`) and otherwise
+  raise `format_unsupported`.
+- `--json` is a permanent alias for `--format json` (emits the raw core result dict as pretty JSON,
+  ideal for `jq`). Combining `--json` with an explicit non-json `--format` raises `conflicting_args`.
 - `--scopes {default,broad}` overrides the scope mode for one invocation.
+- `gsheets --version` prints the version and exits.
 
 The spreadsheet id is the **first** positional arg of every Sheets subcommand except `read-many`
 (whose ids live inside `--requests-json`). Use `<YOUR_SPREADSHEET_ID>` in anything you write down —
 the real id (the token between `/d/` and `/edit` in the URL) comes from the user or the environment.
 
-## The 20 commands at a glance
+## The 22 commands at a glance
 
-`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 20 as tools
+`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 22 as tools
 (`sheets_overview`, `sheets_inspect`, …).
 
 Understand (read-only):
@@ -74,8 +80,10 @@ Understand (read-only):
 |---|---|
 | `overview <ID>` | Cheap orientation: tabs, sizes, frozen panes, CF/protected counts, named ranges. No grid data. Start here. |
 | `inspect <ID> <RANGE>` | Rich per-cell read: values + formulas + both formats + merges + validation. `--compact` collapses repeats into rectangular runs. `--rich-text`/`--pivot` opt in. |
-| `read-values <ID> <RANGE...>` | Values with `--render {plain,unformatted,formula,all}` (`all` = formula + computed side by side). |
-| `read-conditional-formats <ID> [--sheet N]` | CF rules as terse round-trippable lines with positional `index`. |
+| `describe <ID> [RANGE...]` | Structured shape/profile read — orient on what's *in* a sheet without pulling every cell. Optional ranges or `--data-filter-json`; `--max-cells N` aborts oversize reads up front. |
+| `formula-patterns <ID> <RANGE...>` | Group a range's formulas into reusable patterns (one entry per distinct relative formula). Column-major; `--no-sample` skips the formatted-sample pass. Ranges required. |
+| `read-values <ID> [RANGE...]` | Values with `--render {plain,unformatted,formula,all}` (`all` = formula + computed side by side). `--major {rows,columns}` picks the major dimension; `--data-filter-json` reads by selector instead of A1; `--diff-only` (with `--render all`) nulls computed cells equal to their value; `--max-cells N` aborts oversize reads. |
+| `read-conditional-formats <ID> [--sheet N \| --range A1]` | CF rules as terse round-trippable lines with positional `index`. Scope by `--sheet` (whole tab) **or** `--range` (the range carries its own sheet) — the two are mutually exclusive. |
 | `read-many --requests-json '[...]' [--mode {values,summary}]` | Read values or summaries across many spreadsheets. Ids live in the JSON; a bad id is captured per-file, not fatal. No `<ID>` positional. |
 | `export <ID> --format {pdf,xlsx,ods,csv,tsv}` | Download to a local file. pdf/xlsx/ods = whole workbook (Drive scope); csv/tsv = one `--sheet`. |
 
@@ -110,10 +118,18 @@ just values:
 
 ```sh
 gsheets --json overview <YOUR_SPREADSHEET_ID>
+gsheets --json describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:Z'      # shape/profile, not every cell
+gsheets formula-patterns <YOUR_SPREADSHEET_ID> 'Sheet1!E2:E200'  # the repeated formula, once
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20'
 gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --render all
 gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 ```
+
+`describe` is the cheap middle step between `overview` (no grid) and `inspect`/`read-values` (full
+cells): it profiles what a region *contains* — column types, density, formula vs. literal — so you
+know where to drill before paying for cells. `formula-patterns` collapses a column of structurally
+identical formulas (`=C2*D2`, `=C3*D3`, …) into the single relative pattern they share, so an
+auditor reads one line instead of two hundred.
 
 **Change a sheet** — read the target first, write, read it back to verify:
 
@@ -167,6 +183,60 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action update_slicer \
   --params-json '{"slicerId":4,"title":"Region (2026)"}'
 gsheets structure <YOUR_SPREADSHEET_ID> --action delete_slicer --params-json '{"slicerId":4}'
 ```
+
+## Reading by selector, by dimension, and to a file
+
+**Read by data filter instead of A1** — `read-values` and `describe` accept `--data-filter-json`
+in place of A1 ranges. Each selector is exactly one of an A1 string, a `gridRange`, or a developer
+metadata lookup. Pass exactly one addressing path — A1 ranges **or** `--data-filter-json`, not both
+(`@file.json` is accepted to read the JSON from a file):
+
+```sh
+gsheets read-values <YOUR_SPREADSHEET_ID> \
+  --data-filter-json '[{"a1":"Sheet1!A1:B10"}]'
+gsheets read-values <YOUR_SPREADSHEET_ID> \
+  --data-filter-json '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]'  # durable anchor
+gsheets describe <YOUR_SPREADSHEET_ID> --data-filter-json @filters.json
+```
+
+A developer-metadata selector is the durable way to read a block that rows/cols may shift around —
+pair it with the `metadata` command's anchors. An invalid selector raises `bad_data_filters`.
+
+**Pick the major dimension** — `read-values --major {rows,columns}` (default `rows`) transposes how
+the grid is laid out in the result; the chosen mode echoes back under the `major` key. (In the MCP
+server the same control is the `major_dimension` arg, spelled to match Google's `majorDimension`.)
+
+```sh
+gsheets --json read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:C3' --major columns
+```
+
+**Cap an oversize read** — `--max-cells N` on `read-values`/`describe` fails fast with
+`result_too_large` *before* fetching a payload that would only blow the token budget downstream.
+
+## Output format and writing reads to a file
+
+`--format` (covered under Global flags) drives the same pure renderer the MCP server uses. The two
+adapters expose output differently:
+
+- **CLI**: one global `--format {text,json,jsonl,csv,tsv,markdown}` applied to every subcommand.
+  `csv`/`tsv` only render a rectangular value grid (`read-values`); on a structured result they
+  raise `format_unsupported`.
+- **MCP**: a per-tool `output_format` arg, present only on the five read tools that render
+  (`sheets_read_values`, `sheets_inspect`, `sheets_describe`, `sheets_formula_patterns`,
+  `sheets_read_many`). `sheets_read_values` accepts the full set including `csv`/`tsv`; the
+  structured reads top out at `markdown` (no `csv`/`tsv`). Other tools return their mirror model
+  only and have no `output_format`.
+
+**`out_path` (MCP only)** — those same five read tools take an optional `out_path`. When set, the
+rendered read is written to that local file (utf-8) and a small **handle** is returned instead of the
+payload — `{ok, path, format, rows, cols, bytes, preview}` with `preview` capped at the first few
+records. This is an MCP-side escape valve for large reads; it is **not** a CLI flag and **not** a
+core parameter. `text` is not a file format, so under `out_path` a `text` request resolves to `json`.
+The path is safety-checked first: it resolves relative to the working directory, the parent dir must
+already exist (it is never created), and credential-shaped names (`*token*.json`, `credentials.json`,
+`service-account*.json`, `*.pem`, `.env`, …) and the config/secrets subtrees are refused with
+`bad_out_path` before any write. The spreadsheet itself is never modified — these tools stay
+read-only (`export` is the separate, deliberate write-to-disk tool, with no `out_path`).
 
 ## Gotchas worth internalizing
 
