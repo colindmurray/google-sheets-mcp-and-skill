@@ -4,6 +4,16 @@ internal/
 # Local stress-test issue log + resolutions — contains real spreadsheet IDs (keep out of this public repo)
 ISSUES.md
 
+# Local maintainer planning/working docs — for the maintainer's own use, never part of the public package
+ENHANCEMENTS.md
+SPEC.md
+
+# Agent-instruction files — kept locally for AI-assisted dev, intentionally NOT in the public repo
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.cursorrules
+
 # Python build & packaging
 build/
 dist/
