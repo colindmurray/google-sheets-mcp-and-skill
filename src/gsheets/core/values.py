@@ -31,6 +31,28 @@ _INPUT_OPTIONS: dict[str, str] = {
     "raw": "RAW",
 }
 
+# public major-dimension token -> Google ``majorDimension`` (SPEC §6 P3). ``rows`` is Google's
+# own default, so it is NOT sent on the wire (keeps the request minimal); ``columns`` is sent.
+_MAJOR_OPTIONS: dict[str, str] = {
+    "rows": "ROWS",
+    "columns": "COLUMNS",
+}
+
+
+def _resolve_major_option(major: str) -> str | None:
+    """Map the public ``major`` token to a Google ``majorDimension`` (or ``None`` to omit it).
+
+    ``rows`` is Google's default — core omits the param so the request stays minimal and the
+    pre-existing golden request shapes are unchanged. ``columns`` is sent as ``COLUMNS``. An
+    unknown token raises ``SheetsError("bad_major")``.
+    """
+    if major not in _MAJOR_OPTIONS:
+        raise SheetsError(
+            "bad_major",
+            f"unknown major dimension {major!r}; expected 'rows' or 'columns'",
+        )
+    return None if major == "rows" else _MAJOR_OPTIONS[major]
+
 
 def pad_jagged(values: list[list], width: int | None = None) -> list[list]:
     """Pad every row of a jagged values array to a uniform width with ``""``.
@@ -72,11 +94,13 @@ def _resolve_input_option(input: str) -> str:
 def read_values(
     services: SheetsServices,
     spreadsheet_id: str,
-    ranges: list[str],
+    ranges: list[str] | None = None,
     *,
     render: str = "plain",
     diff_only: bool = False,
     max_cells: int | None = None,
+    major: str = "rows",
+    data_filters: list[dict] | None = None,
 ) -> dict:
     """Read values for one or more A1 ranges with a render mode (DESIGN §3.3).
 
@@ -85,6 +109,21 @@ def read_values(
     ``values.batchGet``. For ``render="all"``, both ``values`` and ``computed`` are padded to
     a COMMON rectangle (the element-wise max of both passes' row count and per-row width) so
     they are index-aligned; non-formula cells return their literal value under FORMULA render.
+
+    ``major`` (SPEC §6 P3): ``"rows"`` (default) | ``"columns"``. Passed straight to Google's
+    ``majorDimension``; column-major output suits uniform helper columns (each emitted inner
+    list is one COLUMN). ``"rows"`` is Google's own default, so core omits the param on the
+    wire. The chosen mode rides back on the result as ``"major"``.
+
+    ``data_filters`` (SPEC §6 P2 — metadata-addressed reads): an OPTIONAL alternative to ``ranges``
+    for SYMBOLIC, insert-proof addressing. When supplied, core reads via ``values.batchGetByDataFilter``
+    instead of ``values.batchGet``, so a range can be named by a stable selector rather than a literal
+    A1 (which shifts when rows/columns are inserted). Each filter is one of:
+    ``{"a1": "Sheet1!A1:B10"}`` (resolved to a ``GridRange`` inside core, mirroring the ``ranges``
+    path), ``{"gridRange": {...}}`` (a raw ``GridRange`` passed through), or
+    ``{"developerMetadataLookup": {...}}`` (matches a block previously tagged via ``metadata``).
+    Pass EITHER ``ranges`` OR ``data_filters`` — supplying both raises ``conflicting_args``;
+    supplying neither raises ``empty_ranges``.
 
     ``diff_only`` (ISSUES.md #12, ``render="all"`` ONLY): on a staticized region every FORMATTED
     cell equals its FORMULA-pass literal, so the parallel ``computed`` matrix is pure
@@ -102,13 +141,16 @@ def read_values(
     Args:
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
-        ranges: One or more A1 ranges.
+        ranges: One or more A1 ranges. ``None`` ⇒ use ``data_filters`` instead.
         render: ``"plain"`` | ``"unformatted"`` | ``"formula"`` | ``"all"``.
         diff_only: Sparsify ``computed`` against ``values`` (``render="all"`` only). Default off.
         max_cells: Raise ``result_too_large`` if the read exceeds this many cells. Default unlimited.
+        major: ``"rows"`` (default) | ``"columns"`` — Google ``majorDimension``.
+        data_filters: SYMBOLIC selectors (``a1`` / ``gridRange`` / ``developerMetadataLookup``) used
+            INSTEAD of ``ranges``; reads via ``batchGetByDataFilter``. Mutually exclusive with ``ranges``.
 
     Returns:
-        ``{"ok": True, "spreadsheetId": ..., "render": ..., "ranges": [...]}``.
+        ``{"ok": True, "spreadsheetId": ..., "render": ..., "major": ..., "ranges": [...]}``.
     """
     if render not in _RENDER_OPTIONS:
         raise SheetsError(
@@ -116,45 +158,66 @@ def read_values(
             f"unknown render mode {render!r}; expected one of "
             "'plain', 'unformatted', 'formula', 'all'",
         )
-    if not ranges:
-        raise SheetsError("empty_ranges", "read_values requires at least one range")
+    major_option = _resolve_major_option(major)
+    if ranges and data_filters:
+        raise SheetsError(
+            "conflicting_args",
+            "pass EITHER `ranges` OR `data_filters`, not both",
+        )
+    if not ranges and not data_filters:
+        raise SheetsError(
+            "empty_ranges",
+            "read_values requires at least one range (or a data_filters selector)",
+        )
     if max_cells is not None and max_cells < 1:
         raise SheetsError(
             "bad_max_cells",
             f"max_cells must be a positive integer, got {max_cells!r}",
         )
 
-    values_api = services.sheets.spreadsheets().values()
+    use_filters = bool(data_filters)
+    google_filters = None
+    if use_filters:
+        from .dataselector import build_data_filters
+
+        google_filters = build_data_filters(services, spreadsheet_id, data_filters)
+
     try:
-        primary = (
-            values_api.batchGet(
-                spreadsheetId=spreadsheet_id,
-                ranges=ranges,
-                valueRenderOption=_RENDER_OPTIONS[render],
-            )
-            .execute()
+        primary = _read_values_pass(
+            services,
+            spreadsheet_id,
+            ranges,
+            google_filters,
+            _RENDER_OPTIONS[render],
+            major_option,
         )
         computed_resp = None
         if render == "all":
-            computed_resp = (
-                values_api.batchGet(
-                    spreadsheetId=spreadsheet_id,
-                    ranges=ranges,
-                    valueRenderOption="FORMATTED_VALUE",
-                )
-                .execute()
+            computed_resp = _read_values_pass(
+                services,
+                spreadsheet_id,
+                ranges,
+                google_filters,
+                "FORMATTED_VALUE",
+                major_option,
             )
     except HttpError as exc:
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
-    primary_ranges = primary.get("valueRanges") or []
-    computed_ranges = (computed_resp.get("valueRanges") or []) if computed_resp else []
+    primary_ranges = _extract_value_ranges(primary, use_filters)
+    computed_ranges = (
+        _extract_value_ranges(computed_resp, use_filters) if computed_resp else []
+    )
 
+    fallback_ranges = list(ranges) if ranges else []
     out_ranges: list[dict] = []
     total_cells = 0
     for idx, vr in enumerate(primary_ranges):
         entry: dict = {
-            "range": vr.get("range", ranges[idx] if idx < len(ranges) else None),
+            "range": vr.get(
+                "range",
+                fallback_ranges[idx] if idx < len(fallback_ranges) else None,
+            ),
         }
         raw_values = vr.get("values", [])
         if render == "all":
@@ -192,8 +255,67 @@ def read_values(
         "ok": True,
         "spreadsheetId": spreadsheet_id,
         "render": render,
+        "major": major,
         "ranges": out_ranges,
     }
+
+
+def _read_values_pass(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    ranges: list[str] | None,
+    google_filters: list[dict] | None,
+    render_option: str,
+    major_option: str | None,
+) -> dict:
+    """Issue ONE values read pass — ``batchGet`` (ranges) or ``batchGetByDataFilter`` (filters).
+
+    Centralizes the request shape shared by the FORMULA and FORMATTED passes of ``render="all"``
+    so the two passes never drift. ``majorDimension`` is sent only when non-default (``columns``).
+    When ``google_filters`` is set the symbolic-addressing path is used (SPEC §6 P2); otherwise the
+    literal-``ranges`` path. The HttpError raised here is classified by the caller.
+    """
+    values_api = services.sheets.spreadsheets().values()
+    if google_filters is not None:
+        body: dict = {
+            "dataFilters": google_filters,
+            "valueRenderOption": render_option,
+        }
+        if major_option is not None:
+            body["majorDimension"] = major_option
+        return (
+            values_api.batchGetByDataFilter(spreadsheetId=spreadsheet_id, body=body)
+            .execute()
+        )
+    kwargs: dict = {
+        "spreadsheetId": spreadsheet_id,
+        "ranges": ranges,
+        "valueRenderOption": render_option,
+    }
+    if major_option is not None:
+        kwargs["majorDimension"] = major_option
+    return values_api.batchGet(**kwargs).execute()
+
+
+def _extract_value_ranges(resp: dict, use_filters: bool) -> list[dict]:
+    """Pull the flat ``valueRanges`` list out of a values response.
+
+    ``batchGet`` returns ``{"valueRanges": [ValueRange, ...]}`` directly. ``batchGetByDataFilter``
+    wraps each in ``{"valueRanges": [{"dataFilters": [...], "valueRange": ValueRange}, ...]}``, so
+    the inner ``valueRange`` is unwrapped here — making the downstream serialization identical for
+    both addressing paths (SPEC §6 P2).
+    """
+    raw = resp.get("valueRanges") or []
+    if not use_filters:
+        return raw
+    out: list[dict] = []
+    for entry in raw:
+        entry = entry or {}
+        # ``batchGetByDataFilter`` nests the ValueRange under ``valueRange``; tolerate a flat
+        # entry too (defensive — some mocked/older shapes return it directly).
+        vr = entry.get("valueRange")
+        out.append(vr if isinstance(vr, dict) else entry)
+    return out
 
 
 def _sparsify_computed(

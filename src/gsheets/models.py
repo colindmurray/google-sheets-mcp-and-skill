@@ -737,11 +737,15 @@ class ReadValuesResult(_Result):
 
     spreadsheetId: Optional[str] = None
     render: Optional[str] = None
+    major: Optional[str] = None
     ranges: list[ValueRange] = []
 
     @property
     def terse(self) -> str:
-        lines = [f"read_values render={self.render}"]
+        head = f"read_values render={self.render}"
+        if self.major and self.major != "rows":
+            head += f" major={self.major}"
+        lines = [head]
         for vr in self.ranges:
             n = len(vr.values or [])
             lines.append(f"  {vr.range}: {n} rows")

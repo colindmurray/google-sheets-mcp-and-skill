@@ -127,6 +127,48 @@ def test_read_values_exposes_diff_only_and_max_cells_optional():
     assert "max_cells" not in required
 
 
+def test_read_values_exposes_major_dimension_default_rows():
+    # SPEC §6 P3: major_dimension is exposed, optional, defaults to rows, enum rows|columns.
+    tool = _tools()["sheets_read_values"]
+    props = tool.parameters.get("properties", {})
+    assert "major_dimension" in props
+    assert "major_dimension" not in tool.parameters.get("required", [])
+    prop = props["major_dimension"]
+    assert prop.get("default") == "rows"
+    assert set(prop.get("enum") or []) == {"rows", "columns"}
+
+
+def test_read_values_exposes_data_filters_optional_and_ranges_not_required():
+    # SPEC §6 P2: data_filters is exposed and optional; ranges is now optional too (exactly one
+    # of ranges/data_filters, enforced in core).
+    tool = _tools()["sheets_read_values"]
+    props = tool.parameters.get("properties", {})
+    required = tool.parameters.get("required", [])
+    assert "data_filters" in props
+    assert "data_filters" not in required
+    assert "ranges" not in required
+
+
+def test_describe_exposes_data_filters_optional_and_ranges_not_required():
+    # SPEC §6 P2: describe also accepts data_filters (symbolic addressing); ranges optional.
+    tool = _tools()["sheets_describe"]
+    props = tool.parameters.get("properties", {})
+    required = tool.parameters.get("required", [])
+    assert "data_filters" in props
+    assert "data_filters" not in required
+    assert "ranges" not in required
+
+
+def test_read_conditional_formats_exposes_range_optional():
+    # SPEC §6 P3: range-scoped CF read — range is exposed and optional alongside sheet.
+    tool = _tools()["sheets_read_conditional_formats"]
+    props = tool.parameters.get("properties", {})
+    required = tool.parameters.get("required", [])
+    assert "range" in props
+    assert "sheet" in props
+    assert "range" not in required
+
+
 # ----------------------------------------------------------- SPEC §1.3 output_format on reads
 
 

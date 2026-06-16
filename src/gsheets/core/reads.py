@@ -809,6 +809,8 @@ def read_conditional_formats(
     services: SheetsServices,
     spreadsheet_id: str,
     sheet: str | None = None,
+    *,
+    range: str | None = None,
 ) -> dict:
     """PRIORITY read: per-sheet conditional-format rules serialized to readable lines (DESIGN §3.3).
 
@@ -818,14 +820,37 @@ def read_conditional_formats(
     positional ``index`` (0 = highest priority) is the only addressing source of truth. Returns
     the multi-sheet envelope shared with ``structure(action="read")``.
 
+    ``range`` (SPEC §6 P3 — range-scoped read): an OPTIONAL A1 range. When given, the read is
+    scoped to THAT range's sheet and each rule is kept only when its ranges actually INTERSECT the
+    range — reusing the SAME ``addressing.gridranges_intersect`` filter ``describe`` uses (SPEC §3.3),
+    so "which rules touch this region" is one shared codepath. A surviving rule keeps its ORIGINAL
+    positional ``index`` (priority is array position — never renumbered by filtering), so it still
+    addresses correctly via ``set_conditional_format``. ``range`` carries its own sheet, so passing
+    both ``range`` and ``sheet`` raises ``conflicting_args``.
+
     Args:
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
-        sheet: Restrict to one tab; ``None`` ⇒ every sheet.
+        sheet: Restrict to one tab; ``None`` ⇒ every sheet. Mutually exclusive with ``range``.
+        range: Restrict to the rules INTERSECTING this A1 range (on its own sheet).
 
     Returns:
         ``{"ok": True, "spreadsheetId": ..., "sheets": [{"sheet", "sheetId", "rules": [...]}]}``.
     """
+    if sheet is not None and range is not None:
+        raise SheetsError(
+            "conflicting_args",
+            "pass EITHER `sheet` OR `range` (a range carries its own sheet), not both",
+        )
+
+    # A range scopes the read to its sheet AND filters rules to those intersecting it. Resolve it to
+    # a GridRange up front (validates the A1 and yields the sheetId + bounds for the intersect test).
+    intersecting: dict | None = None
+    scope_sheet_id: object = None
+    if range is not None:
+        intersecting = a1_to_gridrange(services, spreadsheet_id, range)
+        scope_sheet_id = intersecting.get("sheetId")
+
     try:
         resp = (
             services.sheets.spreadsheets()
@@ -856,9 +881,15 @@ def read_conditional_formats(
         title = props.get("title")
         if sheet is not None and title != sheet:
             continue
+        # A range scopes to only its own sheet (matched by sheetId, not title).
+        if intersecting is not None and props.get("sheetId") != scope_sheet_id:
+            continue
 
         rules_out = _serialize_cf_rules(
-            services, spreadsheet_id, sheet_obj.get("conditionalFormats") or []
+            services,
+            spreadsheet_id,
+            sheet_obj.get("conditionalFormats") or [],
+            intersecting=intersecting,
         )
 
         sheets_out.append(
@@ -948,9 +979,10 @@ _DESCRIBE_FIELDS = (
 def describe(
     services: SheetsServices,
     spreadsheet_id: str,
-    ranges: list[str],
+    ranges: list[str] | None = None,
     *,
     max_cells: int | None = None,
+    data_filters: list[dict] | None = None,
 ) -> dict:
     """One-call merged region view: cells + structure + CF for one or more ranges (SPEC §3).
 
@@ -969,6 +1001,14 @@ def describe(
     each keeping its original priority ``index``. The structural facets (merges/tables/banding/
     protected) are sheet-scoped — every region on a sheet sees that sheet's full structural set.
 
+    ``data_filters`` (SPEC §6 P2 — metadata-addressed reads): an OPTIONAL alternative to ``ranges``
+    for SYMBOLIC, insert-proof addressing. When supplied, core issues ONE
+    ``spreadsheets.getByDataFilter(dataFilters=[...], includeGridData=True)`` and derives each
+    region's effective ``GridRange`` from the RETURNED grid block (start offset + dimensions) — so a
+    ``developerMetadataLookup`` selector, whose range is unknown until the response, still gets a
+    correctly range-scoped CF filter. Each selector is one of ``{"a1": ...}`` / ``{"gridRange": ...}``
+    / ``{"developerMetadataLookup": ...}``. Pass EITHER ``ranges`` OR ``data_filters`` (not both).
+
     ``max_cells`` (like ``read_values``): when the total cells across all regions exceed it, raise
     ``result_too_large`` rather than return a payload that only fails at the caller's token cap;
     ``None`` (default) is unlimited.
@@ -976,37 +1016,42 @@ def describe(
     Args:
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
-        ranges: One or more A1 ranges (multi-sheet allowed).
+        ranges: One or more A1 ranges (multi-sheet allowed). ``None`` ⇒ use ``data_filters``.
         max_cells: Raise ``result_too_large`` past this many cells. Default unlimited.
+        data_filters: SYMBOLIC selectors used INSTEAD of ``ranges`` (read via getByDataFilter).
+            Mutually exclusive with ``ranges``.
 
     Returns:
         ``{"ok": True, "spreadsheetId": ..., "regions": [{range, sheet, cells, merges,
         conditionalFormats, tables, bandedRanges, protectedRanges, validationSummary}, ...]}``.
     """
-    if not ranges:
-        raise SheetsError("empty_ranges", "describe requires at least one range")
+    if ranges and data_filters:
+        raise SheetsError(
+            "conflicting_args", "pass EITHER `ranges` OR `data_filters`, not both"
+        )
+    if not ranges and not data_filters:
+        raise SheetsError(
+            "empty_ranges",
+            "describe requires at least one range (or a data_filters selector)",
+        )
     if max_cells is not None and max_cells < 1:
         raise SheetsError(
             "bad_max_cells", f"max_cells must be a positive integer, got {max_cells!r}"
         )
 
     # Resolve each requested range to a GridRange up front (validates A1 BEFORE any data get, and
-    # gives the (sheetId, startRow, startColumn) key used to map response blocks back to ranges).
-    resolved = [a1_to_gridrange(services, spreadsheet_id, r) for r in ranges]
+    # gives the (sheetId, start row/col) key that maps response blocks back to ranges). The
+    # data-filter path has no A1 ranges to pre-validate (the selectors resolve server-side).
+    resolved = (
+        [a1_to_gridrange(services, spreadsheet_id, r) for r in ranges]
+        if not data_filters
+        else []
+    )
 
-    try:
-        resp = (
-            services.sheets.spreadsheets()
-            .get(
-                spreadsheetId=spreadsheet_id,
-                ranges=list(ranges),
-                includeGridData=True,
-                fields=_DESCRIBE_FIELDS,
-            )
-            .execute()
-        )
-    except HttpError as exc:
-        raise classify_google_error(exc, account_email=services.account_email) from exc
+    if data_filters:
+        resp = _describe_get_by_data_filter(services, spreadsheet_id, data_filters)
+    else:
+        resp = _describe_get_by_ranges(services, spreadsheet_id, ranges)
 
     # Index the response sheets by sheetId; within each sheet, walk its data blocks in order so a
     # repeated (sheetId, startRow, startColumn) key consumes successive blocks (two requests for the
@@ -1021,13 +1066,31 @@ def describe(
 
     regions: list[dict] = []
     total_cells = 0
-    for a1, gr in zip(ranges, resolved):
-        sid = gr.get("sheetId")
-        sheet_obj = sheets_by_id.get(sid) or {}
-        block = _match_block(sheet_obj, gr, block_cursor, sid)
-        region = _build_region(services, spreadsheet_id, a1, gr, sheet_obj, block)
-        total_cells += _region_cell_count(region)
-        regions.append(region)
+
+    if data_filters:
+        # With data filters the literal A1 / sheetId per region is not known up front (a
+        # developerMetadataLookup resolves only server-side), so walk the response sheets in order,
+        # deriving each region's effective GridRange (and A1 label) from the returned block itself.
+        for sheet_obj in resp.get("sheets") or []:
+            sheet_obj = sheet_obj or {}
+            sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
+            for block in sheet_obj.get("data") or []:
+                block = block or {}
+                gr = _gridrange_from_block(sid, block)
+                a1 = gridrange_to_a1(services, spreadsheet_id, gr)
+                region = _build_region(
+                    services, spreadsheet_id, a1, gr, sheet_obj, block
+                )
+                total_cells += _region_cell_count(region)
+                regions.append(region)
+    else:
+        for a1, gr in zip(ranges, resolved):
+            sid = gr.get("sheetId")
+            sheet_obj = sheets_by_id.get(sid) or {}
+            block = _match_block(sheet_obj, gr, block_cursor, sid)
+            region = _build_region(services, spreadsheet_id, a1, gr, sheet_obj, block)
+            total_cells += _region_cell_count(region)
+            regions.append(region)
 
     if max_cells is not None and total_cells > max_cells:
         raise SheetsError(
@@ -1040,6 +1103,78 @@ def describe(
         )
 
     return {"ok": True, "spreadsheetId": spreadsheet_id, "regions": regions}
+
+
+def _describe_get_by_ranges(
+    services: SheetsServices, spreadsheet_id: str, ranges: list[str]
+) -> dict:
+    """Issue the one ``spreadsheets.get(ranges=[...], includeGridData=True)`` for ``describe``."""
+    try:
+        return (
+            services.sheets.spreadsheets()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                ranges=list(ranges),
+                includeGridData=True,
+                fields=_DESCRIBE_FIELDS,
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+
+def _describe_get_by_data_filter(
+    services: SheetsServices, spreadsheet_id: str, data_filters: list[dict]
+) -> dict:
+    """Issue ONE ``spreadsheets.getByDataFilter`` for ``describe`` (SPEC §6 P2 symbolic addressing).
+
+    Translates the public selectors via the shared :mod:`gsheets.core.dataselector` (so the A1 /
+    gridRange / developerMetadataLookup mapping is the SAME one ``read_values`` / ``read_many`` use)
+    and sends the same tight union ``fields`` mask + ``includeGridData=True`` as the ranges path,
+    so the downstream block serialization is identical for both addressing modes.
+    """
+    from .dataselector import build_data_filters
+
+    google_filters = build_data_filters(services, spreadsheet_id, data_filters)
+    body = {"dataFilters": google_filters, "includeGridData": True}
+    try:
+        return (
+            services.sheets.spreadsheets()
+            .getByDataFilter(
+                spreadsheetId=spreadsheet_id,
+                body=body,
+                fields=_DESCRIBE_FIELDS,
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+
+def _gridrange_from_block(sid: object, block: dict) -> dict:
+    """Derive a region's effective ``GridRange`` from a returned grid block (SPEC §6 P2).
+
+    With ``data_filters`` the literal requested range is unknown up front (a developerMetadataLookup
+    resolves only server-side), so the region's bounds come from the response block itself: its
+    ``startRow``/``startColumn`` offset plus the actual ``rowData`` row count and max row width. This
+    GridRange anchors the region's A1 label AND scopes its conditional-format intersect filter.
+    """
+    start_row = block.get("startRow", 0) or 0
+    start_col = block.get("startColumn", 0) or 0
+    row_data = block.get("rowData") or []
+    n_rows = len(row_data)
+    n_cols = max(
+        (len((r or {}).get("values") or []) for r in row_data), default=0
+    )
+    gr: dict = {"sheetId": sid}
+    if n_rows:
+        gr["startRowIndex"] = start_row
+        gr["endRowIndex"] = start_row + n_rows
+    if n_cols:
+        gr["startColumnIndex"] = start_col
+        gr["endColumnIndex"] = start_col + n_cols
+    return gr
 
 
 def _match_block(

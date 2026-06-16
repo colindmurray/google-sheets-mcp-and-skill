@@ -30,6 +30,7 @@ _FORMAT_CHOICES = ("text", "json", "jsonl", "csv", "tsv", "markdown")
 # Render modes / input modes / action enums mirrored from core so argparse can validate up
 # front (core re-validates and raises SheetsError — these just give nice argparse errors).
 _RENDER_CHOICES = ("plain", "unformatted", "formula", "all")
+_MAJOR_CHOICES = ("rows", "columns")
 _INPUT_CHOICES = ("user_entered", "raw")
 _CF_ACTIONS = ("add", "update", "delete")
 _STRUCTURE_ACTIONS = (
@@ -274,7 +275,20 @@ def _add_describe(sub) -> None:
         help="one-call merged region view: cells + structure + range-scoped CF, per range",
     )
     _spreadsheet_id_arg(p)
-    p.add_argument("ranges", nargs="+", help="one or more A1 ranges (multi-sheet allowed)")
+    # ``ranges`` is OPTIONAL (nargs="*") because --data-filter-json is an alternative addressing
+    # path (SPEC §6 P2); core enforces "exactly one of ranges / data_filters".
+    p.add_argument(
+        "ranges",
+        nargs="*",
+        help="one or more A1 ranges (multi-sheet allowed; omit when using --data-filter-json)",
+    )
+    p.add_argument(
+        "--data-filter-json",
+        type=_json_arg,
+        default=None,
+        help="symbolic addressing INSTEAD of positional ranges: a JSON list of selectors, "
+        'e.g. \'[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]\' (or @file.json)',
+    )
     p.add_argument(
         "--max-cells",
         type=int,
@@ -305,12 +319,29 @@ def _add_formula_patterns(sub) -> None:
 def _add_read_values(sub) -> None:
     p = sub.add_parser("read-values", help="values for one or more A1 ranges, with render mode")
     _spreadsheet_id_arg(p)
-    p.add_argument("ranges", nargs="+", help="one or more A1 ranges")
+    # ``ranges`` is OPTIONAL (nargs="*") because --data-filter-json is an alternative addressing
+    # path (SPEC §6 P2); core enforces "exactly one of ranges / data_filters".
+    p.add_argument("ranges", nargs="*", help="one or more A1 ranges (omit when using --data-filter-json)")
     p.add_argument(
         "--render",
         choices=_RENDER_CHOICES,
         default="plain",
         help="plain | unformatted | formula | all (formula+computed side by side)",
+    )
+    p.add_argument(
+        "--major",
+        choices=_MAJOR_CHOICES,
+        default="rows",
+        help="rows (default) | columns — Google majorDimension; columns suits uniform "
+        "helper columns (each inner list is one column)",
+    )
+    p.add_argument(
+        "--data-filter-json",
+        type=_json_arg,
+        default=None,
+        help="symbolic addressing INSTEAD of positional ranges: a JSON list of selectors, "
+        'e.g. \'[{"a1":"Sheet1!A1:B10"},{"developerMetadataLookup":{"metadataKey":"block:totals"}}]\' '
+        "(or @file.json). Mutually exclusive with the ranges positional.",
     )
     p.add_argument(
         "--diff-only",
@@ -335,6 +366,12 @@ def _add_read_conditional_formats(sub) -> None:
     )
     _spreadsheet_id_arg(p)
     p.add_argument("--sheet", default=None, help="restrict to one sheet (default: all sheets)")
+    p.add_argument(
+        "--range",
+        default=None,
+        help="restrict to rules INTERSECTING this A1 range (on its own sheet); "
+        "mutually exclusive with --sheet",
+    )
     p.set_defaults(func=_cmd_read_conditional_formats, needs_services=True)
 
 
@@ -659,7 +696,9 @@ def _add_read_many(sub) -> None:
         "--requests-json",
         type=_json_arg,
         required=True,
-        help='requests[] \'[{"spreadsheetId":..,"ranges":[..],"render"?:..}]\' (or @file.json)',
+        help='requests[] \'[{"spreadsheetId":..,"ranges":[..],"render"?:..,"major"?:..}]\' '
+        '(or @file.json). In values mode each item needs EITHER "ranges" OR "data_filters" '
+        '(symbolic selectors).',
     )
     p.add_argument(
         "--mode",
@@ -731,8 +770,9 @@ def _cmd_describe(services, args) -> dict:
     return core.describe(
         services,
         args.spreadsheet_id,
-        args.ranges,
+        args.ranges or None,
         max_cells=args.max_cells,
+        data_filters=args.data_filter_json,
     )
 
 
@@ -746,18 +786,24 @@ def _cmd_formula_patterns(services, args) -> dict:
 
 
 def _cmd_read_values(services, args) -> dict:
+    # ``ranges`` is the positional (possibly empty when --data-filter-json is used); core enforces
+    # the "exactly one of ranges / data_filters" contract, so the body stays a thin pass-through.
     return core.read_values(
         services,
         args.spreadsheet_id,
-        args.ranges,
+        args.ranges or None,
         render=args.render,
+        major=args.major,
+        data_filters=args.data_filter_json,
         diff_only=args.diff_only,
         max_cells=args.max_cells,
     )
 
 
 def _cmd_read_conditional_formats(services, args) -> dict:
-    return core.read_conditional_formats(services, args.spreadsheet_id, args.sheet)
+    return core.read_conditional_formats(
+        services, args.spreadsheet_id, args.sheet, range=args.range
+    )
 
 
 def _cmd_write_values(services, args) -> dict:

@@ -139,6 +139,7 @@ class TestReadValues:
             "ok": True,
             "spreadsheetId": SHEET_ID,
             "render": "plain",
+            "major": "rows",
             "ranges": [
                 {
                     "range": "Cliff!A1:C2",
@@ -231,6 +232,182 @@ class TestReadValues:
         out = read_values(services, SHEET_ID, ["S!A1", "S!B1:B2"], render="plain")
         assert len(out["ranges"]) == 2
         assert out["ranges"][1]["values"] == [["y"], ["z"]]
+
+    # ---- major (SPEC §6 P3): majorDimension passthrough ---------------------------------
+
+    def test_major_defaults_to_rows_and_is_not_sent(self):
+        # Default rows: Google's own default, so core does NOT send a majorDimension param
+        # (keeps the request minimal and the existing golden calls unchanged).
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services, "batchGet", [{"valueRanges": [{"range": "S!A1", "values": [["x"]]}]}]
+        )
+        read_values(services, SHEET_ID, ["S!A1"], render="plain")
+        assert "majorDimension" not in rec.calls[0]
+
+    def test_major_columns_sends_column_major(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchGet",
+            [{"valueRanges": [{"range": "S!A1:B2", "values": [["a", "d"], ["b", "e"]]}]}],
+        )
+        out = read_values(services, SHEET_ID, ["S!A1:B2"], render="plain", major="columns")
+        assert rec.calls[0]["majorDimension"] == "COLUMNS"
+        assert out["major"] == "columns"
+        # The grid is whatever Google returns (column-major), padded to a rectangle.
+        assert out["ranges"][0]["values"] == [["a", "d"], ["b", "e"]]
+
+    def test_major_rows_explicit_sends_rows(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services, "batchGet", [{"valueRanges": [{"range": "S!A1", "values": [["x"]]}]}]
+        )
+        out = read_values(services, SHEET_ID, ["S!A1"], render="plain", major="rows")
+        # Explicit rows is the default; core omits the param (rows is Google's default).
+        assert "majorDimension" not in rec.calls[0]
+        assert out["major"] == "rows"
+
+    def test_major_applies_to_both_passes_of_render_all(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchGet",
+            [
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["=A"], ["=B"]]}]},
+                {"valueRanges": [{"range": "S!A1:B1", "values": [["1"], ["2"]]}]},
+            ],
+        )
+        read_values(services, SHEET_ID, ["S!A1:B1"], render="all", major="columns")
+        assert [c["majorDimension"] for c in rec.calls] == ["COLUMNS", "COLUMNS"]
+
+    def test_bad_major_raises(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            read_values(services, SHEET_ID, ["S!A1"], render="plain", major="diagonal")
+        assert exc.value.code == "bad_major"
+
+    # ---- data_filters (SPEC §6 P2): metadata-addressed reads via batchGetByDataFilter --------
+
+    def test_data_filters_developer_metadata_lookup_uses_by_data_filter(self):
+        # A symbolic developerMetadataLookup selector reads via batchGetByDataFilter and the wrapped
+        # valueRange is unwrapped to the same flat shape as a literal-ranges read.
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchGetByDataFilter",
+            [
+                {
+                    "valueRanges": [
+                        {
+                            "dataFilters": [
+                                {"developerMetadataLookup": {"metadataKey": "block:totals"}}
+                            ],
+                            "valueRange": {"range": "S!A1:B1", "values": [["x", "y"]]},
+                        }
+                    ]
+                }
+            ],
+        )
+        out = read_values(
+            services,
+            SHEET_ID,
+            data_filters=[{"developerMetadataLookup": {"metadataKey": "block:totals"}}],
+        )
+        # The selector is passed straight through into the request body's dataFilters.
+        assert rec.calls[0]["body"]["dataFilters"] == [
+            {"developerMetadataLookup": {"metadataKey": "block:totals"}}
+        ]
+        assert rec.calls[0]["body"]["valueRenderOption"] == "FORMATTED_VALUE"
+        assert out["ranges"][0]["values"] == [["x", "y"]]
+
+    def test_data_filters_a1_selector_resolved_to_gridrange(self, monkeypatch):
+        # An {"a1": ...} selector is resolved to a GridRange via addressing (the SAME conversion
+        # the literal path uses), then sent as a gridRange dataFilter.
+        from gsheets.core import dataselector
+
+        monkeypatch.setattr(
+            dataselector,
+            "a1_to_gridrange",
+            lambda services, sid, a1: {
+                "sheetId": 0,
+                "startRowIndex": 0,
+                "endRowIndex": 1,
+                "startColumnIndex": 0,
+                "endColumnIndex": 2,
+            },
+        )
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchGetByDataFilter",
+            [
+                {
+                    "valueRanges": [
+                        {"valueRange": {"range": "S!A1:B1", "values": [["x", "y"]]}}
+                    ]
+                }
+            ],
+        )
+        read_values(services, SHEET_ID, data_filters=[{"a1": "S!A1:B1"}])
+        assert rec.calls[0]["body"]["dataFilters"] == [
+            {
+                "gridRange": {
+                    "sheetId": 0,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 2,
+                }
+            }
+        ]
+
+    def test_data_filters_and_ranges_both_raises_conflicting_args(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            read_values(
+                services,
+                SHEET_ID,
+                ["S!A1"],
+                data_filters=[{"a1": "S!A1"}],
+            )
+        assert exc.value.code == "conflicting_args"
+
+    def test_neither_ranges_nor_data_filters_raises_empty_ranges(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            read_values(services, SHEET_ID)
+        assert exc.value.code == "empty_ranges"
+
+    def test_data_filters_render_all_two_passes_by_data_filter(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchGetByDataFilter",
+            [
+                {"valueRanges": [{"valueRange": {"range": "S!A1", "values": [["=A"]]}}]},
+                {"valueRanges": [{"valueRange": {"range": "S!A1", "values": [["1"]]}}]},
+            ],
+        )
+        out = read_values(
+            services,
+            SHEET_ID,
+            data_filters=[{"gridRange": {"sheetId": 0}}],
+            render="all",
+        )
+        assert [c["body"]["valueRenderOption"] for c in rec.calls] == [
+            "FORMULA",
+            "FORMATTED_VALUE",
+        ]
+        assert out["ranges"][0]["values"] == [["=A"]]
+        assert out["ranges"][0]["computed"] == [["1"]]
+
+    def test_data_filters_empty_list_raises_bad_data_filters(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            read_values(services, SHEET_ID, data_filters=[])
+        # An empty data_filters list with no ranges falls through to empty_ranges (nothing to read).
+        assert exc.value.code == "empty_ranges"
 
     # ---- diff_only (ISSUES.md #12): de-duplicate ``computed`` against ``values`` --------
 

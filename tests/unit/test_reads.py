@@ -1241,6 +1241,83 @@ class TestReadConditionalFormats:
             read_conditional_formats(services, SHEET_ID, sheet="Nope")
         assert ei.value.code == "sheet_not_found"
 
+    # ---- range-scoped read (SPEC §6 P3): only rules intersecting `range` ------------------
+
+    def test_range_keeps_only_intersecting_rules_on_that_sheet(self):
+        # A col-A range intersects the col-A boolean rule but NOT the col-H gradient rule, and the
+        # read is scoped to that range's sheet (Cliff). Reuses the SAME gridranges_intersect filter
+        # describe uses (SPEC §3.3).
+        services, _ = _make_service(
+            data_responses=[
+                self._cf_payload(_GOOGLE_BOOLEAN_RULE, _GOOGLE_GRADIENT_RULE)
+            ],
+            sheet_index=_CLIFF_INDEX,
+        )
+        out = read_conditional_formats(services, SHEET_ID, range="Cliff!A1:A50")
+        assert len(out["sheets"]) == 1
+        rules = out["sheets"][0]["rules"]
+        assert len(rules) == 1
+        assert rules[0]["kind"] == "boolean"
+        # original priority index preserved even though it survived filtering
+        assert rules[0]["index"] == 0
+        assert rules[0]["ranges"] == ["Cliff!A2:A100"]
+
+    def test_range_preserves_original_index_when_earlier_rule_filtered_out(self):
+        # The col-H gradient (index 0) is filtered out for a col-A range; the surviving col-A boolean
+        # keeps its ORIGINAL index 1 (priority = array position, never renumbered).
+        services, _ = _make_service(
+            data_responses=[
+                self._cf_payload(_GOOGLE_GRADIENT_RULE, _GOOGLE_BOOLEAN_RULE)
+            ],
+            sheet_index=_CLIFF_INDEX,
+        )
+        out = read_conditional_formats(services, SHEET_ID, range="Cliff!A1:A50")
+        rules = out["sheets"][0]["rules"]
+        assert len(rules) == 1
+        assert rules[0]["index"] == 1
+        assert rules[0]["kind"] == "boolean"
+
+    def test_range_scopes_to_only_its_sheet(self):
+        # With multiple sheets, a range naming Cliff returns ONLY Cliff's envelope entry.
+        payload = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Cliff"},
+                    "conditionalFormats": [_GOOGLE_BOOLEAN_RULE],
+                },
+                {
+                    "properties": {"sheetId": 1, "title": "Other"},
+                    "conditionalFormats": [_GOOGLE_GRADIENT_RULE],
+                },
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = read_conditional_formats(services, SHEET_ID, range="Cliff!A1:A50")
+        assert [s["sheet"] for s in out["sheets"]] == ["Cliff"]
+
+    def test_range_and_sheet_together_raises_conflicting_args(self):
+        services, _ = _make_service(
+            data_responses=[self._cf_payload(_GOOGLE_BOOLEAN_RULE)],
+            sheet_index=_CLIFF_INDEX,
+        )
+        with pytest.raises(SheetsError) as ei:
+            read_conditional_formats(
+                services, SHEET_ID, sheet="Cliff", range="Cliff!A1:A50"
+            )
+        assert ei.value.code == "conflicting_args"
+
+    def test_range_with_no_intersecting_rules_yields_empty_rules(self):
+        # A col-Z range intersects neither the col-A boolean nor the col-H gradient.
+        services, _ = _make_service(
+            data_responses=[
+                self._cf_payload(_GOOGLE_BOOLEAN_RULE, _GOOGLE_GRADIENT_RULE)
+            ],
+            sheet_index=_CLIFF_INDEX,
+        )
+        out = read_conditional_formats(services, SHEET_ID, range="Cliff!Z1:Z50")
+        assert out["sheets"][0]["sheet"] == "Cliff"
+        assert out["sheets"][0]["rules"] == []
+
     def test_no_rules_yields_empty_rules_list(self):
         services, _ = _make_service(
             data_responses=[self._cf_payload()], sheet_index=_CLIFF_INDEX

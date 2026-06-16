@@ -38,8 +38,10 @@ def read_many(
     - ``mode="summary"`` calls :func:`core.reads.overview` per id (cheap orientation, no grid
       data) — the analogue of xing5's ``get_multiple_spreadsheet_summary``.
     - ``mode="values"`` calls :func:`core.values.read_values` per id over that request's
-      ``ranges`` (``render="plain"`` by default; a per-request ``"render"`` key overrides it) —
-      the analogue of xing5's ``get_multiple_sheet_data``.
+      ``ranges`` (``render="plain"`` by default; a per-request ``"render"`` key overrides it,
+      ``"major"`` selects rows/columns) — the analogue of xing5's ``get_multiple_sheet_data``. A
+      request may instead carry ``"data_filters"`` (SPEC §6 P2 — symbolic, insert-proof addressing
+      via ``batchGetByDataFilter``) in place of ``ranges``; exactly one of the two is required.
 
     The headline behavior is PER-ITEM error capture: each per-spreadsheet call is wrapped in
     ``try/except SheetsError`` so one bad id (404, permission denied, bad range) becomes a
@@ -53,9 +55,11 @@ def read_many(
     Args:
         services: The authed handle.
         requests: A NON-EMPTY list of request dicts. Each item requires ``"spreadsheetId"``
-            (str); for ``mode="values"`` it also requires ``"ranges"`` (a list of A1 strings)
-            and accepts an optional ``"render"`` override (``"plain"`` | ``"unformatted"`` |
-            ``"formula"`` | ``"all"``). ``"ranges"`` is ignored for ``mode="summary"``.
+            (str); for ``mode="values"`` it also requires EITHER ``"ranges"`` (a list of A1
+            strings) OR ``"data_filters"`` (a list of symbolic selectors, SPEC §6 P2), and accepts
+            an optional ``"render"`` override (``"plain"`` | ``"unformatted"`` | ``"formula"`` |
+            ``"all"``) and ``"major"`` (``"rows"`` | ``"columns"``). ``"ranges"`` / ``"data_filters"``
+            are ignored for ``mode="summary"``.
         mode: ``"values"`` (default) or ``"summary"``.
 
     Returns:
@@ -96,10 +100,15 @@ def read_many(
             if mode == "summary":
                 result = overview(services, spreadsheet_id)
             else:
-                ranges = request["ranges"]
                 render = request.get("render", "plain")
+                major = request.get("major", "rows")
                 result = read_values(
-                    services, spreadsheet_id, ranges, render=render
+                    services,
+                    spreadsheet_id,
+                    request.get("ranges"),
+                    render=render,
+                    major=major,
+                    data_filters=request.get("data_filters"),
                 )
         except SheetsError as exc:
             # PER-ITEM capture: one file's failure never aborts the batch (DESIGN §3.3).
@@ -137,9 +146,9 @@ def _request_spreadsheet_id(request: object, index: int, mode: str) -> str:
     """Validate one request dict and return its ``spreadsheetId`` (or raise ``bad_requests``).
 
     Enforces the structural contract a malformed batch violates: each item is a dict carrying a
-    truthy ``spreadsheetId``, and a ``values``-mode item additionally carries ``ranges``. These
-    are caller bugs (distinct from a live Google 404/permission failure, which is captured
-    per-file inside :func:`read_many`).
+    truthy ``spreadsheetId``, and a ``values``-mode item additionally carries EITHER ``ranges`` OR
+    ``data_filters`` (SPEC §6 P2). These are caller bugs (distinct from a live Google
+    404/permission failure, which is captured per-file inside :func:`read_many`).
     """
     if not isinstance(request, dict):
         raise SheetsError(
@@ -154,10 +163,11 @@ def _request_spreadsheet_id(request: object, index: int, mode: str) -> str:
             f"request #{index} is missing a 'spreadsheetId'",
             hint="every request must name a 'spreadsheetId' (a non-empty string)",
         )
-    if mode == "values" and "ranges" not in request:
+    if mode == "values" and "ranges" not in request and "data_filters" not in request:
         raise SheetsError(
             "bad_requests",
             f"request #{index} (spreadsheetId {spreadsheet_id!r}) is missing 'ranges'",
-            hint="values mode requires per-request 'ranges' (a list of A1 strings)",
+            hint="values mode requires per-request 'ranges' (a list of A1 strings) or "
+            "'data_filters' (symbolic selectors)",
         )
     return spreadsheet_id

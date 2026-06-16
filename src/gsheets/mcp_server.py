@@ -490,21 +490,31 @@ def sheets_inspect(
 )
 def sheets_describe(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
-    ranges: Annotated[
-        list[str],
-        Field(
-            min_length=1,
-            description='One or more A1 ranges to characterize, e.g. ["Cliff!A1:F50", '
-            '"Plan!A1:B20"] — multi-range AND multi-sheet in one call.',
-        ),
-    ],
     ctx: Context,
+    ranges: Annotated[
+        Optional[list[str]],
+        Field(
+            description='One or more A1 ranges to characterize, e.g. ["Cliff!A1:F50", '
+            '"Plan!A1:B20"] — multi-range AND multi-sheet in one call. Omit and pass data_filters '
+            "instead for symbolic (insert-proof) addressing. Exactly one of ranges / data_filters."
+        ),
+    ] = None,
     max_cells: Annotated[
         Optional[int],
         Field(
             description="Fail with result_too_large if the regions span more than this many cells, "
             "instead of returning a payload that only fails at the token cap. null = unlimited. "
             "describe pulls full per-cell grid data, so narrow the ranges for a big region."
+        ),
+    ] = None,
+    data_filters: Annotated[
+        Optional[list[dict]],
+        Field(
+            description="Symbolic addressing INSTEAD of ranges (insert-proof): a list of selectors, "
+            'each one of {"a1": "Sheet1!A1:B10"} | {"gridRange": {...}} | '
+            '{"developerMetadataLookup": {"metadataKey": "block:totals"}}. Reads via '
+            "getByDataFilter; each region's range is derived from the returned block. Mutually "
+            "exclusive with ranges."
         ),
     ] = None,
     output_format: Annotated[
@@ -539,6 +549,11 @@ def sheets_describe(
     ``sheets_set_conditional_format``. For a plain bulk value dump use ``sheets_read_values``; for
     just the rules across a whole tab use ``sheets_read_conditional_formats``.
 
+    Pass ``data_filters`` INSTEAD of ``ranges`` for symbolic, insert-proof addressing (read via
+    getByDataFilter): a block tagged once via ``sheets_metadata`` is described by
+    ``{"developerMetadataLookup": {"metadataKey": "block:totals"}}`` even after rows shift; each
+    region's range is derived from the returned block. (Exactly one of ``ranges`` / ``data_filters``.)
+
     Setting ``out_path`` writes the rendered view to a LOCAL FILE (utf-8) and returns a small handle
     instead of the payload — an opt-in local side effect; the spreadsheet itself is never modified,
     so this tool stays read-only.
@@ -559,6 +574,7 @@ def sheets_describe(
         ranges,
         out_path=out_path,
         max_cells=max_cells,
+        data_filters=data_filters,
     )
 
 
@@ -646,15 +662,35 @@ def sheets_formula_patterns(
 )
 def sheets_read_values(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
-    ranges: Annotated[
-        list[str],
-        Field(description='One or more A1 ranges, e.g. ["Sheet1!A1:B10", "Sheet1!D:D"].'),
-    ],
     ctx: Context,
+    ranges: Annotated[
+        Optional[list[str]],
+        Field(
+            description='One or more A1 ranges, e.g. ["Sheet1!A1:B10", "Sheet1!D:D"]. Omit and pass '
+            "data_filters instead for symbolic (insert-proof) addressing. Exactly one of ranges / "
+            "data_filters is required."
+        ),
+    ] = None,
     render: Annotated[
         Literal["plain", "unformatted", "formula", "all"],
         Field(description="What each cell yields; see the tool description."),
     ] = "plain",
+    major_dimension: Annotated[
+        Literal["rows", "columns"],
+        Field(
+            description="rows (default) | columns — Google majorDimension. columns suits uniform "
+            "helper columns (each emitted inner list is one column)."
+        ),
+    ] = "rows",
+    data_filters: Annotated[
+        Optional[list[dict]],
+        Field(
+            description="Symbolic addressing INSTEAD of ranges (insert-proof): a list of selectors, "
+            'each one of {"a1": "Sheet1!A1:B10"} | {"gridRange": {...}} | '
+            '{"developerMetadataLookup": {"metadataKey": "block:totals"}}. Reads via '
+            "batchGetByDataFilter. Mutually exclusive with ranges."
+        ),
+    ] = None,
     diff_only: Annotated[
         bool,
         Field(
@@ -701,6 +737,12 @@ def sheets_read_values(
     side-by-side, index-aligned). For rich per-cell formats/notes/validation, use
     ``sheets_inspect`` instead.
 
+    ``major_dimension="columns"`` returns the grid column-major (each inner list is one column) —
+    handy for a wide grid of uniform helper columns. Pass ``data_filters`` INSTEAD of ``ranges``
+    for symbolic, insert-proof addressing: a block tagged once via ``sheets_metadata`` is then read
+    by ``{"developerMetadataLookup": {"metadataKey": "block:totals"}}`` even after rows shift, where
+    a literal A1 would have moved. (Exactly one of ``ranges`` / ``data_filters``.)
+
     On a staticized sheet (frozen formulas → literals) "all" duplicates the grid: ``computed``
     equals ``values`` almost everywhere. Pass ``diff_only=true`` to null out the equal cells and
     drop ``computed`` where nothing differs — roughly halving the payload while staying
@@ -710,7 +752,7 @@ def sheets_read_values(
     accidental token-cap blow-up on the in-context path.
 
     Returns:
-        ``{ok, spreadsheetId, render, ranges:[{range, values:[[...]], computed:[[...]]}]}``
+        ``{ok, spreadsheetId, render, major, ranges:[{range, values:[[...]], computed:[[...]]}]}``
         (``computed`` present only when ``render="all"``; with ``diff_only`` it is sparse/absent;
         rows padded to a rectangle). With ``out_path`` set, returns the file handle
         ``{ok, path, format, rows, cols, bytes, preview}`` instead.
@@ -724,6 +766,8 @@ def sheets_read_values(
         ranges,
         out_path=out_path,
         render=render,
+        major=major_dimension,
+        data_filters=data_filters,
         diff_only=diff_only,
         max_cells=max_cells,
     )
@@ -744,6 +788,14 @@ def sheets_read_conditional_formats(
     sheet: Annotated[
         str | None, Field(description="Tab name; omit to scan every tab.")
     ] = None,
+    range: Annotated[
+        Optional[str],
+        Field(
+            description="Restrict to the rules INTERSECTING this A1 range (on its own sheet), e.g. "
+            '"Cliff!A1:A50". The range carries its own sheet, so it is mutually exclusive with '
+            "sheet. Surviving rules keep their original priority index."
+        ),
+    ] = None,
 ) -> models.ConditionalFormatReport:
     """Read a sheet's conditional-formatting RULES, serialized to terse readable lines.
 
@@ -752,6 +804,10 @@ def sheets_read_conditional_formats(
     positional ``index`` (0 = highest priority; array order IS the priority — there is no
     separate priority field). Pass that ``index`` to ``sheets_set_conditional_format`` to
     update/delete the exact rule.
+
+    Pass ``range`` to keep only the rules that touch a specific region (the same range-scoped CF
+    ``sheets_describe`` computes, but as a standalone read); a surviving rule keeps its original
+    ``index`` so it still edits correctly.
 
     Returns:
         ``{ok, spreadsheetId, sheets:[{sheet, sheetId, rules:[{index, line, ranges, kind,
@@ -766,6 +822,7 @@ def sheets_read_conditional_formats(
         _services(ctx),
         spreadsheet_id,
         sheet,
+        range=range,
     )
 
 
@@ -784,7 +841,9 @@ def sheets_read_many(
         Field(
             min_length=1,
             description='Each item: {"spreadsheetId": "<id>", "ranges": ["Sheet1!A1:B10"], '
-            '"render": "plain"}. ranges is required only in values mode; render is optional.',
+            '"render": "plain", "major": "rows"}. In values mode each item needs EITHER "ranges" '
+            'OR "data_filters" (symbolic selectors, e.g. [{"developerMetadataLookup": '
+            '{"metadataKey": "block:totals"}}]); "render"/"major" are optional.',
         ),
     ],
     ctx: Context,

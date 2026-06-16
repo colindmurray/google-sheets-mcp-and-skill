@@ -63,6 +63,11 @@ def patched(monkeypatch):
     )
     monkeypatch.setattr(
         cli.core,
+        "read_conditional_formats",
+        _make("read_conditional_formats", {"ok": True, "spreadsheetId": "X", "sheets": []}),
+    )
+    monkeypatch.setattr(
+        cli.core,
         "describe",
         _make("describe", {"ok": True, "spreadsheetId": "X", "regions": []}),
     )
@@ -321,6 +326,47 @@ def test_read_values_diff_only_and_max_cells_flags_map(patched):
     assert patched["kwargs"]["max_cells"] == 2000
 
 
+def test_read_values_major_defaults_to_rows(patched):
+    _run(["read-values", "ID", "S!A1:B2"])
+    assert patched["kwargs"]["major"] == "rows"
+    assert patched["kwargs"]["data_filters"] is None
+
+
+def test_read_values_major_columns_maps(patched):
+    # SPEC §6 P3: --major columns drives core.read_values(major="columns").
+    _run(["read-values", "ID", "S!A1:B2", "--major", "columns"])
+    assert patched["kwargs"]["major"] == "columns"
+
+
+def test_read_values_data_filter_json_maps_and_drops_ranges(patched):
+    # SPEC §6 P2: --data-filter-json drives data_filters (symbolic addressing); the positional
+    # ranges is empty, so core receives ranges=None (it enforces the exactly-one contract).
+    _run([
+        "read-values",
+        "ID",
+        "--data-filter-json",
+        '[{"a1":"S!A1:B2"},{"developerMetadataLookup":{"metadataKey":"block:totals"}}]',
+    ])
+    assert patched["name"] == "read_values"
+    assert patched["args"][0] is None  # ranges positional empty -> None
+    assert patched["kwargs"]["data_filters"] == [
+        {"a1": "S!A1:B2"},
+        {"developerMetadataLookup": {"metadataKey": "block:totals"}},
+    ]
+
+
+def test_read_conditional_formats_sheet_and_range_map(patched):
+    # SPEC §6 P3: --range drives core.read_conditional_formats(range=...); default sheet/range None.
+    _run(["read-conditional-formats", "ID"])
+    assert patched["name"] == "read_conditional_formats"
+    assert patched["kwargs"]["range"] is None
+
+    _run(["read-conditional-formats", "ID", "--range", "Cliff!A1:A50"])
+    assert patched["kwargs"]["range"] == "Cliff!A1:A50"
+    # sheet is the first positional core arg after spreadsheet_id (None here).
+    assert patched["args"][0] is None
+
+
 def test_inspect_include_flags_map_one_to_one(patched):
     _run(["inspect", "ID", "S!A1:B2", "--compact", "--no-formulas", "--no-validation"])
     kw = patched["kwargs"]
@@ -336,6 +382,23 @@ def test_describe_maps_ranges_and_max_cells(patched):
     # ranges is the first positional core arg after spreadsheet_id; max_cells is a kwarg.
     assert patched["args"][0] == ["Cliff!A1:C2", "Plan!A1"]
     assert patched["kwargs"]["max_cells"] == 500
+    assert patched["kwargs"]["data_filters"] is None
+
+
+def test_describe_data_filter_json_maps_and_drops_ranges(patched):
+    # SPEC §6 P2: --data-filter-json drives core.describe(data_filters=...); the empty ranges
+    # positional becomes None (core enforces the exactly-one contract).
+    _run([
+        "describe",
+        "ID",
+        "--data-filter-json",
+        '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]',
+    ])
+    assert patched["name"] == "describe"
+    assert patched["args"][0] is None
+    assert patched["kwargs"]["data_filters"] == [
+        {"developerMetadataLookup": {"metadataKey": "block:totals"}}
+    ]
 
 
 def test_describe_max_cells_defaults_unlimited(patched):

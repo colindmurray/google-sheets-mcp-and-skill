@@ -95,7 +95,7 @@ class TestValuesMode:
         services = _service()
         read_values = _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: _values_result(sid),
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: _values_result(sid),
         )
         out = read_many(
             services,
@@ -120,7 +120,7 @@ class TestValuesMode:
         services = _service()
         read_values = _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: _values_result(sid),
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: _values_result(sid),
         )
         read_many(
             services,
@@ -133,7 +133,7 @@ class TestValuesMode:
         services = _service()
         captured: list[str] = []
 
-        def _spy(svc, sid, ranges, *, render):
+        def _spy(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
             captured.append(render)
             return _values_result(sid)
 
@@ -149,11 +149,69 @@ class TestValuesMode:
         # First request's override is honored; second falls back to the default.
         assert captured == ["formula", "plain"]
 
+    def test_per_request_major_override(self, monkeypatch):
+        # SPEC §6 P3: a per-request "major" rides through to read_values.
+        services = _service()
+        captured: list[str] = []
+
+        def _spy(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
+            captured.append(major)
+            return _values_result(sid)
+
+        _patch_read_values(monkeypatch, side_effect=_spy)
+        read_many(
+            services,
+            [
+                {"spreadsheetId": SID_A, "ranges": ["A1"], "major": "columns"},
+                {"spreadsheetId": SID_B, "ranges": ["A1"]},
+            ],
+            mode="values",
+        )
+        assert captured == ["columns", "rows"]
+
+    def test_per_request_data_filters_passthrough(self, monkeypatch):
+        # SPEC §6 P2: a request can carry data_filters INSTEAD of ranges; it rides through to
+        # read_values, which reads via batchGetByDataFilter.
+        services = _service()
+        captured: list[dict] = []
+
+        def _spy(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
+            captured.append({"ranges": ranges, "data_filters": data_filters})
+            return _values_result(sid)
+
+        _patch_read_values(monkeypatch, side_effect=_spy)
+        out = read_many(
+            services,
+            [
+                {
+                    "spreadsheetId": SID_A,
+                    "data_filters": [{"developerMetadataLookup": {"metadataKey": "block:totals"}}],
+                }
+            ],
+            mode="values",
+        )
+        assert out["results"][0]["ok"] is True
+        assert captured[0]["ranges"] is None
+        assert captured[0]["data_filters"] == [
+            {"developerMetadataLookup": {"metadataKey": "block:totals"}}
+        ]
+
+    def test_values_request_missing_both_ranges_and_data_filters_raises(self, monkeypatch):
+        # A values-mode request with neither ranges nor data_filters is a caller bug (bad_requests).
+        services = _service()
+        _patch_read_values(
+            monkeypatch,
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: _values_result(sid),
+        )
+        with pytest.raises(SheetsError) as exc:
+            read_many(services, [{"spreadsheetId": SID_A}], mode="values")
+        assert exc.value.code == "bad_requests"
+
     def test_values_is_the_default_mode(self, monkeypatch):
         services = _service()
         read_values = _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: _values_result(sid),
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: _values_result(sid),
         )
         out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["A1"]}])
         assert out["mode"] == "values"
@@ -164,7 +222,7 @@ class TestValuesMode:
     ):
         services = _service()
 
-        def _no_id(svc, sid, ranges, *, render):
+        def _no_id(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
             # A (hypothetical) core result missing its id must still come back identified.
             return {"ok": True, "render": "plain", "ranges": []}
 
@@ -178,7 +236,7 @@ class TestValuesMode:
         # that id is preserved verbatim (the request id is only a fallback identifier).
         services = _service()
 
-        def _core_own_id(svc, sid, ranges, *, render):
+        def _core_own_id(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
             return {"ok": True, "spreadsheetId": "CORE_REPORTED_ID", "ranges": []}
 
         _patch_read_values(monkeypatch, side_effect=_core_own_id)
@@ -224,7 +282,7 @@ class TestPerItemErrorCapture:
     def test_one_failure_is_captured_while_others_succeed(self, monkeypatch):
         services = _service()
 
-        def _maybe_fail(svc, sid, ranges, *, render):
+        def _maybe_fail(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
             if sid == SID_B:
                 raise _http_error(404)
             return _values_result(sid)
@@ -285,7 +343,7 @@ class TestPerItemErrorCapture:
         services = _service()
         _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: (_ for _ in ()).throw(
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: (_ for _ in ()).throw(
                 _http_error(404)
             ),
         )
@@ -305,7 +363,7 @@ class TestPerItemErrorCapture:
         err = SheetsError("bad_range", "no such range", hint="fix the A1")
         _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: (_ for _ in ()).throw(err),
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: (_ for _ in ()).throw(err),
         )
         out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["A1"]}])
         assert out["results"][0]["error"] == err.to_dict()
@@ -317,7 +375,7 @@ class TestPerItemErrorCapture:
         err = SheetsError("bad_range", "Cliff!ZZ is not a valid A1 range", hint="fix the A1")
         _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: (_ for _ in ()).throw(err),
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: (_ for _ in ()).throw(err),
         )
         out = read_many(services, [{"spreadsheetId": SID_A, "ranges": ["Cliff!ZZ"]}])
         assert out["results"][0] == {
@@ -335,7 +393,7 @@ class TestPerItemErrorCapture:
         # propagate so it is never silently masked as a per-file failure.
         services = _service()
 
-        def _boom(svc, sid, ranges, *, render):
+        def _boom(svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None):
             raise KeyError("unexpected programmer error")
 
         _patch_read_values(monkeypatch, side_effect=_boom)
@@ -393,7 +451,7 @@ class TestValidation:
         services = _service()
         read_values = _patch_read_values(
             monkeypatch,
-            side_effect=lambda svc, sid, ranges, *, render: _values_result(sid),
+            side_effect=lambda svc, sid, ranges=None, *, render="plain", major="rows", data_filters=None: _values_result(sid),
         )
         # The SECOND request is malformed (no spreadsheetId): the whole batch must reject
         # up front, so the FIRST (valid) request's sibling call must NOT have fired.

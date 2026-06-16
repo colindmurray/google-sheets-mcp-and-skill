@@ -180,10 +180,12 @@ line per non-empty cell) — the natural shape for sparse formula data. To under
 *logic* across a wide grid without pulling thousands of near-identical formulas, reach for
 `formula-patterns` (one template per column; see `intermediate.md`).
 
-Two optional knobs for large reads:
+Optional knobs:
 
 | Flag | Effect |
 |---|---|
+| `--major {rows,columns}` | Google `majorDimension`. `rows` (default) emits one inner list per row; `columns` emits one inner list per column — handy for a wide grid of uniform helper columns. The chosen mode rides back on the result as `major`. |
+| `--data-filter-json '[…]'` | Symbolic, **insert-proof** addressing **instead of** the positional ranges. A JSON list of selectors, each one of `{"a1":"Sheet1!A1:B10"}`, `{"gridRange":{…}}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`. Reads via `batchGetByDataFilter`. Mutually exclusive with `ranges` (exactly one). See `advanced.md` → metadata-addressed reads. |
 | `--diff-only` | `--render all` only: null out each `computed` cell that equals `values`, and drop `computed` entirely for a fully-static range. A `null` hole means "computed == values here"; the matrix stays index-aligned. Roughly halves a staticized formula-sheet read. |
 | `--max-cells N` | Fail with a structured `result_too_large` error if the read spans more than `N` cells, instead of returning a payload that only fails at the caller's token cap. Counts the padded **rectangle** (rows × cols, blanks included), so size it to the range area. Default: unlimited. |
 
@@ -202,9 +204,11 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 gsheets read-conditional-formats <YOUR_SPREADSHEET_ID>          # every sheet
 ```
 
-`--sheet NAME` restricts to one tab; omit for every sheet. Each rule returns structured fields plus
-a `line` that is the rule **body only** (no index token — the index lives in the structured `index`
-field):
+`--sheet NAME` restricts to one tab; omit for every sheet. `--range A1` instead restricts to the
+rules **intersecting** that range (on its own sheet) — the same range-scoped CF `describe` computes,
+but as a standalone read; a surviving rule keeps its original `index`. `--sheet` and `--range` are
+mutually exclusive (a range carries its own sheet). Each rule returns structured fields plus a `line`
+that is the rule **body only** (no index token — the index lives in the structured `index` field):
 
 ```jsonc
 { "index": 0,
