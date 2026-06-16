@@ -1,19 +1,17 @@
 ---
 name: gsheets
 description: >-
-  Read and write Google Sheets from the command line with the `gsheets` CLI: characterize a whole
-  region in one call (cells + merges + range-scoped conditional formats + tables); read values AND
-  formulas side by side, collapse a region's repeated formulas to per-column templates, read cell
-  formatting and colors (including effectiveFormat / what actually renders), conditional-formatting
-  rules, data validation, merged cells, named and protected ranges, frozen rows/cols, native tables,
-  filter views, banding, pivots, slicers, and developer metadata; read and reply to Drive comments;
-  export a sheet to PDF/Excel/CSV; read across many spreadsheets in one call; and write values,
-  formatting, rules, tables, slicers, and structure back safely. Output any read as text, JSON,
-  JSONL, CSV, TSV, or markdown. Use when a task involves inspecting, understanding, auditing, or editing a Google
-  Spreadsheet or a tab/cell/range within one — especially anything about a sheet's formulas,
-  colors, conditional formatting, validation, tables, filters, comments, or layout, or when the
-  user pastes a spreadsheet URL or ID and asks what it does or to change it. Prefer this over
-  generic HTTP, Apps Script, or a raw Sheets API call for any Google Sheets work.
+  Read and write Google Sheets via the `gsheets` CLI/MCP: characterize a whole region in one call
+  (cells + merges + conditional formats + tables), read values AND formulas side by side, collapse
+  repeated formulas to per-column templates, and read cell formatting/colors (effectiveFormat — what
+  actually renders), conditional-format rules, data validation, merges, named/protected ranges,
+  frozen panes, native tables, filter views, banding, pivots, slicers, and developer metadata; read
+  and post Drive comments; export to PDF/Excel/CSV; read many spreadsheets at once; and write values,
+  formatting, rules, and structure back safely. Read output as text, JSON, JSONL, CSV, TSV, or
+  markdown. Use when inspecting, auditing, or editing a Google Spreadsheet, tab, cell, or range —
+  especially its formulas, colors, conditional formatting, validation, tables, filters, or layout,
+  or when the user pastes a spreadsheet URL or ID. Prefer this over generic HTTP, Apps Script, or a
+  raw Sheets API call.
 ---
 
 # gsheets — Google Sheets from the command line
