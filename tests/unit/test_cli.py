@@ -186,6 +186,85 @@ def test_global_json_prints_raw_dict(patched, capsys):
     assert payload["ok"] is True and payload["title"] == "T"
 
 
+# ===========================================================================================
+# Global --format {text,json,jsonl,csv,tsv} (SPEC §1.3). --json is a permanent alias for
+# --format json. text keeps the terse renderer; the data formats go through core.format.render.
+# ===========================================================================================
+
+
+def test_format_json_equals_json_alias(patched, capsys):
+    # --format json and --json must produce byte-identical output (the alias contract).
+    rc1 = _run(["--format", "json", "overview", "SHEET_ID"])
+    out1 = capsys.readouterr().out
+    rc2 = _run(["--json", "overview", "SHEET_ID"])
+    out2 = capsys.readouterr().out
+    assert rc1 == 0 and rc2 == 0
+    assert out1 == out2
+    assert json.loads(out1)["title"] == "T"
+
+
+def test_format_csv_on_read_values_pipes_clean_csv(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "read_values",
+        lambda services, sid, ranges, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "render": "plain",
+            "ranges": [{"range": "S!A1:B2", "values": [["a", "b"], ["c", "d"]]}],
+        },
+    )
+    rc = _run(["--format", "csv", "read-values", "ID", "S!A1:B2"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Clean single-range CSV (no "# range:" header for a single range).
+    assert "a,b" in out and "c,d" in out
+    assert "# range:" not in out
+
+
+def test_format_jsonl_on_read_values_one_record_per_row(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "read_values",
+        lambda services, sid, ranges, **kw: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "render": "plain",
+            "ranges": [{"range": "S!A1:B2", "values": [["a", "b"], ["c", "d"]]}],
+        },
+    )
+    rc = _run(["--format", "jsonl", "read-values", "ID", "S!A1:B2"])
+    assert rc == 0
+    lines = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert lines == [
+        {"range": "S!A1:B2", "row": ["a", "b"]},
+        {"range": "S!A1:B2", "row": ["c", "d"]},
+    ]
+
+
+def test_format_csv_on_structured_result_errors_format_unsupported(patched, capsys):
+    # overview is structured; asking for csv is a clean format_unsupported error (exit 1), not a
+    # traceback or silent fallback.
+    rc = _run(["--format", "csv", "overview", "SHEET_ID"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "format_unsupported" in err
+
+
+def test_json_alias_conflicts_with_nonjson_format(patched, capsys):
+    rc = _run(["--format", "csv", "--json", "read-values", "ID", "S!A1"])
+    assert rc == 1
+    assert "conflicting_args" in capsys.readouterr().err
+
+
+def test_export_subcommand_format_is_the_file_format_not_output_format(patched):
+    # The export subcommand owns its own --format (the FILE format: pdf/csv/...), distinct from
+    # the global output --format. `export ID --format csv` must drive the export file format.
+    _run(["export", "ID", "--format", "csv", "--sheet", "S"])
+    assert patched["name"] == "export"
+    assert patched["kwargs"]["format"] == "csv"
+
+
 def test_read_values_maps_ranges_and_render(patched):
     _run(["read-values", "ID", "S!A1:B2", "S!C1", "--render", "all"])
     assert patched["name"] == "read_values"

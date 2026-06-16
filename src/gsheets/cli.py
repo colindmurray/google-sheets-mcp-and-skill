@@ -18,7 +18,13 @@ import sys
 
 from . import __version__, auth, core
 from .core.errors import SheetsError, to_sheets_error
+from .core.format import render as render_format
 from .core.richtext import text_runs_line
+
+# Global --format choices. ``text`` (the default) is the existing terse renderer; the data
+# formats are serialized by the shared core layer (``gsheets.core.format.render``). ``--json``
+# stays a permanent documented alias for ``--format json`` (SPEC §1.3, D-FMTFLAG).
+_FORMAT_CHOICES = ("text", "json", "jsonl", "csv", "tsv")
 
 # Render modes / input modes / action enums mirrored from core so argparse can validate up
 # front (core re-validates and raises SheetsError — these just give nice argparse errors).
@@ -144,9 +150,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the gsheets version and exit",
     )
     parser.add_argument(
+        "--format",
+        dest="output_format",
+        choices=_FORMAT_CHOICES,
+        default=None,
+        help="output format: text (default, terse) | json | jsonl | csv | tsv "
+        "(csv/tsv need a rectangular value read, e.g. read-values)",
+    )
+    parser.add_argument(
         "--json",
+        dest="json",
         action="store_true",
-        help="emit the raw core result dict as JSON (default: terse readable text)",
+        help="alias for --format json (emit the raw core result dict as pretty JSON)",
     )
     parser.add_argument(
         "--scopes",
@@ -1241,25 +1256,56 @@ def _render_generic(result: dict) -> str:
 # ===========================================================================================
 
 
-def _emit(result: dict, *, as_json: bool, stream=None) -> None:
-    """Print a successful core result — verbatim JSON (``--json``) or terse text."""
+def _resolve_format(args) -> str:
+    """Resolve the effective output format from ``--format`` / the ``--json`` alias (SPEC §1.3).
+
+    ``--format`` wins when set; otherwise ``--json`` maps to ``"json"`` (its permanent alias,
+    D-FMTFLAG); otherwise the default ``"text"``. Passing ``--json`` together with an explicit
+    ``--format`` that is NOT ``json`` is a conflict (so a stray combination fails loudly rather
+    than silently picking one).
+    """
+    fmt = getattr(args, "output_format", None)
+    as_json = getattr(args, "json", False)
+    if fmt is None:
+        return "json" if as_json else "text"
+    if as_json and fmt != "json":
+        raise SheetsError(
+            "conflicting_args",
+            f"--json is an alias for --format json; it conflicts with --format {fmt}",
+        )
+    return fmt
+
+
+def _emit(result: dict, *, fmt: str, stream=None) -> None:
+    """Print a successful core result in ``fmt`` (SPEC §1.3).
+
+    ``text`` uses the existing terse renderer; ``json`` pretty-prints the raw dict; the data
+    formats (``jsonl``/``csv``/``tsv``) go through the shared ``core.format.render`` so CLI
+    piped output is byte-identical to MCP file output (and to ``export``).
+    """
     out = stream if stream is not None else sys.stdout
-    if as_json:
-        print(json.dumps(result, ensure_ascii=False, indent=2), file=out)
-    else:
+    if fmt == "text":
         print(_render_text(result), file=out)
-
-
-def _emit_error(err: SheetsError, *, as_json: bool) -> None:
-    """Render a :class:`SheetsError` to stderr — ``ok:false`` JSON envelope or terse line."""
-    if as_json:
-        payload = {"ok": False, "error": err.to_dict()}
-        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
     else:
+        # render() handles json (pretty) and the data formats; raises format_unsupported on a
+        # structured result asked for csv/tsv (caught in main() -> structured error envelope).
+        print(render_format(result, fmt), file=out)
+
+
+def _emit_error(err: SheetsError, *, fmt: str) -> None:
+    """Render a :class:`SheetsError` to stderr — ``ok:false`` JSON envelope or terse line.
+
+    Non-text formats all surface the error as the structured ``ok:false`` JSON envelope (csv/tsv
+    of an error makes no sense); ``text`` keeps the terse two-line form.
+    """
+    if fmt == "text":
         msg = f"gsheets: error: {err.code}: {err.message}"
         if err.hint:
             msg += f"\n  hint: {err.hint}"
         print(msg, file=sys.stderr)
+    else:
+        payload = {"ok": False, "error": err.to_dict()}
+        print(json.dumps(payload, ensure_ascii=False, indent=2), file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1285,6 +1331,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("a subcommand is required")
         return 2  # pragma: no cover - parser.error raises SystemExit
 
+    # Resolve the effective output format up front. A --json/--format conflict is itself a
+    # SheetsError; surface it as an error envelope (default to text framing for that message).
+    try:
+        fmt = _resolve_format(args)
+    except SheetsError as err:
+        _emit_error(err, fmt="text")
+        return 1
+
     try:
         if getattr(args, "needs_services", False):
             services = auth.build_services(scopes_mode=args.scopes)
@@ -1292,21 +1346,22 @@ def main(argv: list[str] | None = None) -> int:
         else:
             # auth subcommands: no Sheets handle; they call the auth layer directly.
             result = func(None, args)
+        # ``auth status`` returns ok:False (not a raise) when no creds resolve -> non-zero exit.
+        if isinstance(result, dict) and result.get("ok") is False:
+            _emit(result, fmt=fmt)
+            return 1
+        # Rendering can fail (e.g. csv/tsv on a structured result -> format_unsupported); keep it
+        # inside the guard so it surfaces as the SAME structured error envelope, not a traceback.
+        _emit(result, fmt=fmt)
     except SheetsError as err:
-        _emit_error(err, as_json=args.json)
+        _emit_error(err, fmt=fmt)
         return 1
     except Exception as exc:  # noqa: BLE001 - never surface a raw traceback to the user
         # A transport-level failure (socket read timeout on a big inspect, DNS/connection error,
         # a failed token refresh) is NOT a SheetsError and would otherwise bubble up as a raw
         # Python traceback (ISSUES.md #9b). Coerce it to the SAME structured envelope every other
         # failure produces.
-        _emit_error(to_sheets_error(exc), as_json=args.json)
+        _emit_error(to_sheets_error(exc), fmt=fmt)
         return 1
 
-    # ``auth status`` returns ok:False (not a raise) when no creds resolve -> non-zero exit.
-    if isinstance(result, dict) and result.get("ok") is False:
-        _emit(result, as_json=args.json)
-        return 1
-
-    _emit(result, as_json=args.json)
     return 0

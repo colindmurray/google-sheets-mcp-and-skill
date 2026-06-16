@@ -29,6 +29,7 @@ import sys
 
 import pytest
 from fastmcp.exceptions import ToolError
+from fastmcp.tools.tool import ToolResult
 
 import gsheets.mcp_server as srv
 from gsheets.core.errors import SheetsError
@@ -113,6 +114,106 @@ def test_read_values_exposes_diff_only_and_max_cells_optional():
     assert "max_cells" in props
     assert "diff_only" not in required
     assert "max_cells" not in required
+
+
+# ----------------------------------------------------------- SPEC §1.3 output_format on reads
+
+
+@pytest.mark.parametrize("name", ["sheets_read_values", "sheets_inspect", "sheets_read_many"])
+def test_output_format_exposed_default_text(name):
+    # The shared output-format knob is exposed on every read tool and defaults to text.
+    props = _tools()[name].parameters.get("properties", {})
+    assert "output_format" in props
+    assert props["output_format"].get("default") == "text"
+    assert name not in _tools()[name].parameters.get("required", [])
+
+
+def test_read_values_output_format_offers_all_data_formats():
+    # The rectangular-values read accepts every data format (text/json/jsonl/csv/tsv).
+    prop = _tools()["sheets_read_values"].parameters["properties"]["output_format"]
+    enum = prop.get("enum") or (prop.get("anyOf") and None)
+    assert enum is not None
+    assert set(enum) == {"text", "json", "jsonl", "csv", "tsv"}
+
+
+@pytest.mark.parametrize("name", ["sheets_inspect", "sheets_read_many"])
+def test_structured_reads_restrict_to_text_json_jsonl(name):
+    # Structured reads (no rectangular grid) advertise only text/json/jsonl — csv/tsv are absent.
+    prop = _tools()[name].parameters["properties"]["output_format"]
+    enum = prop.get("enum")
+    assert enum is not None
+    assert set(enum) == {"text", "json", "jsonl"}
+
+
+def test_call_formatted_text_returns_model():
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "render": "plain",
+        "ranges": [{"range": "S!A1:B1", "values": [["a", "b"]]}],
+    }
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult, lambda s, sid, rngs, **kw: payload, "text", object(), "<ID>", ["S!A1:B1"]
+    )
+    assert isinstance(out, srv.models.ReadValuesResult)
+
+
+def test_call_formatted_json_returns_model():
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "render": "plain",
+        "ranges": [{"range": "S!A1:B1", "values": [["a", "b"]]}],
+    }
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult, lambda s, sid, rngs, **kw: payload, "json", object(), "<ID>", ["S!A1:B1"]
+    )
+    assert isinstance(out, srv.models.ReadValuesResult)
+
+
+def test_call_formatted_csv_returns_string_via_toolresult():
+    # A data format returns the rendered STRING (wrapped in a ToolResult so FastMCP keeps the
+    # tool's structured output_schema while still emitting a plain string body).
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "render": "plain",
+        "ranges": [{"range": "S!A1:B2", "values": [["a", "b"], ["c", "d"]]}],
+    }
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult, lambda s, sid, rngs, **kw: payload, "csv", object(), "<ID>", ["S!A1:B2"]
+    )
+    assert isinstance(out, ToolResult)
+    text = out.content[0].text
+    assert "a,b" in text and "c,d" in text
+    # No structured content for the data-format path (it's a plain string body).
+    assert out.structured_content is None
+
+
+def test_call_formatted_jsonl_returns_string():
+    payload = {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "render": "plain",
+        "ranges": [{"range": "S!A1:A2", "values": [["x"], ["y"]]}],
+    }
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult, lambda s, sid, rngs, **kw: payload, "jsonl", object(), "<ID>", ["S!A1:A2"]
+    )
+    assert isinstance(out, ToolResult)
+    lines = [l for l in out.content[0].text.splitlines() if l.strip()]
+    assert len(lines) == 2
+
+
+def test_call_formatted_csv_on_structured_result_raises_tool_error():
+    # csv on a structured (inspect-shaped) result -> format_unsupported -> clean ToolError.
+    structured = {"ok": True, "spreadsheetId": "<ID>", "sheet": "S", "range": "A1", "rows": 1,
+                  "cols": 1, "cells": [{"a1": "A1"}], "merges": []}
+    with pytest.raises(ToolError) as ei:
+        srv._call_formatted(
+            srv.models.InspectResult, lambda s, sid, rng, **kw: structured, "csv", object(), "<ID>", "A1"
+        )
+    assert "format_unsupported" in str(ei.value)
 
 
 def test_to_tool_error_api_shape():

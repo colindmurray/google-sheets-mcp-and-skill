@@ -361,6 +361,46 @@ class TestTextExports:
         assert dest.read_bytes() == b""
         assert out["bytes"] == 0
 
+    def test_csv_delegates_to_shared_render_grid(self, tmp_path, monkeypatch):
+        # SPEC §1.6: export's csv/tsv serialization now goes through the ONE shared csv path
+        # (core.format.render_grid), not a second inline csv.writer. Spy on render_grid bound in
+        # the export module to prove the delegation happened with the expected (rows, delimiter).
+        self._patch_read_values(monkeypatch, self._ROWS)
+        captured: dict = {}
+        real_render_grid = export_mod.render_grid
+
+        def _spy(rows, delimiter):
+            captured["rows"] = rows
+            captured["delimiter"] = delimiter
+            return real_render_grid(rows, delimiter)
+
+        monkeypatch.setattr(export_mod, "render_grid", _spy)
+        services = _make_service()
+        dest = tmp_path / "via.csv"
+        export(services, SHEET_ID, format="csv", path=str(dest), sheet="Data")
+
+        assert captured["rows"] == self._ROWS
+        assert captured["delimiter"] == ","
+
+    def test_csv_bytes_equal_shared_render(self, tmp_path, monkeypatch):
+        # The on-disk bytes must equal the shared layer's render of the SAME read_values result
+        # (so export, CLI --format csv, and MCP file output are byte-identical, SPEC §1.6).
+        import importlib
+
+        fmtmod = importlib.import_module("gsheets.core.format")
+        self._patch_read_values(monkeypatch, self._ROWS)
+        services = _make_service()
+        dest = tmp_path / "match.csv"
+        export(services, SHEET_ID, format="csv", path=str(dest), sheet="Data")
+
+        result = {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "render": "plain",
+            "ranges": [{"range": "Data", "values": self._ROWS}],
+        }
+        assert dest.read_bytes() == fmtmod.render(result, "csv").encode("utf-8")
+
 
 # =========================================================================== error paths
 

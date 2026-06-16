@@ -13,13 +13,26 @@ is the authoritative, always-current flag source for any single command.
 - **A1 ranges everywhere.** `'Sheet1!A1:D20'`, `'Sheet1!A:A'` (whole column), `'Sheet1'` (whole
   tab). Quote them — `!`, `:`, and spaces are shell-significant. You never fetch a `sheetId` first;
   the sheet name → id resolution happens internally.
-- **`--json` and `--scopes` are global — they go BEFORE the subcommand.**
+- **`--format`, `--json`, and `--scopes` are global — they go BEFORE the subcommand.**
   ```sh
   gsheets --json overview <YOUR_SPREADSHEET_ID>     # correct
   gsheets overview <YOUR_SPREADSHEET_ID> --json     # WRONG -> "unrecognized arguments: --json" (exit 2)
   ```
-  `--json` emits the raw core result dict as pretty JSON (default is terse readable text; prefer
-  `--json` when parsing). `--scopes {default,broad}` sets the auth scope for the call.
+  `--format {text,json,jsonl,csv,tsv}` (default `text`) selects the output serialization; `--json`
+  is a permanent alias for `--format json`. `--scopes {default,broad}` sets the auth scope.
+  Supported formats by result shape:
+
+  | Result shape | Commands | Formats |
+  |---|---|---|
+  | Rectangular values | `read-values` | text, json, jsonl, csv, tsv |
+  | Structured/rich | `inspect`, `read-conditional-formats`, `overview`, `structure`, `read-many` | text, json, jsonl |
+  | Small confirmations | every writer, `auth` | text, json |
+
+  `csv`/`tsv` need a rectangular value read — asking for them on a structured result is a clean
+  `format_unsupported` error, not a silent fallback. A single range pipes as plain CSV; multiple
+  ranges emit one `# range: <A1>` block each. `jsonl` emits one `{range,row}` per row (or one list
+  element per line for list results). For bulk values, pipe to a file:
+  `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
 - **The positional `spreadsheet_id` is always the first argument** of every Sheets subcommand.
 - **`USER_ENTERED` is the write default.** Input is parsed like a user typing: `=SUM(B:B)` becomes
   a live formula, `5`/`$10`/`50%`/`2026-06-09` coerce to typed values. `--input raw` stores the

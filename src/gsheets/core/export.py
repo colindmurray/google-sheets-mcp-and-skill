@@ -12,15 +12,16 @@ Two distinct backends, picked by ``format``:
 * **csv / tsv** — SINGLE-SHEET exports done WITHOUT Drive. Drive's csv export only ever emits the
   first sheet, so instead we read the named sheet's values through the **Sheets** API
   (reusing :func:`gsheets.core.values.read_values` with ``render="plain"``) and serialize the 2D
-  rows locally with the stdlib ``csv`` module (delimiter ``","`` for csv, ``"\t"`` for tsv,
-  utf-8). These need only the Sheets scope, so ``sheet`` is REQUIRED — without it this raises
+  rows through the shared output-format layer (:func:`gsheets.core.format.render_grid`, delimiter
+  ``","`` for csv, ``"\t"`` for tsv, utf-8) — ONE csv path shared with CLI ``--format``/MCP file
+  output. These need only the Sheets scope, so ``sheet`` is REQUIRED — without it this raises
   ``SheetsError("missing_sheet")``.
 
 The bytes are written to ``path`` (or ``f"{spreadsheet_id}.{ext}"`` in the cwd when omitted) and
 the written length is reported back so a caller can verify the download.
 
-PURE core module: imports only stdlib (``io``, ``csv``, ``os``) + ``googleapiclient`` + sibling
-core modules (``errors``, ``service``, ``values``). It must NEVER import ``fastmcp``, ``mcp``,
+PURE core module: imports only stdlib (``io``, ``os``) + ``googleapiclient`` + sibling core
+modules (``errors``, ``format``, ``service``, ``values``). It must NEVER import ``fastmcp``, ``mcp``,
 ``argparse``, ``pydantic``, or ``gsheets.models`` (DESIGN §1 boundary). ``MediaIoBaseDownload``
 (from ``googleapiclient.http``) is imported LAZILY inside :func:`_export_via_drive` rather than at
 module top: ``googleapiclient.http`` transitively pulls in ``httplib2`` -> ``argparse``, which the
@@ -29,13 +30,13 @@ boundary guard forbids from a clean ``import gsheets.core`` (this module is re-e
 
 from __future__ import annotations
 
-import csv
 import io
 import os
 
 from googleapiclient.errors import HttpError
 
 from .errors import SheetsError, classify_google_error
+from .format import render_grid
 from .service import SheetsServices
 from .values import read_values
 
@@ -194,9 +195,9 @@ def _export_text_via_sheets(
     """Single-sheet csv/tsv export WITHOUT Drive: read plain values + serialize locally.
 
     Reads the named sheet through :func:`gsheets.core.values.read_values` (``render="plain"``) and
-    serializes the single range's 2D rows with the stdlib ``csv`` module (utf-8). REQUIRES a
-    ``sheet`` (Drive's csv export only does the first sheet, so we always go through Sheets) —
-    omitting it raises ``SheetsError("missing_sheet")``.
+    serializes the single range's 2D rows through :func:`gsheets.core.format.render_grid` (utf-8) —
+    the shared csv path. REQUIRES a ``sheet`` (Drive's csv export only does the first sheet, so we
+    always go through Sheets) — omitting it raises ``SheetsError("missing_sheet")``.
     """
     if sheet is None:
         raise SheetsError(
@@ -210,11 +211,7 @@ def _export_text_via_sheets(
     ranges = result.get("ranges") or []
     rows = ranges[0].get("values", []) if ranges else []
 
-    text_buffer = io.StringIO()
-    writer = csv.writer(
-        text_buffer, delimiter=_TEXT_DELIMITER[fmt], lineterminator="\r\n"
-    )
-    for row in rows:
-        writer.writerow(row)
-
-    return text_buffer.getvalue().encode("utf-8")
+    # Delegate the csv/tsv serialization to the shared output-format layer (SPEC §1.2) so there
+    # is ONE csv path — the bytes are byte-identical to what this used to build inline (and to
+    # what CLI ``--format csv`` / MCP file output now produce).
+    return render_grid(rows, _TEXT_DELIMITER[fmt]).encode("utf-8")

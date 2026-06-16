@@ -48,7 +48,8 @@ Five invariants follow from that thesis and are not negotiable:
                 │  export · multiread                                  │
                 │    +   helpers:                                      │
                 │  addressing · colors · fieldsmask · flatten ·        │
-                │  condformat · errors · service   +   serializers:    │
+                │  condformat · errors · service · format   +          │
+                │                          serializers:                │
                 │  richtext · pivot · tables · filters · banding ·     │
                 │  slicers · comments                                  │
                 │                                                      │
@@ -508,13 +509,34 @@ enable a Drive scope.
 - `pdf` / `xlsx` / `ods` — whole-workbook export via Drive `files.export`. Google renders the
   workbook server-side; the bytes stream down with `MediaIoBaseDownload` (the lazy import above).
   Requires a Drive scope; the `sheet` arg is ignored. No Drive service → `drive_unavailable`.
-- `csv` / `tsv` — one sheet, serialized locally with the stdlib `csv` module from
-  `read_values(render="plain")` (Drive's csv export only emits the first sheet, so we never use
-  it). Sheets scope only; `sheet` is required → `missing_sheet` if omitted.
+- `csv` / `tsv` — one sheet, serialized locally from `read_values(render="plain")` (Drive's csv
+  export only emits the first sheet, so we never use it). The serialization itself is delegated to
+  the shared output-format layer (`format.render_grid`, below), so `export`'s on-disk bytes are
+  byte-identical to a CLI `--format csv` pipe / an MCP file output. Sheets scope only; `sheet` is
+  required → `missing_sheet` if omitted.
 
 The MCP tool is annotated as a **write** tool with `destructiveHint=True`: it mutates no
 spreadsheet, but it writes to the local filesystem and silently overwrites an existing file
 at `path`.
+
+### Output-format layer (`format`)
+
+`core/format.py` is a pure stdlib helper (`csv` · `io` · `json`) that serializes a core result
+dict to a string in one shared place, so both adapters and `export` produce byte-identical output.
+`render(result, fmt)` covers the data formats — `json` (pretty `json.dumps`), `jsonl` (one
+`{range,row}` record per row for `read_values`, one list element per line otherwise), and `csv` /
+`tsv` (the rectangular value grid via the stdlib `csv` module, RFC-4180 `\r\n`; a single range is
+clean CSV, multiple ranges emit one `# range: <A1>` block each). A tabular format requested on a
+structured result raises `SheetsError("format_unsupported")` — the agent learns to use a value
+read. `text` is **not** handled here: it stays the adapters' existing terse renderer (the CLI text
+renderer / the Pydantic model render), which differs by adapter and predates this layer.
+
+The adapters wire it identically: the CLI promotes `--json` to a global `--format
+{text,json,jsonl,csv,tsv}` (`--json` is a permanent alias for `--format json`); the MCP read tools
+take `output_format` (the rectangular-values `read_values` offers every format, the structured
+reads offer only `text`/`json`/`jsonl`). For a data format the MCP tool returns the rendered string
+wrapped in a `ToolResult` (which keeps the tool's structured `output_schema` while emitting a plain
+string body — FastMCP refuses a bare string as `structured_content` when a schema is set).
 
 ### Read across files (`read_many`)
 

@@ -60,10 +60,11 @@ Conventions:
 
 - Use `<YOUR_SPREADSHEET_ID>` as a placeholder in every example. The real ID comes from the user,
   the URL they paste (the token between `/d/` and `/edit`), or the environment.
-- `--json` and `--scopes` are GLOBAL flags defined on the top-level parser, so they go *before*
-  the subcommand: `gsheets --json overview <ID>`, not `gsheets overview <ID> --json` (the latter
-  is an argparse error). Default output (no `--json`) is terse human-readable text; use `--json`
-  when piping to `jq` or parsing.
+- `--format`, `--json`, and `--scopes` are GLOBAL flags defined on the top-level parser, so they go
+  *before* the subcommand: `gsheets --json overview <ID>`, not `gsheets overview <ID> --json` (the
+  latter is an argparse error). `--format {text,json,jsonl,csv,tsv}` (default `text`) chooses the
+  output serialization; `--json` is a permanent alias for `--format json`. See "Choosing an output
+  format" below.
 - `gsheets <cmd> --help` is the source of truth for the exact, current flags of any command.
 
 ## Command map (Understand → Change → Escape hatch)
@@ -127,6 +128,24 @@ Escape hatch (last resort):
 
 - `batch <ID> --requests-json '[...]'` — raw ordered `batchUpdate` requests. Only when no typed
   command above covers the need.
+
+## Choosing an output format (`--format`, default `text`)
+
+Pick the format for what you'll do with the data:
+
+- `text` (default) — terse, address-anchored lines. Reading a small region and reasoning in place.
+- `csv` / `tsv` — pipe into pandas/duckdb/jq to compute, join, or filter. Don't reason over a big
+  table in context — process it. Only on a rectangular value read (`read-values`); a structured
+  read (`inspect`, `structure`, `read-conditional-formats`, `read-many`) returns a clean
+  `format_unsupported` error. A single range is plain CSV; multiple ranges emit one `# range: <A1>`
+  block per range.
+- `json` — a caller will parse the structure (the full result dict, pretty-printed).
+- `jsonl` — many records to stream or filter line by line. `read-values` emits one `{range,row}`
+  per row; a list result (e.g. `read-many`, `comments`) emits one element per line.
+
+Before pulling data, narrow scope: a tight range or `read-many --mode summary` beats dumping a
+whole tab. Move bulk data as a file or pipe (`gsheets --format csv read-values <ID> <RANGE> > out.csv`
+on the CLI), never into context.
 
 ## Workflow: understanding a sheet
 

@@ -26,6 +26,7 @@ from typing import Annotated, Any, Callable, Literal, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.tools.tool import ToolResult
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -53,7 +54,14 @@ from .core import (
     write_values as _write_values,
 )
 from .core.errors import SheetsError, to_sheets_error
+from .core.format import render as render_format
 from .core.service import SheetsServices
+
+# Output-format Literals (SPEC §1.3). A rectangular-values read accepts every data format; a
+# structured read accepts only text/json/jsonl (csv/tsv need a value grid). text/json return the
+# mirror model as today; the data formats return the shared ``render()`` string.
+ValueFormat = Literal["text", "json", "jsonl", "csv", "tsv"]
+StructuredFormat = Literal["text", "json", "jsonl"]
 
 
 # --------------------------------------------------------------------------- error envelope
@@ -230,6 +238,46 @@ def _call(
         raise to_tool_error(to_sheets_error(exc)) from exc
 
 
+def _call_formatted(
+    model_cls: type[BaseModel],
+    fn: Callable[..., dict],
+    output_format: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run one core fn and shape its result per ``output_format`` (SPEC §1.3) — a read tool body.
+
+    Branches identically to the CLI: ``text``/``json`` return the mirror model (FastMCP emits
+    ``structuredContent`` + a terse ``content`` block, exactly as today); the data formats
+    (``jsonl``/``csv``/``tsv``) return ``core.format.render(result, output_format)`` as a plain
+    STRING, so MCP data output is byte-identical to the CLI's piped output and to ``export``. A
+    csv/tsv request on a structured result raises ``format_unsupported`` -> a clean ``ToolError``.
+
+    Args:
+        model_cls: The mirror result model (used for the text/json path).
+        fn: The pure core function.
+        output_format: ``text`` | ``json`` | ``jsonl`` | ``csv`` | ``tsv``.
+        *args: ``services`` followed by the core positional args.
+        **kwargs: The core keyword args.
+
+    Returns:
+        A populated ``model_cls`` instance (text/json — FastMCP emits structuredContent), or a
+        ``ToolResult`` carrying the serialized string as a single text block (data formats). The
+        ``ToolResult`` wrapper keeps the tool's structured ``output_schema`` intact while
+        returning a plain string body (FastMCP refuses to put a bare string into
+        ``structured_content`` when an output_schema is set).
+    """
+    if output_format in ("text", "json"):
+        return _call(model_cls, fn, *args, **kwargs)
+    try:
+        result = fn(*args, **kwargs)
+        return ToolResult(content=render_format(result, output_format))
+    except SheetsError as exc:
+        raise to_tool_error(exc) from exc
+    except Exception as exc:  # noqa: BLE001 - turn ANY failure into a structured ToolError
+        raise to_tool_error(to_sheets_error(exc)) from exc
+
+
 # --------------------------------------------------------------------------- registration
 
 
@@ -340,6 +388,14 @@ def sheets_inspect(
         bool,
         Field(description="Attach a pivot-table definition to its anchor cell when present."),
     ] = False,
+    output_format: Annotated[
+        StructuredFormat,
+        Field(
+            description="Output format: text (default) | json | jsonl. This is a STRUCTURED read "
+            "(no rectangular value grid), so csv/tsv are not offered — use sheets_read_values for "
+            "those."
+        ),
+    ] = "text",
 ) -> models.InspectResult:
     """Read a range richly: values and formulas, both userEntered & effective formats, merges,
     notes, and structured data-validation — in one call, with a tight fields mask.
@@ -356,9 +412,10 @@ def sheets_inspect(
         rectangular ``runs`` blocks; independently of that, the per-cell rich-text ``runs`` /
         ``hyperlink`` / ``pivot`` keys appear only on cells that carry them.
     """
-    return _call(
+    return _call_formatted(
         models.InspectResult,
         _inspect,
+        output_format,
         _services(ctx),
         spreadsheet_id,
         range,
@@ -408,6 +465,15 @@ def sheets_read_values(
             "value dumps prefer sheets_export (csv/tsv → a file, no token cap)."
         ),
     ] = None,
+    output_format: Annotated[
+        ValueFormat,
+        Field(
+            description="Output format: text (default) | json | jsonl | csv | tsv. csv/tsv emit "
+            "the rectangular value grid (one '# range:' block per range when multiple); jsonl "
+            "emits one {range,row} record per row. Don't reason over a big table in context — "
+            "render csv and process it."
+        ),
+    ] = "text",
 ) -> models.ReadValuesResult:
     """Read plain values for one or more A1 ranges, with a selectable render mode.
 
@@ -429,9 +495,10 @@ def sheets_read_values(
         (``computed`` present only when ``render="all"``; with ``diff_only`` it is sparse/absent;
         rows padded to a rectangle).
     """
-    return _call(
+    return _call_formatted(
         models.ReadValuesResult,
         _read_values,
+        output_format,
         _services(ctx),
         spreadsheet_id,
         ranges,
@@ -505,6 +572,14 @@ def sheets_read_many(
         Field(description='"values" reads each request\'s ranges; "summary" is a cheap '
         "per-file orientation snapshot (ranges ignored)."),
     ] = "values",
+    output_format: Annotated[
+        StructuredFormat,
+        Field(
+            description="Output format: text (default) | json | jsonl. This is a cross-file "
+            "envelope (not a single rectangular grid), so csv/tsv are not offered; jsonl emits "
+            "one per-file result element per line."
+        ),
+    ] = "text",
 ) -> models.ReadManyResult:
     """Fan one values-or-summary read across many spreadsheets, capturing per-file errors.
 
@@ -521,9 +596,10 @@ def sheets_read_many(
         (``{ok:True, spreadsheetId, ...}``, a values or summary shape) or a captured failure, one
         per request in request order.
     """
-    return _call(
+    return _call_formatted(
         models.ReadManyResult,
         _read_many,
+        output_format,
         _services(ctx),
         requests,
         mode=mode,
