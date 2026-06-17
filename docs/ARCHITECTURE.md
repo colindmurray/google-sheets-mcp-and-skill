@@ -49,7 +49,7 @@ Five invariants follow from that thesis and are not negotiable:
                 │    +   helpers:                                      │
                 │  addressing · colors · fieldsmask · flatten ·        │
                 │  condformat · dataselector · errors · service ·      │
-                │  format · paths   +                                  │
+                │  format · paths · retry   +                          │
                 │                          serializers:                │
                 │  richtext · pivot · tables · filters · banding ·     │
                 │  slicers · comments                                  │
@@ -99,6 +99,7 @@ Helper modules with disjoint responsibilities back the function surface:
 | `dataselector` | `build_data_filters()` — validate + resolve the `data_filters` selector grammar (metadata-/grid-/A1-addressed reads); see below. |
 | `format` | `render()` / `render_grid` / `render_kv` / `render_addressed` — the shared pure output-format layer (json/jsonl/csv/tsv/markdown + address-keyed sparse rendering); see below. |
 | `paths` | `resolve_out_path()` + `write_file_handle()` — the MCP `out_path` safety check and file-output handle; see below. |
+| `retry` | `RetryPolicy` (the frozen policy dataclass) + `execute_with_retry()` + a `_ACTIVE_POLICY` contextvar with `current_policy()` / `activate()` — the pure retry/backoff mechanism, off by default; see below. |
 
 Seven additional pure serializer modules (added in v0.2) flatten the richer read surface
 into the same terse, structured, round-trippable line style. Each takes already-resolved
@@ -649,6 +650,59 @@ CRUD). An empty list, a non-list, or a selector carrying none / more than one of
 `SheetsError("bad_data_filters")` with an example hint. CLI `ranges` positionals are `nargs="*"` and
 collapse to `None` when empty, so `--data-filter-json` can be the addressing path without colliding
 with a positional range.
+
+### Retry / backoff (`retry`) — pure mechanism, off by default
+
+Retry/backoff (ISSUES.md #25) is **off by default** as of v0.4.0 (a breaking change from the old
+always-on 4 automatic retries): a 429/5xx now fails fast unless the caller opts in, per call, on
+either adapter. The mechanism is pure and lives entirely in `core/retry.py` — no `googleapiclient`
+import at module top, so the boundary guard stays green (the auth layer imports it transport-clean).
+
+There is **no central `.execute()` wrapper in core** (32 call sites); the single chokepoint is the
+auth-layer `requestBuilder`, built once per process/lifespan. So per-call configuration flows through
+a **contextvar** the builder reads at `.execute()` time, not through every core signature:
+
+- **`RetryPolicy`** is a frozen dataclass holding the full policy — `enabled` (default `False`),
+  `strategy` (`none` / `fixed` / `exponential` / `exponential_jitter`), `max_retries`, `base_delay`,
+  `max_delay`, `total_deadline` (overall wall-clock cap; `None` = no cap), `honor_retry_after`,
+  `retry_after_cap`, the retryable `retry_statuses`, and `retry_rate_limit_403`. Constructors:
+  `RetryPolicy.DISABLED` (the true off — one attempt, exceptions propagate), `default_preset()` (the
+  sensible catch-all: enabled exponential-jitter, 4 retries, 0.5s base, 30s per-attempt cap, 60s
+  overall deadline), and `from_env(**overrides)` (reads `GSHEETS_BACKOFF_*` env, then applies explicit
+  overrides; stays DISABLED unless retry is explicitly enabled). `next_delay()` and `is_retryable()`
+  are the pure decision logic; `next_delay` accepts an injectable rng so jitter is deterministic in tests.
+- **`current_policy()` / `activate(policy)`** read and set the `_ACTIVE_POLICY` contextvar. Both
+  adapters wrap the core call in `activate(...)` so the policy is visible to `.execute()` deep in core.
+- **`execute_with_retry(call, policy=None, …)`** is the loop: if the policy is disabled it returns
+  `call()` once; otherwise it retries on a retryable status, sleeping `next_delay()` (honoring a server
+  `Retry-After` when present), capping each sleep at `max_delay`, and giving up if the next sleep would
+  breach `total_deadline`. On the final raise it annotates the exception with `_gsheets_retry_attempts`
+  / `_gsheets_retry_waited_ms`, which `classify_google_error()` reads onto the `SheetsError` as the
+  optional `retries` / `waited_ms` fields (surfaced in the error dict as `retries` / `waitedMs`, only
+  when present).
+
+**Auth wiring.** `auth/__init__.py`'s `_make_request_builder()` returns a `_RetryingHttpRequest` whose
+`execute()` defers to `core.retry.execute_with_retry(lambda: super().execute(num_retries=0), …)` —
+`num_retries=0` turns off googleapiclient's built-in retry so our loop is the only retrier. The builder
+reads the active policy via `current_policy()`; it no longer reads any retry env var itself. A stderr
+diagnostic line per retry is gated by `GSHEETS_BACKOFF_LOG`.
+
+**Adapters.** The CLI exposes global flags (`--default-backoff-strategy` preset, `--no-retry`, and the
+granular `--retries` / `--backoff` / `--retry-*` / `--honor-retry-after`), resolves them to one
+`RetryPolicy` in `main()` (mutually-exclusive; a conflict raises `backoff_flags_conflict`), and wraps
+dispatch in `activate(policy)`. The MCP server adds a per-call `retry: RetryParams` arg (an MCP-only
+mirror model in `models.py`, never in core) to every tool — omit for no retry, `preset:"default"` for
+the preset, `preset:"off"` to force disable, or granular fields (mutually exclusive with `preset`); it
+resolves to a `RetryPolicy` and `activate(...)`s it inside the sync `_call` body so the contextvar is
+set under FastMCP's thread offload.
+
+**Env vars** (read **only** inside `from_env`, mirroring how `errors.py` reads `GSHEETS_VERBOSE_ERRORS`
+— config, not credentials, so it is allowed in core): `GSHEETS_BACKOFF_STRATEGY` (a non-`none` value
+enables retry), `GSHEETS_BACKOFF_MAX_RETRIES` (canonical; legacy alias `GSHEETS_MAX_RETRIES`, still
+honored — `> 0` enables, `0` disables), `GSHEETS_BACKOFF_BASE_DELAY`, `GSHEETS_BACKOFF_MAX_DELAY`,
+`GSHEETS_BACKOFF_DEADLINE` (`<= 0` / `none` = no overall cap), `GSHEETS_BACKOFF_HONOR_RETRY_AFTER`,
+`GSHEETS_BACKOFF_RETRY_AFTER_CAP`, and `GSHEETS_BACKOFF_LOG`. Parse failures fall back to field
+defaults, never crash.
 
 ---
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ..core import retry as retry_mod
 from ..core.errors import SheetsError
 from ..core.service import SheetsServices
 from .resolver import resolve_credentials, resolve_scopes
@@ -36,12 +37,6 @@ _DRIVE_SCOPE_MARKER = "auth/drive"
 _DEFAULT_CONFIG_DIR = "~/.config/google-sheets-mcp"
 _DEFAULT_TOKEN_BASENAME = "token.json"
 _DEFAULT_CLIENT_BASENAME = "credentials.json"
-
-#: Default automatic-retry budget for every Google API call (ISSUES.md #7). googleapiclient's
-#: ``execute(num_retries=N)`` does randomized exponential backoff on 429 / 5xx / rate-limit-403,
-#: which is exactly the shared-per-user-quota saturation N parallel agents hit. Overridable via
-#: ``GSHEETS_MAX_RETRIES`` (``0`` disables).
-_DEFAULT_MAX_RETRIES = 4
 
 
 # --------------------------------------------------------------------------- env helpers
@@ -132,36 +127,57 @@ def _creds_refreshable(creds: object) -> bool:
     return bool(getattr(creds, "refresh_token", None))
 
 
-def _max_retries() -> int:
-    """Resolve the per-call automatic-retry budget from ``GSHEETS_MAX_RETRIES`` (ISSUES.md #7)."""
-    raw = os.environ.get("GSHEETS_MAX_RETRIES")
-    if raw is None or raw.strip() == "":
-        return _DEFAULT_MAX_RETRIES
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return _DEFAULT_MAX_RETRIES
+def _backoff_log_enabled() -> bool:
+    """True when ``GSHEETS_BACKOFF_LOG`` is set to a truthy value (mirrors errors.py verbosity)."""
+    val = os.environ.get("GSHEETS_BACKOFF_LOG")
+    if val is None:
+        return False
+    return val.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _backoff_logger():
+    """A ``log(attempt=, delay=, status=)`` callback for the retry loop, or ``None`` when off.
+
+    Gated by ``GSHEETS_BACKOFF_LOG``: when enabled, each retry sleep emits one diagnostic line to
+    stderr (the only place a retrying call surfaces progress). Off by default — :func:`execute_with_retry`
+    accepts ``log=None`` and simply skips the callback.
+    """
+    if not _backoff_log_enabled():
+        return None
+
+    import sys
+
+    def _log(*, attempt, delay, status):
+        print(
+            f"[gsheets] retry attempt={attempt} delay={delay:.2f}s status={status}",
+            file=sys.stderr,
+        )
+
+    return _log
 
 
 def _make_request_builder():
-    """A ``requestBuilder`` that gives EVERY API call a default ``num_retries`` (ISSUES.md #7).
+    """A ``requestBuilder`` whose ``execute`` defers to the per-call retry policy (ISSUES.md #25).
 
-    googleapiclient never retries unless ``execute(num_retries=N)`` is passed, and no call site
-    passes it — so a single 429 (trivially hit when N parallel agents share one per-user read
-    quota) is surfaced raw. Defaulting ``num_retries`` here, in the ONE place every Resource is
-    built, gives all 28 call sites randomized exponential backoff with zero per-site churn.
+    There is no central ``.execute()`` wrapper in core (32 call sites); the ONE chokepoint is this
+    builder, built once per process/lifespan. Each ``.execute()`` runs through
+    :func:`gsheets.core.retry.execute_with_retry`, which reads the policy active for the current
+    context (set by whichever adapter wrapped the core call in ``retry.activate(...)``) — so retry
+    is OFF by default (a 429/5xx fails fast) and configured per call, with no env read here.
+
+    ``num_retries=0`` is passed to ``super().execute`` so googleapiclient's OWN built-in retry stays
+    off and our loop is the sole retrier.
     """
     from googleapiclient.http import HttpRequest
 
-    default_retries = _max_retries()
-
     class _RetryingHttpRequest(HttpRequest):
         def execute(self, http=None, num_retries=0):
-            # Only the default (0, what every call site uses) is upgraded; an explicit override
-            # is honored verbatim.
-            if not num_retries:
-                num_retries = default_retries
-            return super().execute(http=http, num_retries=num_retries)
+            # googleapiclient's built-in retry is forced off (num_retries=0); our loop, reading the
+            # active policy via current_policy(), is the only retrier. log is gated by GSHEETS_BACKOFF_LOG.
+            return retry_mod.execute_with_retry(
+                lambda: super(_RetryingHttpRequest, self).execute(http=http, num_retries=0),
+                log=_backoff_logger(),
+            )
 
     return _RetryingHttpRequest
 
@@ -232,8 +248,8 @@ def build_services(scopes_mode: str | None = None) -> SheetsServices:
     scopes = resolve_scopes(scopes_mode)
     creds = resolve_credentials(scopes)
 
-    # Every Resource gets the same retry request builder (ISSUES.md #7) and the optional
-    # socket timeout (ISSUES.md #9b); both are no-ops by default beyond the standard retry budget.
+    # Every Resource gets the same retry request builder (ISSUES.md #25 — retry OFF by default,
+    # configured per call via the active policy) and the optional socket timeout (ISSUES.md #9b).
     request_builder = _make_request_builder()
     timeout = _http_timeout()
 

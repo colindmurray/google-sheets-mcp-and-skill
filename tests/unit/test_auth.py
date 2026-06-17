@@ -726,36 +726,106 @@ class TestWriteToken:
         assert dest.read_text(encoding="utf-8") == '{"token": "persisted"}'
 
 
-# --------------------------------------------------------------------- ISSUES.md #7 retry builder
+# --------------------------------------------------------------------- ISSUES.md #25 retry builder
+# The builder no longer bakes in a default retry budget; its ``execute`` defers to the per-call
+# policy via ``gsheets.core.retry.execute_with_retry`` (retry OFF by default, configured per call).
 
 
-def test_request_builder_defaults_num_retries(monkeypatch):
-    monkeypatch.delenv("GSHEETS_MAX_RETRIES", raising=False)
+def test_request_builder_default_does_not_retry(monkeypatch):
+    """With no active policy (DISABLED default), execute() calls super exactly once, num_retries=0."""
+    from gsheets.core import retry as retry_mod
+
+    # No activate() in scope -> current_policy() is DISABLED -> execute_with_retry is a pass-through.
+    assert retry_mod.current_policy() is retry_mod.RetryPolicy.DISABLED
+
     builder = auth._make_request_builder()
 
-    captured = {}
+    calls = []
 
-    # Patch the parent HttpRequest.execute to capture the num_retries our subclass passes up.
+    # Patch the parent HttpRequest.execute to capture how it is invoked by our subclass.
     from googleapiclient.http import HttpRequest
 
     def fake_execute(self, http=None, num_retries=0):
-        captured["num_retries"] = num_retries
+        calls.append({"http": http, "num_retries": num_retries})
         return {"ok": True}
 
     monkeypatch.setattr(HttpRequest, "execute", fake_execute)
 
     req = builder.__new__(builder)  # avoid constructing a real HttpRequest
-    builder.execute(req)
-    assert captured["num_retries"] == auth._DEFAULT_MAX_RETRIES
+    result = builder.execute(req)
+
+    assert result == {"ok": True}
+    # Exactly one attempt; googleapiclient's own retry forced off (num_retries=0).
+    assert len(calls) == 1
+    assert calls[0]["num_retries"] == 0
+
+
+def test_request_builder_retries_under_active_policy(monkeypatch):
+    """With an enabled policy active, a 429-shaped failure is retried before succeeding."""
+    from gsheets.core import retry as retry_mod
+
+    builder = auth._make_request_builder()
+
+    # A super().execute that raises a 429-shaped error on its first call, then succeeds.
+    attempts = {"n": 0}
+
+    class _Resp:
+        status = 429
+
+        def get(self, key, default=None):
+            return default
+
+    class _Boom(Exception):
+        resp = _Resp()
+        content = b'{"error": {"status": "RESOURCE_EXHAUSTED"}}'
+
+    from googleapiclient.http import HttpRequest
+
+    def fake_execute(self, http=None, num_retries=0):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise _Boom()
+        return {"ok": True}
+
+    monkeypatch.setattr(HttpRequest, "execute", fake_execute)
+    # Never actually sleep during the retry wait.
+    monkeypatch.setattr(retry_mod.time, "sleep", lambda _s: None)
+
+    req = builder.__new__(builder)
+
+    policy = retry_mod.RetryPolicy.default_preset()
+    with retry_mod.activate(policy):
+        result = builder.execute(req)
+
+    assert result == {"ok": True}
+    assert attempts["n"] == 2  # one failure (retried) + one success.
 
 
 def test_max_retries_env_override(monkeypatch):
+    """The legacy GSHEETS_MAX_RETRIES alias is now honored by core.retry.from_env, not auth."""
+    from gsheets.core import retry as retry_mod
+
+    monkeypatch.delenv("GSHEETS_BACKOFF_STRATEGY", raising=False)
+    monkeypatch.delenv("GSHEETS_BACKOFF_MAX_RETRIES", raising=False)
+
     monkeypatch.setenv("GSHEETS_MAX_RETRIES", "7")
-    assert auth._max_retries() == 7
+    policy = retry_mod.RetryPolicy.from_env()
+    assert policy.enabled is True
+    assert policy.max_retries == 7
+
+    # ``0`` is an explicit disable signal.
     monkeypatch.setenv("GSHEETS_MAX_RETRIES", "0")
-    assert auth._max_retries() == 0
+    assert retry_mod.RetryPolicy.from_env().enabled is False
+
+    # Junk parses to None -> not an enable signal -> DISABLED, default budget retained.
     monkeypatch.setenv("GSHEETS_MAX_RETRIES", "junk")
-    assert auth._max_retries() == auth._DEFAULT_MAX_RETRIES
+    junk = retry_mod.RetryPolicy.from_env()
+    assert junk.enabled is False
+    assert junk.max_retries == retry_mod.RetryPolicy.max_retries
+
+    # The auth layer no longer owns a retry-budget helper.
+    assert not hasattr(auth, "_max_retries")
+    assert not hasattr(auth, "_DEFAULT_MAX_RETRIES")
 
 
 def test_http_timeout_env(monkeypatch):

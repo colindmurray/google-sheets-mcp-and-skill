@@ -13,10 +13,12 @@ JSON (``--json``) or as a terse readable rendering. No Sheets logic lives here.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 
 from . import __version__, auth, core
+from .core import retry as retry_mod
 from .core.errors import SheetsError, to_sheets_error
 from .core.format import render as render_format
 from .core.format import render_sparse_values
@@ -68,6 +70,11 @@ _MANAGE_ACTIONS = ("add", "delete", "duplicate", "rename", "reorder")
 _METADATA_ACTIONS = ("read", "create", "update", "delete")
 _CHARTS_ACTIONS = ("create", "update", "delete", "read")
 _SCOPES_CHOICES = ("default", "broad")
+
+# Global retry/backoff strategy choices (ISSUES.md #25). The hyphenated ``exponential-jitter`` is
+# the user-facing spelling; it maps to the underscore ``exponential_jitter`` core strategy name in
+# :func:`_resolve_retry_policy`. Retry is OFF by default (v0.4.0 breaking default change).
+_BACKOFF_CHOICES = ("none", "fixed", "exponential", "exponential-jitter")
 
 # v0.2 extension action enums (DESIGN §Extensions) — mirrored from core for nice argparse
 # errors; core re-validates and raises SheetsError.
@@ -171,6 +178,89 @@ def build_parser() -> argparse.ArgumentParser:
         choices=_SCOPES_CHOICES,
         default=None,
         help="auth scope mode for this invocation (overrides GSHEETS_SCOPES)",
+    )
+
+    # --------------------------------------------------------------- retry / backoff (ISSUES.md #25)
+    #
+    # Global flags resolved ONCE in main() into a core.retry.RetryPolicy, then activated around the
+    # whole build_services + dispatch + render block so the auth-layer request builder reads it at
+    # .execute() time. Retry is OFF BY DEFAULT (v0.4.0): a 429/5xx fails fast unless the caller opts
+    # in. Three shapes, mutually exclusive: the one-shot preset (--default-backoff-strategy), explicit
+    # fail-fast (--no-retry), or granular control (--retries / --backoff / --retry-*). The actual
+    # mutual-exclusion validation lives in _resolve_retry_policy (a SheetsError, not an argparse one,
+    # so it renders as the same ok:false envelope every other handled failure produces).
+    retry_group = parser.add_argument_group(
+        "retry/backoff",
+        "Retry on transient 429/5xx errors. OFF BY DEFAULT — a 429/5xx fails fast unless you opt "
+        "in. Use --default-backoff-strategy for the sensible preset, or set granular flags; the "
+        "preset and granular flags are mutually exclusive, and --no-retry forces fail-fast.",
+    )
+    retry_group.add_argument(
+        "--default-backoff-strategy",
+        dest="default_backoff_strategy",
+        action="store_true",
+        help="enable the sensible preset (full-jitter exponential backoff, 4 retries, 60s "
+        "deadline); mutually exclusive with --no-retry and the granular flags",
+    )
+    retry_group.add_argument(
+        "--no-retry",
+        dest="no_retry",
+        action="store_true",
+        help="force retry OFF (explicit fail-fast; overrides any GSHEETS_BACKOFF_* env)",
+    )
+    retry_group.add_argument(
+        "--retries",
+        dest="retries",
+        type=int,
+        default=None,
+        metavar="N",
+        help="granular: number of retries AFTER the first try (total tries = 1 + N)",
+    )
+    retry_group.add_argument(
+        "--backoff",
+        dest="backoff",
+        choices=_BACKOFF_CHOICES,
+        default=None,
+        help="granular: backoff strategy (default preset uses exponential-jitter)",
+    )
+    retry_group.add_argument(
+        "--retry-base-delay",
+        dest="retry_base_delay",
+        type=float,
+        default=None,
+        metavar="S",
+        help="granular: base seconds for the per-attempt delay",
+    )
+    retry_group.add_argument(
+        "--retry-max-delay",
+        dest="retry_max_delay",
+        type=float,
+        default=None,
+        metavar="S",
+        help="granular: per-attempt sleep cap (seconds)",
+    )
+    retry_group.add_argument(
+        "--retry-deadline",
+        dest="retry_deadline",
+        type=float,
+        default=None,
+        metavar="S",
+        help="granular: overall wall-clock cap across all sleeps (<= 0 means no cap)",
+    )
+    retry_group.add_argument(
+        "--retry-after-cap",
+        dest="retry_after_cap",
+        type=float,
+        default=None,
+        metavar="S",
+        help="granular: cap (seconds) applied to a server Retry-After header value",
+    )
+    retry_group.add_argument(
+        "--honor-retry-after",
+        dest="honor_retry_after",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="granular: honor a server Retry-After header (use --no-honor-retry-after to ignore it)",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
@@ -1464,6 +1554,87 @@ def _resolve_format(args) -> str:
     return fmt
 
 
+def _resolve_retry_policy(args) -> "retry_mod.RetryPolicy":
+    """Resolve the global retry flags into a :class:`~gsheets.core.retry.RetryPolicy` (ISSUES.md #25).
+
+    Retry is OFF BY DEFAULT (v0.4.0): with no retry flags this returns ``from_env()`` (itself
+    disabled unless a ``GSHEETS_BACKOFF_*`` env var explicitly enables it). The three opt-in shapes
+    are mutually exclusive — the one-shot preset (``--default-backoff-strategy``), explicit fail-fast
+    (``--no-retry``), and granular control (``--retries`` / ``--backoff`` / ``--retry-*`` /
+    ``--honor-retry-after``):
+
+    - ``--no-retry`` -> :data:`RetryPolicy.DISABLED` (overrides env);
+    - ``--default-backoff-strategy`` -> :meth:`RetryPolicy.default_preset`;
+    - any granular flag -> ``from_env(enabled=True, <granular overrides>)`` (env defaults the
+      unspecified fields; the explicit flags win);
+    - nothing -> ``from_env()``.
+
+    A conflicting combination raises ``SheetsError("backoff_flags_conflict", …)`` — caught in
+    :func:`main` and rendered as the same ``ok:false`` envelope every other handled failure produces.
+    """
+    default_preset = bool(getattr(args, "default_backoff_strategy", False))
+    no_retry = bool(getattr(args, "no_retry", False))
+
+    # The granular flags: a value of None (or False for a store_true) means "not provided".
+    # --backoff maps the hyphenated user spelling to the underscore core strategy name. The deadline
+    # flag is captured separately because "<= 0 => no overall cap" is a value (total_deadline=None)
+    # that from_env cannot express via an override (it drops None overrides) — so we apply it after.
+    backoff = getattr(args, "backoff", None)
+    strategy = backoff.replace("-", "_") if backoff is not None else None
+    deadline_flag = getattr(args, "retry_deadline", None)
+    granular = {
+        "max_retries": getattr(args, "retries", None),
+        "strategy": strategy,
+        "base_delay": getattr(args, "retry_base_delay", None),
+        "max_delay": getattr(args, "retry_max_delay", None),
+        "retry_after_cap": getattr(args, "retry_after_cap", None),
+        "honor_retry_after": getattr(args, "honor_retry_after", None),
+    }
+    has_granular = (
+        any(v is not None for v in granular.values()) or deadline_flag is not None
+    )
+
+    # Mutual exclusion: pick exactly one shape (the preset, --no-retry, or granular), or none.
+    if default_preset and no_retry:
+        raise SheetsError(
+            "backoff_flags_conflict",
+            "--default-backoff-strategy and --no-retry are mutually exclusive",
+            hint="pick exactly one: the preset, --no-retry, or granular flags",
+        )
+    if default_preset and has_granular:
+        raise SheetsError(
+            "backoff_flags_conflict",
+            "--default-backoff-strategy cannot be combined with granular retry flags "
+            "(--retries / --backoff / --retry-*)",
+            hint="use either the preset OR granular flags, not both",
+        )
+    if no_retry and has_granular:
+        raise SheetsError(
+            "backoff_flags_conflict",
+            "--no-retry cannot be combined with granular retry flags "
+            "(--retries / --backoff / --retry-*)",
+            hint="--no-retry forces fail-fast; drop the granular flags to use it",
+        )
+
+    if no_retry:
+        return retry_mod.RetryPolicy.DISABLED
+    if default_preset:
+        return retry_mod.RetryPolicy.default_preset()
+    if has_granular:
+        # Granular flags explicitly enable retry; from_env fills the unspecified fields (a None
+        # override is ignored, so only the provided flags win). The deadline is applied last via
+        # replace() because "<= 0 => no overall cap" is total_deadline=None — a value from_env's
+        # override path can't carry.
+        overrides = {k: v for k, v in granular.items() if v is not None}
+        policy = retry_mod.RetryPolicy.from_env(enabled=True, **overrides)
+        if deadline_flag is not None:
+            policy = dataclasses.replace(
+                policy, total_deadline=(deadline_flag if deadline_flag > 0 else None)
+            )
+        return policy
+    return retry_mod.RetryPolicy.from_env()
+
+
 def _emit(result: dict, *, fmt: str, stream=None) -> None:
     """Print a successful core result in ``fmt`` (SPEC §1.3).
 
@@ -1537,19 +1708,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        if getattr(args, "needs_services", False):
-            services = auth.build_services(scopes_mode=args.scopes)
-            result = func(services, args)
-        else:
-            # auth subcommands: no Sheets handle; they call the auth layer directly.
-            result = func(None, args)
-        # ``auth status`` returns ok:False (not a raise) when no creds resolve -> non-zero exit.
-        if isinstance(result, dict) and result.get("ok") is False:
+        # Resolve the per-invocation retry policy from the global backoff flags (ISSUES.md #25).
+        # Retry is OFF BY DEFAULT (v0.4.0); a conflicting flag combination raises a
+        # SheetsError("backoff_flags_conflict", …) caught below. The policy is then activated around
+        # the WHOLE build_services + dispatch + render block so the auth-layer request builder reads
+        # it via current_policy() at .execute() time (there is no central .execute() wrapper in core).
+        policy = _resolve_retry_policy(args)
+        with retry_mod.activate(policy):
+            if getattr(args, "needs_services", False):
+                services = auth.build_services(scopes_mode=args.scopes)
+                result = func(services, args)
+            else:
+                # auth subcommands: no Sheets handle; they call the auth layer directly.
+                result = func(None, args)
+            # ``auth status`` returns ok:False (not a raise) when no creds resolve -> non-zero exit.
+            if isinstance(result, dict) and result.get("ok") is False:
+                _emit(result, fmt=fmt)
+                return 1
+            # Rendering can fail (e.g. csv/tsv on a structured result -> format_unsupported); keep it
+            # inside the guard so it surfaces as the SAME structured error envelope, not a traceback.
             _emit(result, fmt=fmt)
-            return 1
-        # Rendering can fail (e.g. csv/tsv on a structured result -> format_unsupported); keep it
-        # inside the guard so it surfaces as the SAME structured error envelope, not a traceback.
-        _emit(result, fmt=fmt)
     except SheetsError as err:
         _emit_error(err, fmt=fmt)
         return 1

@@ -5,7 +5,8 @@ the structural read, cross-file fan-out, conditional-format and validation write
 the base structural mutations (merge/protect/freeze/group/tab color/named ranges), range data verbs
 (find/replace, sort, dedupe, …), row/column dimension ops, and local export. **Read `basic.md`
 first** — this assumes you already know the read → write → verify loop, A1 addressing, the global
-`--json`/`--scopes` flags (before the subcommand), USER_ENTERED defaults, and the auto field-mask.
+`--json`/`--scopes`/retry flags (before the subcommand; see "Retry & backoff" below), USER_ENTERED
+defaults, and the auto field-mask.
 `gsheets <cmd> --help` is the authoritative flag source. Examples use `<YOUR_SPREADSHEET_ID>`.
 
 ## Reading
@@ -179,6 +180,33 @@ gsheets comments <YOUR_SPREADSHEET_ID> --include-deleted   # also include delete
   comment action, read and write.
 - **The `anchor` is opaque** — a document-type-specific blob, not an A1 range. Surfaced as
   `anchorRaw`; comments are document-level and never mapped to a cell.
+
+### Retry & backoff (opt-in; OFF by default)
+
+Since v0.4.0 a 429/5xx **fails fast** unless you opt in. Three mutually-exclusive styles, on either
+adapter; batching (wide multi-range reads, `read-many`, `export`) remains the real quota fix — retry
+only smooths transient bursts.
+
+- **CLI (global flags, before the subcommand).** `--default-backoff-strategy` is the one-shot
+  catch-all preset (full-jitter exponential, 4 retries, 60s overall deadline). For granular control:
+  `--retries N`, `--backoff {none,fixed,exponential,exponential-jitter}`, `--retry-base-delay S`,
+  `--retry-max-delay S`, `--retry-deadline S` (`<= 0` ⇒ no overall cap), `--retry-after-cap S`,
+  `--honor-retry-after` / `--no-honor-retry-after`. `--no-retry` forces fail-fast (overrides env).
+  The preset, `--no-retry`, and the granular flags conflict (→ `backoff_flags_conflict`).
+
+  ```sh
+  gsheets --default-backoff-strategy read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:Z999'
+  gsheets --retries 6 --backoff exponential-jitter --retry-deadline 90 \
+    read-many --requests-json @batch.json
+  ```
+
+- **MCP.** Every tool takes an optional per-call `retry` object: omit it for no retry, `{"preset":
+  "default"}` for the sensible preset, `{"preset":"off"}` to force disable, or granular fields
+  (`strategy`, `max_retries`, `base_delay`, `max_delay`, `deadline`, `honor_retry_after`,
+  `retry_after_cap`). `preset` and granular fields are mutually exclusive.
+- **Env.** `GSHEETS_BACKOFF_STRATEGY` (any non-`none` value enables retry) plus the `GSHEETS_BACKOFF_*`
+  knobs; legacy `GSHEETS_MAX_RETRIES > 0` still enables it. When a call still fails after exhausting
+  retry, the structured error carries `retries` and `waitedMs`.
 
 ## Writing
 

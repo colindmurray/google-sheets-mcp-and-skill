@@ -194,7 +194,10 @@ Optional knobs:
 For a **pure value dump**, prefer `export --format csv` (writes a local file, no token cap) over a
 wide `read-values`; CSV can't carry formulas, so pair it with a narrow-band `--render formula` read
 over just the formula columns. Reads draw on a small per-user read-RPM quota shared by all callers —
-favor a few wide multi-range reads and `export` over many small calls.
+favor a few wide multi-range reads and `export` over many small calls. **Retry is OFF by default**
+(v0.4.0): a 429/5xx fails fast unless you opt in (CLI `--default-backoff-strategy`; MCP `retry`
+object; or `GSHEETS_BACKOFF_*` env) — see `intermediate.md` for the retry-config details. Batching
+is still the real fix; backoff only smooths bursts.
 
 ### read-conditional-formats
 

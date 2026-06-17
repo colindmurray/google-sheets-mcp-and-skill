@@ -1282,6 +1282,42 @@ class ReadManyResult(_Result):
         return "\n".join(lines)
 
 
+# --- per-call retry params (MCP-only input shape, ISSUES.md #25) -----------------------
+
+
+class RetryParams(BaseModel):
+    """Per-call retry/backoff config for any tool — the MCP mirror of a core ``RetryPolicy``.
+
+    Retry is OFF BY DEFAULT (v0.4.0): omit ``retry`` entirely and a 429/5xx FAILS FAST (one
+    attempt, no backoff). Opt in one of two mutually-exclusive ways:
+
+    * the one-shot preset — ``{"preset": "default"}`` enables the sensible full-jitter
+      exponential backoff (``RetryPolicy.default_preset()``); ``{"preset": "off"}`` forces the
+      disabled policy even if an env var would otherwise enable it;
+    * granular control — set any of ``strategy`` / ``max_retries`` / ``base_delay`` / ``max_delay``
+      / ``deadline`` / ``honor_retry_after`` / ``retry_after_cap`` (each maps 1:1 onto the matching
+      ``RetryPolicy`` field; ``deadline`` -> ``total_deadline``).
+
+    ``preset`` and the granular fields are MUTUALLY EXCLUSIVE — supplying both raises
+    ``backoff_params_conflict``. Every field is optional (default ``None``); an all-``None``
+    ``RetryParams`` is equivalent to omitting it (resolves from the env, off by default).
+
+    ADAPTER-SIDE ONLY (DESIGN §1): this lives in ``gsheets.models`` (MCP), NEVER in ``core`` — the
+    adapter resolves it into a pure ``core.retry.RetryPolicy`` via ``mcp_server._resolve_retry``.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    preset: Optional[Literal["default", "off"]] = None
+    strategy: Optional[Literal["none", "fixed", "exponential", "exponential_jitter"]] = None
+    max_retries: Optional[int] = None
+    base_delay: Optional[float] = None
+    max_delay: Optional[float] = None
+    deadline: Optional[float] = None
+    honor_retry_after: Optional[bool] = None
+    retry_after_cap: Optional[float] = None
+
+
 # --- core-fn -> model registry + wrapper -----------------------------------------------
 
 #: Maps a core function NAME to its mirror result model. The MCP adapter uses this (or the
@@ -1564,6 +1600,8 @@ __all__ = [
     "Slicer",
     "CommentReply",
     "Comment",
+    # per-call retry params (MCP-only input shape, ISSUES.md #25)
+    "RetryParams",
     # helpers + registry
     "to_model",
     "model_for",

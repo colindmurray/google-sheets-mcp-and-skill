@@ -245,7 +245,15 @@ Set `GSHEETS_AUTH_MODE` to `service_account`, `oauth`, or `adc` to force a singl
 | `GSHEETS_CONFIG_DIR` | Override the default config dir | `~/.config/google-sheets-mcp/` |
 | `ENABLED_TOOLS` | (MCP only) comma-separated tool allowlist; empty = all | unset |
 | `GSHEETS_VERBOSE_ERRORS` | `1` lets error hints include the authenticated account email (off by default, so it never leaks in pass-through errors) | unset |
-| `GSHEETS_MAX_RETRIES` | Automatic retry budget for every API call — randomized exponential backoff on 429 / 5xx / rate-limit; `0` disables | `4` |
+| `GSHEETS_MAX_RETRIES` | **Legacy** retry opt-in (retry is now OFF by default, v0.4.0). A value `> 0` enables retry with that many retries and the `exponential_jitter` strategy; `0` keeps retry disabled | unset (off) |
+| `GSHEETS_BACKOFF_STRATEGY` | `none` \| `fixed` \| `exponential` \| `exponential_jitter`. Any non-`none` value **enables** retry (the canonical opt-in) | unset (off) |
+| `GSHEETS_BACKOFF_MAX_RETRIES` | Retries after the first try (total tries = `1 + N`); canonical name for the legacy `GSHEETS_MAX_RETRIES` | `4` |
+| `GSHEETS_BACKOFF_BASE_DELAY` | Base backoff delay in seconds | `0.5` |
+| `GSHEETS_BACKOFF_MAX_DELAY` | Per-attempt sleep cap in seconds | `30.0` |
+| `GSHEETS_BACKOFF_DEADLINE` | Overall wall-clock cap (seconds) across all sleeps; `<= 0` or `none` means no overall cap | `60.0` |
+| `GSHEETS_BACKOFF_HONOR_RETRY_AFTER` | Honor a server `Retry-After` header (`1`/`0`/`true`/`false`) | `true` |
+| `GSHEETS_BACKOFF_RETRY_AFTER_CAP` | Cap (seconds) applied to a server `Retry-After` value | `60.0` |
+| `GSHEETS_BACKOFF_LOG` | `1` emits one stderr line per retry (diagnostic) | unset (off) |
 | `GSHEETS_HTTP_TIMEOUT` | Socket timeout (seconds) for API calls; raise it for very large grid reads | library default |
 
 ### Scopes (least-privilege default)
@@ -261,6 +269,16 @@ The default deliberately avoids whole-Drive access; opt into `broad` only when y
 ### Scope reconciliation (cached tokens)
 
 A cached token is refreshed against the scopes it was originally granted, never the current `GSHEETS_SCOPES` request (Google rejects a refresh whose scopes aren't a subset of the original consent). If the grant doesn't cover what a call needs, you get an `oauth_scope_insufficient` error telling you to re-run `gsheets auth login`. In short: a token minted with one scope set keeps working across `default`/`broad` requests as long as its grant covers them — the full walkthrough is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Retry & backoff
+
+**Retry is OFF by default (since v0.4.0).** A 429 or 5xx fails fast unless you opt in — a deliberate breaking change from the old behavior of 4 automatic retries on every call. Opt in per call, on either adapter, or via env vars; the three styles are mutually exclusive.
+
+- **CLI.** A one-shot catch-all preset, `--default-backoff-strategy` (full-jitter exponential backoff, 4 retries, a 60s overall deadline), OR full granular control: `--retries N`, `--backoff {none,fixed,exponential,exponential-jitter}`, `--retry-base-delay S`, `--retry-max-delay S`, `--retry-deadline S` (`<= 0` ⇒ no overall cap), `--retry-after-cap S`, and `--honor-retry-after` / `--no-honor-retry-after`. `--no-retry` forces fail-fast (overrides any `GSHEETS_BACKOFF_*` env). The preset, `--no-retry`, and the granular flags are mutually exclusive (a conflict is a clean `backoff_flags_conflict` error). These are **global** flags, so they go before the subcommand.
+- **MCP.** Every tool (read and write) takes an optional per-call `retry` object: omit it for no retry (fail fast), set `preset: "default"` for the sensible exponential-jitter backoff, set `preset: "off"` to force disable, or set granular fields (`strategy`, `max_retries`, `base_delay`, `max_delay`, `deadline`, `honor_retry_after`, `retry_after_cap`). `preset` and the granular fields are mutually exclusive.
+- **Env.** `GSHEETS_BACKOFF_STRATEGY` (any non-`none` value enables retry) plus the `GSHEETS_BACKOFF_*` knobs above; the legacy `GSHEETS_MAX_RETRIES > 0` still enables retry. With no explicit per-call retry config, a call resolves its policy from these env vars (and stays off if none enable it).
+
+When retry is enabled and a call still fails after exhausting it, the structured error carries `retries` and `waitedMs` so you can see how hard it tried. Retry smooths transient bursts, but it cannot conjure quota that is already spent — **batching is still the real quota fix**: pass many ranges to one `read-values` (one `batchGet`), read many files with one `read-many`, and prefer `export` for bulk value dumps.
 
 ## Command / tool reference
 

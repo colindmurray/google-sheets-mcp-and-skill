@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.4.0] - 2026-06-17
+
+A breaking default change: automatic retry/backoff is now **OFF by default**, replacing the prior
+always-on 4 retries on every call. Retry becomes opt-in and per-call configurable on both adapters,
+with the same parameter structure, plus error-side observability for when an enabled retry still
+gives up.
+
+### Changed
+- **BREAKING: retry/backoff is now OFF by default.** Previously every API call carried 4 automatic
+  retries with randomized exponential backoff on 429 / 5xx / rate-limit; now a 429/5xx **fails fast**
+  unless the caller opts in. Opt in via the CLI's global `--default-backoff-strategy` (a one-shot
+  catch-all preset: full-jitter exponential, 4 retries, 60s overall deadline) or the granular global
+  flags (`--retries`, `--backoff {none,fixed,exponential,exponential-jitter}`, `--retry-base-delay`,
+  `--retry-max-delay`, `--retry-deadline`, `--retry-after-cap`, `--honor-retry-after` /
+  `--no-honor-retry-after`); the MCP per-call `retry` object (`{"preset":"default"}` or granular
+  fields); the new `GSHEETS_BACKOFF_*` env vars (`GSHEETS_BACKOFF_STRATEGY`,
+  `GSHEETS_BACKOFF_MAX_RETRIES`, `GSHEETS_BACKOFF_BASE_DELAY`, `GSHEETS_BACKOFF_MAX_DELAY`,
+  `GSHEETS_BACKOFF_DEADLINE`, `GSHEETS_BACKOFF_HONOR_RETRY_AFTER`, `GSHEETS_BACKOFF_RETRY_AFTER_CAP`,
+  `GSHEETS_BACKOFF_LOG`); or the **legacy** `GSHEETS_MAX_RETRIES` (now an opt-in alias — a value
+  `> 0` enables retry with that many retries and the `exponential_jitter` strategy; `0` keeps it
+  off). The CLI's `--no-retry` forces explicit fail-fast (overrides env). The preset, `--no-retry`,
+  and the granular flags are mutually exclusive (a conflict is a clean `backoff_flags_conflict` /
+  `backoff_params_conflict` error). Batching remains the real quota fix; retry only smooths bursts.
+
+### Added
+- **Per-call configurable retry policy on both adapters.** A new pure-core `retry` module
+  (`core/retry.py`) holds a frozen `RetryPolicy` (strategy, retry budget, base/max delay, overall
+  deadline, `Retry-After` honoring + cap, retryable statuses incl. opt-in rate-limited 403), a
+  `_ACTIVE_POLICY` contextvar with `current_policy()` / `activate()`, and the `execute_with_retry`
+  loop. The single chokepoint is the auth-layer request builder, which reads the active policy at
+  `.execute()` time (it no longer reads any retry env var and turns googleapiclient's built-in retry
+  off). The CLI resolves its global flags to one policy and activates it around dispatch; the MCP
+  server adds a per-call `retry` (`models.RetryParams`, MCP-only) to every tool and activates the
+  resolved policy inside the sync call body.
+- **Retry observability on the structured error.** When an enabled retry exhausts and the call still
+  fails, `SheetsError` carries optional `retries` / `waited_ms` fields, surfaced in the error dict as
+  `retries` / `waitedMs` (present only when non-null), so a caller can see how hard the call tried.
+
 ## [0.3.1] - 2026-06-17
 
 Patch release: three correctness fixes to the v0.3 read/output surface. Behavior is otherwise
@@ -309,7 +347,8 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.1.0...v0.2.0

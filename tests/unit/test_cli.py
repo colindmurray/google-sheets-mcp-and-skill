@@ -1231,3 +1231,179 @@ def test_cli_unexpected_exception_is_structured(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "internal_error" in err
     assert "Traceback" not in err
+
+
+# ===========================================================================================
+# Retry / backoff global flags (ISSUES.md #25, v0.4.0). Retry is OFF BY DEFAULT; the flags
+# resolve to a core.retry.RetryPolicy that is ACTIVATED around the build_services + dispatch +
+# render block. The robust assertion captures core.retry.current_policy() from inside a
+# monkeypatched core fn — i.e. exactly what the auth-layer request builder would read at
+# .execute() time — rather than poking at internals.
+# ===========================================================================================
+
+
+@pytest.fixture
+def capture_policy(monkeypatch):
+    """Patch ``auth.build_services`` + ``core.overview`` to capture the ACTIVE retry policy.
+
+    The stub reads :func:`gsheets.core.retry.current_policy` from inside the dispatched core call,
+    so the captured value is the policy the auth-layer request builder would see at ``.execute()``
+    time. Returns a one-key dict the test reads (``captured["policy"]``).
+    """
+    from gsheets.core import retry as retry_mod
+
+    captured: dict = {}
+    monkeypatch.setattr(cli.auth, "build_services", lambda scopes_mode=None: object())
+
+    def _stub(services, spreadsheet_id):
+        captured["policy"] = retry_mod.current_policy()
+        return {"ok": True, "spreadsheetId": spreadsheet_id, "title": "T", "sheets": [], "namedRanges": []}
+
+    monkeypatch.setattr(cli.core, "overview", _stub)
+    return captured
+
+
+def test_no_retry_flags_default_policy_is_off(capture_policy):
+    # The v0.4.0 default: with NO retry flags the activated policy is DISABLED (fail-fast), not
+    # the always-on backoff of pre-v0.4.
+    rc = _run(["overview", "ID"])
+    assert rc == 0
+    policy = capture_policy["policy"]
+    assert policy.enabled is False
+
+
+def test_default_backoff_strategy_resolves_to_preset(capture_policy):
+    from gsheets.core.retry import RetryPolicy
+
+    rc = _run(["--default-backoff-strategy", "overview", "ID"])
+    assert rc == 0
+    policy = capture_policy["policy"]
+    assert policy == RetryPolicy.default_preset()
+    assert policy.enabled is True
+    assert policy.strategy == "exponential_jitter"
+    assert policy.max_retries == 4
+    assert policy.total_deadline == 60.0
+
+
+def test_no_retry_flag_forces_disabled(capture_policy):
+    from gsheets.core.retry import RetryPolicy
+
+    rc = _run(["--no-retry", "overview", "ID"])
+    assert rc == 0
+    policy = capture_policy["policy"]
+    assert policy == RetryPolicy.DISABLED
+    assert policy.enabled is False
+
+
+def test_no_retry_overrides_enabling_env(capture_policy, monkeypatch):
+    # --no-retry is an explicit fail-fast that must win over a GSHEETS_BACKOFF_* env var that would
+    # otherwise enable retry.
+    monkeypatch.setenv("GSHEETS_BACKOFF_STRATEGY", "exponential")
+    rc = _run(["--no-retry", "overview", "ID"])
+    assert rc == 0
+    assert capture_policy["policy"].enabled is False
+
+
+def test_granular_flags_map_one_to_one_to_policy(capture_policy):
+    rc = _run(
+        [
+            "--retries",
+            "7",
+            "--backoff",
+            "exponential-jitter",
+            "--retry-base-delay",
+            "0.25",
+            "--retry-max-delay",
+            "10",
+            "--retry-deadline",
+            "45",
+            "--retry-after-cap",
+            "20",
+            "--honor-retry-after",
+            "overview",
+            "ID",
+        ]
+    )
+    assert rc == 0
+    policy = capture_policy["policy"]
+    # Granular flags explicitly ENABLE retry and map 1:1 onto the policy fields.
+    assert policy.enabled is True
+    assert policy.max_retries == 7
+    # --backoff exponential-jitter maps to the underscore core strategy name.
+    assert policy.strategy == "exponential_jitter"
+    assert policy.base_delay == 0.25
+    assert policy.max_delay == 10.0
+    assert policy.total_deadline == 45.0  # --retry-deadline -> total_deadline
+    assert policy.retry_after_cap == 20.0
+    assert policy.honor_retry_after is True
+
+
+def test_granular_no_honor_retry_after_maps_false(capture_policy):
+    # argparse.BooleanOptionalAction: --no-honor-retry-after drives honor_retry_after=False (and is
+    # itself a granular flag that enables retry).
+    rc = _run(["--no-honor-retry-after", "overview", "ID"])
+    assert rc == 0
+    policy = capture_policy["policy"]
+    assert policy.enabled is True
+    assert policy.honor_retry_after is False
+
+
+def test_granular_deadline_zero_means_no_overall_cap(capture_policy):
+    # --retry-deadline <= 0 clears the overall cap (total_deadline=None).
+    rc = _run(["--retry-deadline", "0", "--retries", "2", "overview", "ID"])
+    assert rc == 0
+    policy = capture_policy["policy"]
+    assert policy.enabled is True
+    assert policy.total_deadline is None
+
+
+def test_backoff_flags_conflict_preset_plus_granular(patched, capsys):
+    # --default-backoff-strategy + a granular flag (--retries) is a structured ok:false error.
+    rc = _run(["--default-backoff-strategy", "--retries", "3", "overview", "ID"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "backoff_flags_conflict" in err
+    # The destructive/dispatch path must not have run.
+    assert patched.get("name") != "overview"
+
+
+def test_backoff_flags_conflict_no_retry_plus_backoff(patched, capsys):
+    # --no-retry + a granular flag (--backoff) is a structured ok:false error.
+    rc = _run(["--no-retry", "--backoff", "fixed", "overview", "ID"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "backoff_flags_conflict" in err
+    assert patched.get("name") != "overview"
+
+
+def test_backoff_flags_conflict_preset_plus_no_retry(patched, capsys):
+    rc = _run(["--default-backoff-strategy", "--no-retry", "overview", "ID"])
+    assert rc == 1
+    assert "backoff_flags_conflict" in capsys.readouterr().err
+    assert patched.get("name") != "overview"
+
+
+def test_backoff_flags_conflict_json_envelope(patched, capsys):
+    # Under --json the conflict surfaces as the structured ok:false envelope (exit 1).
+    rc = _run(["--json", "--default-backoff-strategy", "--retries", "3", "overview", "ID"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "backoff_flags_conflict"
+
+
+def test_build_parser_registers_retry_flags():
+    # The retry flags live on the TOP-LEVEL parser (global), not on a subparser.
+    parser = cli.build_parser()
+    dests = {a.dest for a in parser._actions}
+    assert {
+        "default_backoff_strategy",
+        "no_retry",
+        "retries",
+        "backoff",
+        "retry_base_delay",
+        "retry_max_delay",
+        "retry_deadline",
+        "retry_after_cap",
+        "honor_retry_after",
+    } <= dests

@@ -188,11 +188,16 @@ the two entrypoints stay in lockstep.
    core function, the right `ToolAnnotations` (`readOnlyHint` for reads;
    `destructiveHint` on destructive paths; `openWorldHint=True` on every tool; tag
    `{"read"}` or `{"write"}`), and an example-rich docstring whose examples use
-   `<YOUR_SPREADSHEET_ID>`. Honor the `ENABLED_TOOLS` allowlist.
+   `<YOUR_SPREADSHEET_ID>`. Honor the `ENABLED_TOOLS` allowlist. Give the tool the shared
+   `retry: RetryParam = None` last parameter and forward it (`retry=retry`) to
+   `_call` / `_call_formatted` — that wires the per-call backoff policy (#25) with the
+   identical schema every other tool exposes; the body stays one line.
 
 6. **Add the CLI subcommand** in `src/gsheets/cli.py`: a subparser whose flags map 1:1
    to the core kwargs (subcommand name = core fn name with hyphens), and a one-line
-   dispatch to the core function. Support the global `--json`.
+   dispatch to the core function. Support the global `--json`. (The retry/backoff flags
+   are global — resolved once in `main()` and active for every subcommand — so a new
+   subcommand inherits them for free; nothing to add per-command.)
 
 7. **Document it** in `skill/SKILL.md`'s command map and the relevant
    `skill/references/*.md`, and add it to `docs/ARCHITECTURE.md`'s function table if it

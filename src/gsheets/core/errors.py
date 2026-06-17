@@ -31,6 +31,10 @@ class SheetsError(Exception):
         status: HTTP status when derived from a Google error.
         reason: Google API ``reason`` string when available.
         hint: Actionable next step (generic for 403 by default — no email).
+        retries: Retries performed before this error was surfaced (ISSUES.md #25); ``None`` when
+            retry was off / not applicable. Lets a caller see a multi-minute backoff wasn't silent.
+        waited_ms: Cumulative backoff sleep (ms) across those retries (ISSUES.md #25); ``None``
+            when retry was off / not applicable.
     """
 
     def __init__(
@@ -41,25 +45,31 @@ class SheetsError(Exception):
         status: int | None = None,
         reason: str | None = None,
         hint: str | None = None,
+        retries: int | None = None,
+        waited_ms: int | None = None,
     ) -> None:
         self.code = code
         self.message = message
         self.status = status
         self.reason = reason
         self.hint = hint
+        self.retries = retries
+        self.waited_ms = waited_ms
         super().__init__(f"{code}: {message}")
 
     def __repr__(self) -> str:  # pragma: no cover - convenience only
         return (
             f"SheetsError(code={self.code!r}, message={self.message!r}, "
-            f"status={self.status!r}, reason={self.reason!r}, hint={self.hint!r})"
+            f"status={self.status!r}, reason={self.reason!r}, hint={self.hint!r}, "
+            f"retries={self.retries!r}, waited_ms={self.waited_ms!r})"
         )
 
     def to_dict(self) -> dict:
         """Return the CLI ``ok:false`` error payload (DESIGN §6.2).
 
         The CLI adapter wraps this under ``{"ok": false, "error": {...}}``; keys with a
-        ``None`` value are omitted so the envelope stays terse.
+        ``None`` value are omitted so the envelope stays terse. The retry telemetry
+        (``retries``/``waitedMs``, ISSUES.md #25) is likewise included only when present.
         """
         out: dict[str, object] = {"code": self.code, "message": self.message}
         if self.status is not None:
@@ -68,6 +78,10 @@ class SheetsError(Exception):
             out["reason"] = self.reason
         if self.hint is not None:
             out["hint"] = self.hint
+        if self.retries is not None:
+            out["retries"] = self.retries
+        if self.waited_ms is not None:
+            out["waitedMs"] = self.waited_ms
         return out
 
 
@@ -232,13 +246,31 @@ def classify_google_error(
     ):
         hint = f"{hint} (authenticated as {account_email})"
 
+    # Retry telemetry (ISSUES.md #25): execute_with_retry annotates the raised HttpError with how
+    # many retries it performed and how long it slept before giving up. Surface them so a caller
+    # can see a multi-minute backoff wasn't silent. Best-effort int coercion; absent -> None.
+    retries = _retry_int(getattr(http_error, "_gsheets_retry_attempts", None))
+    waited_ms = _retry_int(getattr(http_error, "_gsheets_retry_waited_ms", None))
+
     return SheetsError(
         "google_api_error",
         message,
         status=status,
         reason=reason,
         hint=hint,
+        retries=retries,
+        waited_ms=waited_ms,
     )
+
+
+def _retry_int(value: object) -> int | None:
+    """Coerce a retry-telemetry attribute to an int, or ``None`` (absent / unparseable)."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------

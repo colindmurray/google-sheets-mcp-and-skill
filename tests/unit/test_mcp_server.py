@@ -615,3 +615,105 @@ def test_read_values_json_no_out_path_still_emits_structured_content(monkeypatch
     assert sc["ranges"] == payload["ranges"]
     # Null-pruning survives output_schema=None: ``major`` was never in the payload.
     assert "major" not in sc
+
+
+# ----------------------------------------------------------- ISSUES.md #25 per-call retry param
+
+
+@pytest.fixture
+def _clear_backoff_env(monkeypatch):
+    """Strip every GSHEETS_BACKOFF_* / legacy var so from_env() resolves to the field defaults.
+
+    The _resolve_retry tests assert against RetryPolicy.from_env(); a developer machine with a
+    GSHEETS_BACKOFF_* var set would otherwise skew them. CI is clean, but pin it either way.
+    """
+    for key in list(os.environ):
+        if key.startswith("GSHEETS_BACKOFF_") or key == "GSHEETS_MAX_RETRIES":
+            monkeypatch.delenv(key, raising=False)
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED))
+def test_every_tool_exposes_optional_retry_param(name):
+    # ISSUES.md #25: EVERY tool (read AND write) grows an optional ``retry`` param defaulting to
+    # None — retry is OFF by default, so it must never be required, and never break an existing arg.
+    tool = _tools()[name]
+    props = tool.parameters.get("properties", {})
+    required = tool.parameters.get("required", [])
+    assert "retry" in props, name
+    assert "retry" not in required, name
+
+
+def test_retry_param_references_retry_params_model():
+    # The retry param is the RetryParams mirror model (an object schema), not a bare scalar — so a
+    # client sees {preset, strategy, max_retries, ...}. It is nullable (Optional, default None).
+    tool = _tools()["sheets_read_values"]
+    prop = tool.parameters["properties"]["retry"]
+    # Optional[...] renders as anyOf [<model or $ref>, {"type": "null"}].
+    assert "anyOf" in prop
+    assert any(sub.get("type") == "null" for sub in prop["anyOf"])
+    # The non-null branch is an object (inline or via $ref to the RetryParams def).
+    non_null = [s for s in prop["anyOf"] if s.get("type") != "null"]
+    assert non_null
+    branch = non_null[0]
+    is_object = branch.get("type") == "object" or "$ref" in branch or "properties" in branch
+    assert is_object
+
+
+def test_resolve_retry_none_is_from_env(_clear_backoff_env):
+    # An omitted retry param resolves from the env — which, creds-free and var-free, is OFF.
+    policy = srv._resolve_retry(None)
+    assert policy == srv.retry_mod.RetryPolicy.from_env()
+    assert policy.enabled is False
+
+
+def test_resolve_retry_preset_off_is_disabled():
+    policy = srv._resolve_retry(srv.models.RetryParams(preset="off"))
+    assert policy is srv.retry_mod.RetryPolicy.DISABLED
+    assert policy.enabled is False
+
+
+def test_resolve_retry_preset_default_is_default_preset():
+    policy = srv._resolve_retry(srv.models.RetryParams(preset="default"))
+    assert policy == srv.retry_mod.RetryPolicy.default_preset()
+    assert policy.enabled is True
+    assert policy.strategy == "exponential_jitter"
+
+
+def test_resolve_retry_granular_enables_and_maps_deadline(_clear_backoff_env):
+    # Any granular field (no preset) -> enabled, with the granular knobs overriding env; ``deadline``
+    # maps onto the core ``total_deadline`` field.
+    policy = srv._resolve_retry(
+        srv.models.RetryParams(strategy="fixed", max_retries=2, deadline=12.5)
+    )
+    assert policy.enabled is True
+    assert policy.strategy == "fixed"
+    assert policy.max_retries == 2
+    assert policy.total_deadline == 12.5
+
+
+def test_resolve_retry_preset_plus_granular_conflicts():
+    # preset and granular fields are mutually exclusive -> a clean backoff_params_conflict.
+    with pytest.raises(SheetsError) as ei:
+        srv._resolve_retry(srv.models.RetryParams(preset="default", max_retries=3))
+    assert ei.value.code == "backoff_params_conflict"
+
+
+def test_resolve_retry_all_none_acts_like_omitted(_clear_backoff_env):
+    # An all-None RetryParams (no preset, no granular field) behaves like an omitted param.
+    policy = srv._resolve_retry(srv.models.RetryParams())
+    assert policy == srv.retry_mod.RetryPolicy.from_env()
+    assert policy.enabled is False
+
+
+def test_resolve_retry_conflict_surfaces_as_tool_error_through_call():
+    # The conflict raised inside _resolve_retry is coerced to a clean ToolError by _call (it never
+    # leaks as a bare masked error), so a tool body passing a bad retry param fails gracefully.
+    with pytest.raises(ToolError) as ei:
+        srv._call(
+            srv.models.OverviewResult,
+            lambda _s, _sid: {"ok": True},
+            object(),
+            "x",
+            retry=srv.models.RetryParams(preset="off", strategy="fixed"),
+        )
+    assert str(ei.value).startswith("backoff_params_conflict:")

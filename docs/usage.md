@@ -65,6 +65,9 @@ gsheets overview <YOUR_SPREADSHEET_ID> --json     # WRONG: "error: unrecognized 
 - `--scopes {default,broad}` overrides the scope mode for one invocation.
 - `gsheets --version` prints the version and exits.
 
+The retry/backoff flags are also global (they go before the subcommand) — see the dedicated section
+below.
+
 The spreadsheet id is the **first** positional arg of every Sheets subcommand except `read-many`
 (whose ids live inside `--requests-json`). Use `<YOUR_SPREADSHEET_ID>` in anything you write down —
 the real id (the token between `/d/` and `/edit` in the URL) comes from the user or the environment.
@@ -240,6 +243,37 @@ already exist (it is never created), and credential-shaped names (`*token*.json`
 `service-account*.json`, `*.pem`, `.env`, …) and the config/secrets subtrees are refused with
 `bad_out_path` before any write. The spreadsheet itself is never modified — these tools stay
 read-only (`export` is the separate, deliberate write-to-disk tool, with no `out_path`).
+
+## Retry & backoff (off by default)
+
+**Retry is OFF by default (since v0.4.0)** — a 429/5xx fails fast unless you opt in. This is a
+breaking change from the old always-on 4 automatic retries. The retry flags are **global** (they go
+before the subcommand), and the three opt-in styles are mutually exclusive:
+
+- `--default-backoff-strategy` — the one-shot catch-all preset: full-jitter exponential backoff, 4
+  retries, a 60s overall deadline. The simplest opt-in.
+- `--no-retry` — force fail-fast explicitly (overrides any `GSHEETS_BACKOFF_*` env var).
+- Granular control — `--retries N`, `--backoff {none,fixed,exponential,exponential-jitter}`,
+  `--retry-base-delay S`, `--retry-max-delay S`, `--retry-deadline S` (a value `<= 0` means no
+  overall cap), `--retry-after-cap S`, and `--honor-retry-after` / `--no-honor-retry-after`.
+
+The preset, `--no-retry`, and the granular flags conflict with each other (a clean
+`backoff_flags_conflict` error). With no retry flags, the policy resolves from the `GSHEETS_BACKOFF_*`
+env vars (see the README env-var table) — and stays off unless one of them enables it
+(`GSHEETS_BACKOFF_STRATEGY=<non-none>`, or the legacy `GSHEETS_MAX_RETRIES > 0`).
+
+```sh
+gsheets --default-backoff-strategy read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:Z999'
+gsheets --retries 6 --backoff exponential-jitter --retry-deadline 90 \
+  read-many --requests-json @batch.json
+gsheets --no-retry inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20'
+```
+
+When retry is enabled and a call still fails after exhausting it, the structured error carries
+`retries` and `waitedMs`. Retry only smooths transient bursts; **batching is the real quota fix** —
+wide multi-range reads, `read-many`, and `export` over many small calls. (The MCP server exposes the
+same control as a per-call `retry` object on every tool — omit it for no retry, `{"preset":"default"}`
+for the preset, or granular fields; mutually exclusive with `preset`.)
 
 ## Gotchas worth internalizing
 

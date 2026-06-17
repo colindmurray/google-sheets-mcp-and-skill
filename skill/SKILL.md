@@ -284,9 +284,12 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   agents/processes against the same account, they all draw on one "read requests per minute" bucket
   and trivially saturate it (every call then 429s). The fix is to batch: pass many ranges to a
   single `read-values` call (one `batchGet`), and read many spreadsheets with one `read-many`,
-  instead of one call per range/file. The tool now retries 429/5xx automatically with exponential
-  backoff (tune with `GSHEETS_MAX_RETRIES`, default 4; `0` disables), but batching is what actually
-  keeps you under the cap.
+  instead of one call per range/file. **Retry is OFF by default** (since v0.4.0) — a 429/5xx fails
+  fast unless you opt in. On the CLI add the global `--default-backoff-strategy` (sensible
+  exponential-jitter preset) or `--no-retry`/granular `--retries`/`--backoff` flags; over MCP pass a
+  per-call `retry` object (`{"preset":"default"}` or granular fields); or enable it via env
+  (`GSHEETS_BACKOFF_STRATEGY=exponential_jitter`, or legacy `GSHEETS_MAX_RETRIES=4`). But retry only
+  smooths bursts — batching is what actually keeps you under the cap.
 - Native-table dropdowns are invisible to `inspect`. A column constrained by a *Table* column type
   (`Status:DROPDOWN(Open,Closed)`) is a table property, not per-cell data validation, so `inspect`
   reports zero validation on those cells. To audit a table's enforced dropdowns, read
@@ -315,9 +318,11 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   not the populated-cell count (a 187×86 range is 16,082 cells even if mostly empty).
 - Budget reads against the per-user read-RPM quota — it is small. Even a *single* sequential caller
   doing a normal bulk export (~a dozen reads in a couple of minutes) can saturate it and start
-  429ing; the automatic backoff smooths bursts but cannot conjure quota that's already spent. Prefer
-  a few wide multi-range reads (one `batchGet`) and `export` over many small calls, and space large
-  reads out. (This is the same shared bucket the parallel-callers gotcha above describes.)
+  429ing. Retry is OFF by default, so a 429 fails fast unless you opt in (see the parallel-callers
+  gotcha above); even with backoff enabled it only smooths bursts and cannot conjure quota that's
+  already spent. Prefer a few wide multi-range reads (one `batchGet`) and `export` over many small
+  calls, and space large reads out. (This is the same shared bucket the parallel-callers gotcha
+  above describes.)
 - Table column types are author-declared, not validated against cell contents. `structure --action
   read` echoes each native-Table column's `type` (`DOUBLE`, `TEXT`, …) exactly as the sheet author
   declared it — so a column can report `DOUBLE` while holding text, carry no type at all, or have a
