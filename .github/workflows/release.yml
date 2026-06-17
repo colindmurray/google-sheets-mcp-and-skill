@@ -1,0 +1,59 @@
+name: Release to PyPI
+
+# Publishes the package to PyPI via Trusted Publishing (OIDC) — NO stored API token.
+#
+# Triggers:
+#   - pushing a version tag (v*), e.g. `git tag -a v0.4.1 && git push origin v0.4.1`
+#   - manual `workflow_dispatch` (used for the very first release of an already-cut tag)
+#
+# PyPI side (one-time): register a Trusted Publisher for project
+# `google-sheets-mcp-and-skill` with owner `colindmurray`, repository
+# `google-sheets-mcp-and-skill`, workflow `release.yml`, environment `pypi`.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Run the test suite (gate the release on green tests)
+        run: uv run --frozen pytest -q
+      - name: Build sdist + wheel
+        run: uv build
+      - name: Validate distribution metadata
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The Trusted Publisher is scoped to this environment on PyPI; it also lets you add
+    # an optional required-reviewer protection rule in the repo's Settings → Environments.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/google-sheets-mcp-and-skill
+    permissions:
+      id-token: write # OIDC: mint the short-lived token PyPI exchanges for upload rights
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
