@@ -10,6 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.3.1] - 2026-06-17
+
+Patch release: three correctness fixes to the v0.3 read/output surface. Behavior is otherwise
+identical; no signatures changed.
+
+### Fixed
+- **MCP file-output / data-format reads no longer fail with an output-validation error
+  (#19/#21).** The five `out_path`-capable read tools (`sheets_read_values`, `sheets_inspect`,
+  `sheets_describe`, `sheets_formula_patterns`, `sheets_read_many`) raised "Output validation
+  error: outputSchema defined but no structured output returned" in any schema-enforcing MCP
+  client whenever `out_path` was set, or whenever a data format (`csv`/`tsv`/`jsonl`/`markdown`)
+  was requested without `out_path` — the file was written but the call reported failure and the
+  handle (or rendered string) was lost. These tools are now registered with `output_schema=None`,
+  so a content-only result flows through unchanged; the normal text/json read still emits
+  `structuredContent` for its mirror model.
+- **`formula-patterns` now returns one entry per requested column (#16).** A bounded or
+  whole-column range (e.g. `A1:CH75`, `A:CH`) previously returned a content-dependent number of
+  `columns[]` entries because the Sheets API trims trailing all-blank columns from the response.
+  Trailing columns are now padded to the requested A1 width with the empty
+  `{reduced: true, templates: []}` shape, so the count is deterministic. Inherently
+  unbounded-column ranges (whole-row / whole-sheet) keep the data-extent count.
+- **CLI piped output is byte-identical to the MCP `out_path` file for the data formats
+  (#20/#22).** The CLI added an extra trailing newline (a visible blank line for csv) to
+  `jsonl`/`csv`/`tsv`/`markdown` output. Those formats are now written verbatim through the
+  already-self-terminating shared renderer, so CLI-piped bytes match the `out_path` file, the MCP
+  no-`out_path` string, and `export`. The human views (`text`/`json`) keep their friendly trailing
+  newline.
+
 ## [0.3.0] - 2026-06-16
 
 Additive on top of v0.2.0; every base signature and test preserved. The core surface grows
@@ -281,7 +309,8 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/releases/tag/v0.1.0
