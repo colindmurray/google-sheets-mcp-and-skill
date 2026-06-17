@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.4.1] - 2026-06-17
+
+A performance fix: reading conditional formats (or full structure) on a large, rule-heavy sheet
+was pathologically slow — a 54-rule tab took **~5m21s**. It now returns in **~1s**, byte-identical.
+
+### Fixed
+- **`read_conditional_formats` / `structure(action="read")` made one network call per range.** Each
+  rule's (and each merge's / named range's) `sheetId`→A1 conversion went through `gridrange_to_a1`,
+  which called the sheet-index `spreadsheets.get` **once per range with no caching** — so a 54-rule
+  sheet fired ~55 sequential API calls (minutes of wall-clock, and enough requests to exhaust the
+  per-user read quota and trigger 429s/timeouts). The sheet index is now cached for the duration of
+  a single read (the "per-call cached" behavior the docstrings already promised but never
+  implemented), scoped per-operation so it can never serve stale sheet titles. Both reads also scope
+  their underlying `spreadsheets.get` to the requested sheet/range via `ranges` instead of loading
+  every tab's model. Result: a 54-rule conditional-format read dropped from ~5m21s to ~1s (≈54 API
+  calls → 2). Output is unchanged; not a breaking change.
+
 ## [0.4.0] - 2026-06-17
 
 A breaking default change: automatic retry/backoff is now **OFF by default**, replacing the prior
@@ -347,7 +364,8 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.2.0...v0.3.0

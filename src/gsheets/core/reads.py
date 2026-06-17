@@ -14,7 +14,13 @@ from __future__ import annotations
 from googleapiclient.errors import HttpError
 
 from . import condformat
-from .addressing import a1_to_gridrange, gridrange_to_a1, parse_a1
+from .addressing import (
+    a1_to_gridrange,
+    gridrange_to_a1,
+    parse_a1,
+    sheet_index_cache,
+    sheet_titles,
+)
 from .errors import SheetsError, classify_google_error
 from .flatten import flatten_cell_format
 from .pivot import serialize_pivot
@@ -851,17 +857,45 @@ def read_conditional_formats(
         intersecting = a1_to_gridrange(services, spreadsheet_id, range)
         scope_sheet_id = intersecting.get("sheetId")
 
+    # Scope the get to the requested sheet/range. WITHOUT this, a single-sheet CF read makes the
+    # API load EVERY tab's conditional-format model — on a large workbook that is a multi-minute
+    # call (one real sheet: 54 rules took 5m21s unscoped vs 0.74s scoped — ISSUES.md #26). Reading
+    # ALL sheets (sheet and range both None) still needs the unscoped fetch. ``ranges`` filters only
+    # the per-sheet ``sheets[]``; top-level fields are returned regardless.
+    if range is not None:
+        get_kwargs: dict = {"ranges": [range]}  # range's sheet already validated by a1_to_gridrange
+    elif sheet is not None:
+        get_kwargs = {"ranges": [sheet]}
+    else:
+        get_kwargs = {}
+
     try:
         resp = (
             services.sheets.spreadsheets()
-            .get(spreadsheetId=spreadsheet_id, fields=_CF_FIELDS)
+            .get(spreadsheetId=spreadsheet_id, fields=_CF_FIELDS, **get_kwargs)
             .execute()
         )
     except HttpError as exc:
+        # A range-scoped read of a non-existent sheet 400s on the range parse; preserve the friendly
+        # sheet_not_found (with the available list) the unscoped path produced.
+        if sheet is not None:
+            try:
+                titles = sheet_titles(services, spreadsheet_id)
+            except SheetsError:
+                titles = None
+            if titles is not None and sheet not in titles:
+                available = ", ".join(repr(t) for t in titles) or "(none)"
+                raise SheetsError(
+                    "sheet_not_found",
+                    f"sheet {sheet!r} not found in spreadsheet",
+                    hint=f"available sheets: {available}",
+                ) from exc
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
     all_sheets = resp.get("sheets") or []
 
+    # Defensive net (a scoped get returns only the matching sheet, so this rarely fires now; it
+    # still covers the mocked-test path, where the canned response ignores ``ranges``).
     if sheet is not None and not any(
         ((s or {}).get("properties") or {}).get("title") == sheet for s in all_sheets
     ):
@@ -875,26 +909,29 @@ def read_conditional_formats(
         )
 
     sheets_out: list[dict] = []
-    for sheet_obj in all_sheets:
-        sheet_obj = sheet_obj or {}
-        props = sheet_obj.get("properties") or {}
-        title = props.get("title")
-        if sheet is not None and title != sheet:
-            continue
-        # A range scopes to only its own sheet (matched by sheetId, not title).
-        if intersecting is not None and props.get("sheetId") != scope_sheet_id:
-            continue
+    # Each rule's gridrange_to_a1 resolves sheetId -> title via _sheet_index; cache it for the whole
+    # serialization so a 50+-rule sheet does ONE sheet-index get, not one per rule (ISSUES.md #26).
+    with sheet_index_cache():
+        for sheet_obj in all_sheets:
+            sheet_obj = sheet_obj or {}
+            props = sheet_obj.get("properties") or {}
+            title = props.get("title")
+            if sheet is not None and title != sheet:
+                continue
+            # A range scopes to only its own sheet (matched by sheetId, not title).
+            if intersecting is not None and props.get("sheetId") != scope_sheet_id:
+                continue
 
-        rules_out = _serialize_cf_rules(
-            services,
-            spreadsheet_id,
-            sheet_obj.get("conditionalFormats") or [],
-            intersecting=intersecting,
-        )
+            rules_out = _serialize_cf_rules(
+                services,
+                spreadsheet_id,
+                sheet_obj.get("conditionalFormats") or [],
+                intersecting=intersecting,
+            )
 
-        sheets_out.append(
-            {"sheet": title, "sheetId": props.get("sheetId"), "rules": rules_out}
-        )
+            sheets_out.append(
+                {"sheet": title, "sheetId": props.get("sheetId"), "rules": rules_out}
+            )
 
     return {"ok": True, "spreadsheetId": spreadsheet_id, "sheets": sheets_out}
 

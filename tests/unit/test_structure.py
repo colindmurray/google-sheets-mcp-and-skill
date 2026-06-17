@@ -299,6 +299,25 @@ class TestStructureRead:
         # namedRanges remain top-level even when filtered to one sheet.
         assert "namedRanges" in out
 
+    def test_read_scopes_get_to_requested_sheet(self, monkeypatch):
+        # Regression (ISSUES.md #26): a single-sheet structure read MUST scope the get to that
+        # sheet via ``ranges``. An unscoped get makes the API load EVERY tab's structural model — a
+        # multi-minute call on a large workbook. ``ranges`` filters only ``sheets[]``; the top-level
+        # ``namedRanges`` survive (verified live), so scoping is lossless.
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "get", [_READ_PAYLOAD])
+        structure(services, SHEET_ID, action="read", sheet="Data")
+        assert rec.calls[0]["ranges"] == ["Data"]
+
+    def test_read_all_sheets_is_unscoped(self, monkeypatch):
+        # Reading EVERY sheet (sheet=None) legitimately needs the unscoped whole-workbook get.
+        services = _make_service()
+        _patch_addressing(monkeypatch)
+        rec = _wire_spreadsheets_method(services, "get", [_READ_PAYLOAD])
+        structure(services, SHEET_ID, action="read")
+        assert "ranges" not in rec.calls[0]
+
     def test_read_unknown_sheet_raises(self, monkeypatch):
         services = _make_service()
         _patch_addressing(monkeypatch)

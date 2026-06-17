@@ -12,10 +12,38 @@ This module is PURE core: stdlib only. It must NEVER import ``fastmcp``, ``mcp``
 
 from __future__ import annotations
 
+import contextvars
 import re
+from contextlib import contextmanager
 
 from .errors import SheetsError
 from .service import SheetsServices
+
+# Per-operation cache for the sheet ``(title, sheetId, index)`` list. A read that serializes many
+# GridRanges — ``read_conditional_formats`` over 50+ rules, or ``structure`` over many merges —
+# calls :func:`gridrange_to_a1` (hence :func:`_sheet_index`) once PER range. Uncached, that is one
+# network ``spreadsheets.get`` PER range: 54 rules → 55 sequential gets → minutes of wall-clock and
+# per-user-quota exhaustion (ISSUES.md #26). A core read opens a ``with sheet_index_cache():`` scope
+# so the list is fetched ONCE; the scope is per-operation, so a later structural change (a renamed
+# or added tab) is never served from a stale cache.
+_SHEET_INDEX_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "gsheets_sheet_index_cache", default=None
+)
+
+
+@contextmanager
+def sheet_index_cache():
+    """Scope in which :func:`_sheet_index` fetches each spreadsheet's sheet list only once.
+
+    Wrap a read that resolves many GridRanges to A1 (conditional-format / structure serialization)
+    so the cheap-mask sheet-index ``get`` runs a single time instead of once per range. The cache
+    lives only for the ``with`` block — never across operations — so it cannot serve stale titles.
+    """
+    token = _SHEET_INDEX_CACHE.set({})
+    try:
+        yield
+    finally:
+        _SHEET_INDEX_CACHE.reset(token)
 
 # An A1 cell ref: optional column letters, optional 1-based row number. At least one of the
 # two must be present (validated by the caller). Used to split a range endpoint into its
@@ -405,6 +433,13 @@ def _sheet_index(services: SheetsServices, spreadsheet_id: str) -> list[dict]:
     Returns:
         A list of ``{"title": str, "sheetId": int, "index": int}`` dicts in sheet order.
     """
+    # Per-operation cache (active only inside a ``sheet_index_cache()`` scope): a read serializing
+    # many GridRanges would otherwise refetch this list once per range (ISSUES.md #26).
+    cache = _SHEET_INDEX_CACHE.get()
+    key = (id(services), spreadsheet_id)
+    if cache is not None and key in cache:
+        return cache[key]
+
     try:
         resp = (
             services.sheets.spreadsheets()
@@ -428,7 +463,18 @@ def _sheet_index(services: SheetsServices, spreadsheet_id: str) -> list[dict]:
                 "index": props.get("index"),
             }
         )
+    if cache is not None:
+        cache[key] = out
     return out
+
+
+def sheet_titles(services: SheetsServices, spreadsheet_id: str) -> list[str]:
+    """Every sheet title in document order, via the cheapest mask (``sheets.properties``).
+
+    Used to rebuild the friendly ``sheet_not_found`` error (with the available-sheet list) when a
+    range-scoped read of a non-existent sheet 400s on the range parse.
+    """
+    return [s.get("title") for s in _sheet_index(services, spreadsheet_id)]
 
 
 def _resolve_sheet_id(sheet_name: str | None, sheets: list[dict], original: str) -> int:

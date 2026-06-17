@@ -1131,6 +1131,47 @@ class TestReadConditionalFormats:
         fields = rec.data_calls[0]["fields"]
         assert fields == "sheets(properties(sheetId,title),conditionalFormats)"
 
+    def test_scopes_get_to_the_requested_sheet(self):
+        # Regression (ISSUES.md #26): a single-sheet read MUST scope the get to that sheet via
+        # ``ranges``. An unscoped get makes the API load EVERY tab's conditional-format model — a
+        # multi-minute call on a large workbook (54 rules took 5m21s unscoped vs 0.74s scoped).
+        services, rec = _make_service(
+            data_responses=[self._cf_payload()], sheet_index=_CLIFF_INDEX
+        )
+        read_conditional_formats(services, SHEET_ID, sheet="Cliff")
+        assert rec.data_calls[0]["ranges"] == ["Cliff"]
+
+    def test_scopes_get_to_the_requested_range(self):
+        services, rec = _make_service(
+            data_responses=[self._cf_payload(_GOOGLE_BOOLEAN_RULE)],
+            sheet_index=_CLIFF_INDEX,
+        )
+        read_conditional_formats(services, SHEET_ID, range="Cliff!A2:A100")
+        assert rec.data_calls[0]["ranges"] == ["Cliff!A2:A100"]
+
+    def test_all_sheets_read_is_unscoped(self):
+        # Reading EVERY sheet (no sheet/range) legitimately needs the unscoped whole-workbook get.
+        services, rec = _make_service(
+            data_responses=[self._cf_payload()], sheet_index=_CLIFF_INDEX
+        )
+        read_conditional_formats(services, SHEET_ID)
+        assert "ranges" not in rec.data_calls[0]
+
+    def test_serialization_caches_the_sheet_index(self):
+        # Regression (ISSUES.md #26): serializing N rules resolves sheetId->title via ONE cached
+        # sheet-index get, not one network get per rule. Pre-fix, "Colin - Templates" (54 rules)
+        # fired ~54 sequential sheet-index gets — minutes of wall-clock + per-user quota exhaustion.
+        services, rec = _make_service(
+            data_responses=[self._cf_payload(*([_GOOGLE_BOOLEAN_RULE] * 5))],
+            sheet_index=_CLIFF_INDEX,
+        )
+        out = read_conditional_formats(services, SHEET_ID, sheet="Cliff")
+        assert len(out["sheets"][0]["rules"]) == 5
+        index_gets = [
+            c for c in rec.calls if c.get("fields") == "sheets.properties(sheetId,title,index)"
+        ]
+        assert len(index_gets) == 1  # one cached index lookup for all 5 rules, not five
+
     def test_boolean_rule_serialized_with_index_and_structured_fields(self):
         services, _ = _make_service(
             data_responses=[self._cf_payload(_GOOGLE_BOOLEAN_RULE)],

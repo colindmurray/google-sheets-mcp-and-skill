@@ -17,7 +17,12 @@ from . import banding as _banding
 from . import filters as _filters
 from . import slicers as _slicers
 from . import tables as _tables
-from .addressing import a1_to_gridrange, gridrange_to_a1
+from .addressing import (
+    a1_to_gridrange,
+    gridrange_to_a1,
+    sheet_index_cache,
+    sheet_titles,
+)
 from .colors import color_style_to_hex, hex_to_color_style
 from .errors import SheetsError, classify_google_error
 from .fieldsmask import build_fields_mask
@@ -313,38 +318,61 @@ def _structure_read(
         # only the structural metadata each feature carries (whole-rule/spec bodies, not cells).
         "tables,basicFilter,filterViews,bandedRanges,slicers)"
     )
+    # Scope to the requested sheet so the API doesn't load EVERY tab's structural model — a
+    # whole-workbook structure read on a large file is a multi-minute call; scoped it returns in
+    # well under a second (ISSUES.md #26). ``ranges`` filters only ``sheets[]``; the top-level
+    # ``namedRanges`` (and spreadsheet properties) are returned regardless. ``sheet=None`` reads ALL.
+    get_kwargs: dict = {"ranges": [sheet]} if sheet is not None else {}
     try:
         resp = (
             services.sheets.spreadsheets()
-            .get(spreadsheetId=spreadsheet_id, fields=fields)
+            .get(spreadsheetId=spreadsheet_id, fields=fields, **get_kwargs)
             .execute()
         )
     except HttpError as exc:
+        # A scoped read of a non-existent sheet 400s on the range parse; preserve the friendly
+        # sheet_not_found (with the available list) the unscoped path produced.
+        if sheet is not None:
+            try:
+                titles = sheet_titles(services, spreadsheet_id)
+            except SheetsError:
+                titles = None
+            if titles is not None and sheet not in titles:
+                available = ", ".join(repr(t) for t in titles) or "(none)"
+                raise SheetsError(
+                    "sheet_not_found",
+                    f"sheet {sheet!r} not found in spreadsheet",
+                    hint=f"available sheets: {available}",
+                ) from exc
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
     all_sheets = resp.get("sheets", []) or []
 
-    # Top-level spreadsheet-scoped named ranges.
     named_ranges: list[dict] = []
-    for nr in resp.get("namedRanges", []) or []:
-        entry: dict = {
-            "name": nr.get("name"),
-            "namedRangeId": nr.get("namedRangeId"),
-        }
-        gr = nr.get("range")
-        if isinstance(gr, dict):
-            entry["range"] = _safe_gridrange_to_a1(services, spreadsheet_id, gr)
-        named_ranges.append(entry)
-
     sheets_out: list[dict] = []
-    for entry in all_sheets:
-        props = (entry or {}).get("properties", {}) or {}
-        title = props.get("title")
-        if sheet is not None and title != sheet:
-            continue
-        sheets_out.append(
-            _serialize_sheet_structure(services, spreadsheet_id, entry, props)
-        )
+    # gridrange_to_a1 (named-range ranges + every per-sheet merge/range) resolves sheetId -> title
+    # via _sheet_index; cache it for the whole serialization so this is ONE sheet-index get, not one
+    # per range (ISSUES.md #26).
+    with sheet_index_cache():
+        # Top-level spreadsheet-scoped named ranges.
+        for nr in resp.get("namedRanges", []) or []:
+            entry: dict = {
+                "name": nr.get("name"),
+                "namedRangeId": nr.get("namedRangeId"),
+            }
+            gr = nr.get("range")
+            if isinstance(gr, dict):
+                entry["range"] = _safe_gridrange_to_a1(services, spreadsheet_id, gr)
+            named_ranges.append(entry)
+
+        for entry in all_sheets:
+            props = (entry or {}).get("properties", {}) or {}
+            title = props.get("title")
+            if sheet is not None and title != sheet:
+                continue
+            sheets_out.append(
+                _serialize_sheet_structure(services, spreadsheet_id, entry, props)
+            )
 
     if sheet is not None and not sheets_out:
         # Surface a clear error if a named sheet was requested but not present.
