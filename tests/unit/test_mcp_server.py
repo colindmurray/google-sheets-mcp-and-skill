@@ -102,18 +102,27 @@ def test_context_excluded_from_input_schema(name):
         assert "spreadsheet_id" in tool.parameters.get("required", [])
 
 
+def test_read_tools_have_output_schema():
+    # sheets_overview has no out_path; it keeps its derived outputSchema (mirror model).
+    assert _tools()["sheets_overview"].output_schema is not None
+
+
 @pytest.mark.parametrize(
     "name",
     [
-        "sheets_overview",
         "sheets_inspect",
         "sheets_describe",
         "sheets_formula_patterns",
         "sheets_read_values",
+        "sheets_read_many",
     ],
 )
-def test_read_tools_have_output_schema(name):
-    assert _tools()[name].output_schema is not None
+def test_out_path_tools_have_no_output_schema(name):
+    # ISSUES.md #19/#21: the five out_path-capable read tools are registered with
+    # output_schema=None so that a content-only ToolResult (the file-output handle, or a rendered
+    # csv/tsv/jsonl/markdown string with no out_path) is NOT rejected by the MCP lowlevel server's
+    # structured-output validation. Pin that intent explicitly.
+    assert _tools()[name].output_schema is None
 
 
 def test_read_values_exposes_diff_only_and_max_cells_optional():
@@ -565,3 +574,44 @@ def test_call_model_validation_error_fails_small():
     with pytest.raises(ToolError) as ei:
         srv._call(srv.models.InspectResult, returns_bad_shape, object(), "x")
     assert str(ei.value).startswith("internal_error:")
+
+
+# ------------------------------------------- ISSUES.md #19/#21 end-to-end structuredContent guard
+
+
+def test_read_values_json_no_out_path_still_emits_structured_content(monkeypatch):
+    # NO-REGRESSION (ISSUES.md #19/#21): even with output_schema=None on the tool, the normal
+    # text/json (no out_path) path returns the mirror model and FastMCP still serializes it into
+    # structuredContent. Driven through the REAL FastMCP invocation (in-memory Client), not the
+    # direct _call_formatted call the older tests use. Also pins that the @model_serializer
+    # null-pruning (ISSUES.md #8) still runs: ``major`` is absent from the payload, so it must NOT
+    # appear in structuredContent.
+    from fastmcp import Client
+
+    payload = {
+        "ok": True,
+        "spreadsheetId": "FAKEID",
+        "render": "plain",
+        "ranges": [{"range": "S!A1:B2", "values": [["a", "b"], ["c", "d"]]}],
+    }
+    monkeypatch.setattr(
+        srv, "_read_values", lambda services, spreadsheet_id, ranges, **kw: payload
+    )
+    monkeypatch.setattr(srv, "_services", lambda ctx: object())
+
+    async def go():
+        async with Client(srv.mcp) as client:
+            return await client.call_tool(
+                "sheets_read_values",
+                {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"], "output_format": "json"},
+            )
+
+    r = asyncio.run(go())
+    assert r.structured_content is not None
+    sc = r.structured_content
+    assert sc["ok"] is True
+    assert sc["spreadsheetId"] == "FAKEID"
+    assert sc["render"] == "plain"
+    assert sc["ranges"] == payload["ranges"]
+    # Null-pruning survives output_schema=None: ``major`` was never in the payload.
+    assert "major" not in sc

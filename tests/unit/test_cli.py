@@ -237,6 +237,60 @@ def test_format_csv_on_read_values_pipes_clean_csv(patched, monkeypatch, capsys)
     assert "# range:" not in out
 
 
+# A read_values result shared by the byte-equality pins below.
+_RV_PAYLOAD = {
+    "ok": True,
+    "spreadsheetId": "ID",
+    "render": "plain",
+    "ranges": [{"range": "S!A1:B2", "values": [["a", "b"], ["c", "d"]]}],
+}
+
+
+@pytest.mark.parametrize("fmt", ["csv", "tsv", "jsonl", "markdown"])
+def test_data_format_cli_bytes_equal_render(fmt, patched, monkeypatch, capsys, tmp_path):
+    # ISSUES.md #20/#22: for the data formats the CLI-piped bytes must be byte-identical to the
+    # shared render(), and to the bytes the MCP out_path / write_file_handle producer puts on disk.
+    # render() is self-terminating (csv/tsv -> \r\n, jsonl -> \n), so the CLI must NOT add a second
+    # trailing newline via print(). This is the regression that pins the single-newline convention.
+    from gsheets.core.format import render as core_render
+    from gsheets.core.paths import write_file_handle
+
+    monkeypatch.setattr(
+        cli.core, "read_values", lambda services, sid, ranges, **kw: _RV_PAYLOAD
+    )
+    rc = _run(["--format", fmt, "read-values", "ID", "S!A1:B2"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    expected = core_render(_RV_PAYLOAD, fmt)
+    assert out.encode("utf-8") == expected.encode("utf-8")
+    # ... and equal to the bytes the out_path / MCP producer writes to disk.
+    target = tmp_path / f"out.{fmt}"
+    write_file_handle(_RV_PAYLOAD, fmt, str(target))
+    assert out.encode("utf-8") == target.read_bytes()
+
+
+def test_csv_cli_has_no_extra_trailing_blank_line(patched, monkeypatch, capsys):
+    # The specific symptom of #20/#22: piped csv must end in exactly one \r\n, NOT \r\n\n.
+    monkeypatch.setattr(
+        cli.core, "read_values", lambda services, sid, ranges, **kw: _RV_PAYLOAD
+    )
+    rc = _run(["--format", "csv", "read-values", "ID", "S!A1:B2"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.endswith("\r\n")
+    assert not out.endswith("\r\n\n")
+    assert out.encode("utf-8")[-3:] != b"\r\n\n"
+
+
+def test_json_cli_keeps_friendly_trailing_newline(patched, capsys):
+    # The intended asymmetry: json/text are human views and KEEP their print() trailing newline,
+    # so a future "byte-equality fix" must not strip it. (ISSUES.md #20/#22 fix preserves this.)
+    rc = _run(["--format", "json", "overview", "SHEET_ID"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out.endswith("}\n")
+
+
 def test_format_jsonl_on_read_values_one_record_per_row(patched, monkeypatch, capsys):
     monkeypatch.setattr(
         cli.core,

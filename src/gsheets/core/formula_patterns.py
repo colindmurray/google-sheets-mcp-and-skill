@@ -71,6 +71,13 @@ def formula_patterns(
         ``{"ok": True, "spreadsheetId": ..., "columns": [{"col": "Cliff!K", "reduced": True,
         "templates": [{"formula": "=SUM(J{r}:R{r})", "rows": "3:52", "cells": 50,
         "sample": {"a1": "K3", "value": "185"}}]}]}`` — columns in left-to-right, request order.
+
+    Column count (ISSUES.md #16): a BOUNDED or whole-COLUMN range (``A1:CH75``, ``A:CH``) returns
+    exactly ONE entry per REQUESTED column — the GridRange's ``endColumnIndex`` fixes the width, and
+    trailing columns the FORMULA response omitted (because they are blank across the requested rows)
+    are padded with the empty ``{col, reduced: True, templates: []}`` shape. Only an inherently
+    UNBOUNDED-column range (whole-row ``2:5`` / whole-sheet ``Cliff``, where ``endColumnIndex`` is
+    absent) falls back to the data-extent count, since the requested width is unknowable there.
     """
     if not ranges:
         raise SheetsError("empty_ranges", "formula_patterns requires at least one range")
@@ -116,13 +123,28 @@ def formula_patterns(
         vr = formula_ranges[idx] if idx < len(formula_ranges) else {}
         comp_vr = formatted_ranges[idx] if idx < len(formatted_ranges) else {}
         start_col = gr.get("startColumnIndex", 0) or 0
+        end_col = gr.get("endColumnIndex")  # None for an unbounded-column range
         start_row = (gr.get("startRowIndex", 0) or 0) + 1  # 1-based absolute first row
 
         formula_cols = vr.get("values") or []  # column-major
         formatted_cols = comp_vr.get("values") or []
 
-        for c_offset, column_cells in enumerate(formula_cols):
+        # ISSUES.md #16: iterate the FULL requested column span when it is known (bounded /
+        # whole-column range → endColumnIndex set), padding any column the API omitted (trailing
+        # blanks are absent from the column-major response) with the empty {reduced, templates: []}
+        # shape so the result has exactly one entry per requested column — deterministic and equal
+        # to the requested A1 width. When endColumnIndex is absent (whole-row / whole-sheet range,
+        # genuinely unbounded), fall back to the response's data-extent column count.
+        if end_col is not None:
+            offsets = range(end_col - start_col)
+        else:
+            offsets = range(len(formula_cols))
+
+        for c_offset in offsets:
             col_letter = _col_letters(start_col + c_offset)
+            column_cells = (
+                formula_cols[c_offset] if c_offset < len(formula_cols) else []
+            )
             comp_column = (
                 formatted_cols[c_offset] if c_offset < len(formatted_cols) else []
             )

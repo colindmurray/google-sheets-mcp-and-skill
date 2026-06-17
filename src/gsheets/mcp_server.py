@@ -27,6 +27,7 @@ from typing import Annotated, Any, Callable, Literal, Optional
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
+from fastmcp.utilities.types import NotSet, NotSetT
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
@@ -261,10 +262,13 @@ def _call_formatted(
       ``out_path`` a ``text`` request resolves to ``json`` (the universal structured serializer) —
       file output never silently no-ops. The path is resolved + safety-checked in PURE core
       (:func:`gsheets.core.paths.write_file_handle`); a bad/credential/missing-parent path fails as
-      ``bad_out_path`` BEFORE anything is written. The handle is wrapped in a ``ToolResult`` so
-      FastMCP still emits it as the tool's ``structuredContent``.
-    * **``text``/``json`` (no ``out_path``)**: return the mirror model (FastMCP emits
-      ``structuredContent`` + a terse ``content`` block, exactly as today).
+      ``bad_out_path`` BEFORE anything is written. The handle is returned as a content-only
+      ``ToolResult`` (a JSON-string body, no ``structuredContent``). Because every out_path-capable
+      tool is registered with ``output_schema=None`` (see :func:`register`), the MCP lowlevel
+      server skips its structured-output validation, so this content-only result is delivered
+      as-is rather than rejected as "no structured output returned" (ISSUES.md #19/#21).
+    * **``text``/``json`` (no ``out_path``)**: return the mirror model (FastMCP still serializes it
+      into ``structuredContent`` even with ``output_schema=None``, plus a terse ``content`` block).
     * **data formats ``jsonl``/``csv``/``tsv`` (no ``out_path``)**: return
       ``core.format.render(result, output_format)`` as a plain STRING (byte-identical to the CLI's
       piped output and to ``export``). A csv/tsv request on a structured result raises
@@ -291,9 +295,9 @@ def _call_formatted(
             result = fn(*args, **kwargs)
             handle = write_file_handle(result, file_format, out_path)
             # Return the handle as a JSON-string body (the same ``ToolResult(content=...)`` shape the
-            # data-format branch uses). This deliberately bypasses the tool's declared
-            # ``output_schema`` (the mirror model) — the handle has a different shape, and a bare
-            # string body is exactly how FastMCP wants a non-schema payload returned.
+            # data-format branch uses). The tool is registered with ``output_schema=None``, so the
+            # MCP lowlevel server does NOT require structuredContent — this content-only result is
+            # delivered as-is instead of being rejected (ISSUES.md #19/#21).
             return ToolResult(content=render_format(handle, "json"))
         except SheetsError as exc:
             raise to_tool_error(exc) from exc
@@ -320,7 +324,12 @@ ENABLED_TOOLS: set[str] = {
 }
 
 
-def register(*, annotations: ToolAnnotations, tags: set[str]):
+def register(
+    *,
+    annotations: ToolAnnotations,
+    tags: set[str],
+    output_schema: dict | None | NotSetT = NotSet,
+):
     """Register a function as an MCP tool unless ``ENABLED_TOOLS`` excludes it (DESIGN §7.1, §8).
 
     Mirrors the ``xing5`` reference: an env-var allowlist read at registration time. When the
@@ -330,6 +339,16 @@ def register(*, annotations: ToolAnnotations, tags: set[str]):
     Args:
         annotations: The :class:`ToolAnnotations` (read/destructive/idempotent/open-world hints).
         tags: ``{"read"}`` or ``{"write"}`` for tag-based client scoping.
+        output_schema: Optional override forwarded to ``mcp.tool``. Left ``NotSet`` (the default),
+            FastMCP DERIVES a strict outputSchema from the ``-> models.X`` return annotation. Pass
+            ``output_schema=None`` to SUPPRESS that derivation — required for the file-output /
+            data-format read tools whose ``_call_formatted`` may return a content-only
+            ``ToolResult`` (handle string / rendered grid) that does not match the mirror model.
+            With no declared outputSchema, the MCP lowlevel server skips its
+            structured-output validation, so those content-only results no longer trip
+            "Output validation error: outputSchema defined but no structured output returned"
+            (ISSUES.md #19/#21). The normal text/json path still returns the mirror model, which
+            FastMCP serializes into structuredContent regardless of the schema.
 
     Returns:
         A decorator that conditionally calls ``mcp.tool``.
@@ -338,7 +357,8 @@ def register(*, annotations: ToolAnnotations, tags: set[str]):
     def deco(fn: Callable[..., Any]) -> Callable[..., Any]:
         if ENABLED_TOOLS and fn.__name__ not in ENABLED_TOOLS:
             return fn
-        return mcp.tool(annotations=annotations, tags=tags)(fn)
+        kw = {} if output_schema is NotSet else {"output_schema": output_schema}
+        return mcp.tool(annotations=annotations, tags=tags, **kw)(fn)
 
     return deco
 
@@ -383,6 +403,10 @@ def sheets_overview(
         openWorldHint=True,
     ),
     tags={"read"},
+    # out_path-capable: _call_formatted may return a content-only ToolResult (handle / rendered
+    # string) that does not match the mirror model, so suppress the derived outputSchema so the
+    # MCP lowlevel server does not reject it (ISSUES.md #19/#21).
+    output_schema=None,
 )
 def sheets_inspect(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
@@ -487,6 +511,8 @@ def sheets_inspect(
         openWorldHint=True,
     ),
     tags={"read"},
+    # out_path-capable — suppress the derived outputSchema (ISSUES.md #19/#21).
+    output_schema=None,
 )
 def sheets_describe(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
@@ -586,6 +612,8 @@ def sheets_describe(
         openWorldHint=True,
     ),
     tags={"read"},
+    # out_path-capable — suppress the derived outputSchema (ISSUES.md #19/#21).
+    output_schema=None,
 )
 def sheets_formula_patterns(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
@@ -659,6 +687,8 @@ def sheets_formula_patterns(
         openWorldHint=True,
     ),
     tags={"read"},
+    # out_path-capable — suppress the derived outputSchema (ISSUES.md #19/#21).
+    output_schema=None,
 )
 def sheets_read_values(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
@@ -834,6 +864,8 @@ def sheets_read_conditional_formats(
         openWorldHint=True,
     ),
     tags={"read"},
+    # out_path-capable — suppress the derived outputSchema (ISSUES.md #19/#21).
+    output_schema=None,
 )
 def sheets_read_many(
     requests: Annotated[

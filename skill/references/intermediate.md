@@ -151,6 +151,12 @@ Cliff!K  =SUM(J{r}:R{r})        rows 3:52   (50)   K3 -> 185
   `C5: =SUM(...)`, for sparse formula reads).
 - Multi-column AND multi-sheet in one call; columns come back left-to-right in request order. A
   literal-only column has an empty `templates` list.
+- **One entry per requested column** (bounded or whole-column ranges, e.g. `A1:CH75` / `A:CH`): the
+  result has exactly one `columns[]` entry per column in the requested A1 width, deterministically.
+  Trailing columns that are blank across the requested rows (so the API omits them) are padded as
+  `{col, reduced:true, templates:[]}` — the same empty shape a literal-only column already produces.
+  Only an inherently unbounded-column range (a whole-row `2:5` or a whole-sheet `Cliff`, which has
+  no requested column width) keeps the data-extent column count.
 
 ### `comments --action read` — Drive threaded comments
 

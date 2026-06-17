@@ -272,6 +272,86 @@ class TestMultiColumn:
         assert out["columns"][1]["templates"][0]["formula"] == "=K{r}*2"
 
 
+# ===================================================================== column padding (ISSUES #16)
+
+
+class TestColumnPadding:
+    """ISSUES.md #16: one entry per REQUESTED column for bounded / whole-column ranges.
+
+    The FORMULA + ``majorDimension=COLUMNS`` response is trimmed by the data extent within the
+    requested ROWS, so trailing all-blank columns are simply absent from ``valueRanges[i].values``.
+    The fix iterates the requested column span (from the GridRange ``endColumnIndex``) and pads
+    omitted columns with the empty ``{reduced: True, templates: []}`` shape.
+    """
+
+    def test_bounded_range_pads_trailing_empty_columns_to_requested_width(self):
+        # Request K3:M5 (3 columns) but the response carries only ONE column of values (K). The
+        # trailing two (L, M) were blank across rows 3-5, so the API omitted them. They must be
+        # padded to the requested width with the empty-templates shape.
+        formulas = _vr("Cliff!K3:M5", [["=SUM(J3:R3)", "=SUM(J4:R4)", "=SUM(J5:R5)"]])
+        services, _ = _make_service(formula_responses=[formulas], formatted_responses=[{}])
+        out = formula_patterns(services, SHEET_ID, ["Cliff!K3:M5"], sample=False)
+        assert len(out["columns"]) == 3
+        assert [c["col"] for c in out["columns"]] == ["Cliff!K", "Cliff!L", "Cliff!M"]
+        # The first column carries the real template; the padded trailing two are the empty shape.
+        assert out["columns"][0]["reduced"] is True
+        assert out["columns"][0]["templates"][0]["formula"] == "=SUM(J{r}:R{r})"
+        assert out["columns"][1] == {"col": "Cliff!L", "reduced": True, "templates": []}
+        assert out["columns"][2] == {"col": "Cliff!M", "reduced": True, "templates": []}
+
+    def test_empty_response_pads_every_requested_column(self):
+        # A bounded range whose FORMULA response carries NO columns at all (all blank) still
+        # returns exactly one empty entry per requested column.
+        formulas = _vr("Cliff!A1:C5", [])
+        services, _ = _make_service(formula_responses=[formulas], formatted_responses=[{}])
+        out = formula_patterns(services, SHEET_ID, ["Cliff!A1:C5"], sample=False)
+        assert [c["col"] for c in out["columns"]] == ["Cliff!A", "Cliff!B", "Cliff!C"]
+        assert all(c["templates"] == [] for c in out["columns"])
+
+    def test_whole_column_range_pads_to_requested_width(self):
+        # A whole-column range A:C carries endColumnIndex (verified in addressing), so it is padded
+        # to 3 columns even though only column A came back with data.
+        formulas = _vr("Cliff!A:C", [["=A1", "=A2"]])
+        services, _ = _make_service(formula_responses=[formulas], formatted_responses=[{}])
+        out = formula_patterns(services, SHEET_ID, ["Cliff!A:C"], sample=False)
+        assert [c["col"] for c in out["columns"]] == ["Cliff!A", "Cliff!B", "Cliff!C"]
+
+    def test_unbounded_column_range_not_padded(self):
+        # A whole-ROW range (2:5) omits endColumnIndex (unbounded over columns), so the requested
+        # width is unknowable — fall back to the response's data-extent column count (no padding).
+        formulas = _vr("Cliff!2:5", [["=A2", "=A3"], ["=B2", "=B3"]])
+        services, _ = _make_service(formula_responses=[formulas], formatted_responses=[{}])
+        out = formula_patterns(services, SHEET_ID, ["Cliff!2:5"], sample=False)
+        assert len(out["columns"]) == 2  # == response values length, NOT a fixed width
+
+    def test_whole_sheet_range_not_padded(self):
+        # A whole-SHEET range (bare sheet name) also omits the column indices → fallback path.
+        formulas = _vr("Cliff", [["=A1"]])
+        services, _ = _make_service(formula_responses=[formulas], formatted_responses=[{}])
+        out = formula_patterns(services, SHEET_ID, ["Cliff"], sample=False)
+        assert len(out["columns"]) == 1
+
+    def test_multi_range_pads_each_against_its_own_grid_range(self):
+        # Each requested range is padded against ITS OWN endColumnIndex, in request order.
+        formulas = {
+            "valueRanges": [
+                {"range": "Cliff!K3:M5", "majorDimension": "COLUMNS",
+                 "values": [["=SUM(J3:R3)", "=SUM(J4:R4)", "=SUM(J5:R5)"]]},
+                {"range": "Plan!A1:B3", "majorDimension": "COLUMNS",
+                 "values": [["=1", "=2", "=3"]]},
+            ]
+        }
+        services, _ = _make_service(
+            formula_responses=[formulas], formatted_responses=[{}]
+        )
+        out = formula_patterns(
+            services, SHEET_ID, ["Cliff!K3:M5", "Plan!A1:B3"], sample=False
+        )
+        assert [c["col"] for c in out["columns"]] == [
+            "Cliff!K", "Cliff!L", "Cliff!M", "Plan!A", "Plan!B",
+        ]
+
+
 # =========================================================================== guards
 
 

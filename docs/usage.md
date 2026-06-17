@@ -220,7 +220,10 @@ adapters expose output differently:
 
 - **CLI**: one global `--format {text,json,jsonl,csv,tsv,markdown}` applied to every subcommand.
   `csv`/`tsv` only render a rectangular value grid (`read-values`); on a structured result they
-  raise `format_unsupported`.
+  raise `format_unsupported`. The data formats (`jsonl`/`csv`/`tsv`/`markdown`) are written verbatim
+  with no extra trailing newline, so CLI-piped bytes are byte-for-byte identical to the `out_path`
+  file and the MCP no-`out_path` string (the renderer already self-terminates — csv/tsv with `\r\n`,
+  jsonl with `\n`). Only the human views `text`/`json` add a friendly trailing newline.
 - **MCP**: a per-tool `output_format` arg, present only on the five read tools that render
   (`sheets_read_values`, `sheets_inspect`, `sheets_describe`, `sheets_formula_patterns`,
   `sheets_read_many`). `sheets_read_values` accepts the full set including `csv`/`tsv`; the

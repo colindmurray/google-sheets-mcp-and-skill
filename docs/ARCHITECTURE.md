@@ -238,7 +238,7 @@ the raw escape hatch is presented last.
 | `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`. No grid data. | read |
 | `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
 | `describe` | The unified "understand a region" read: ONE `spreadsheets.get(includeGridData=True)` over a tight union mask returns, per requested range, the cells (reusing `inspect`'s flatten), the sheet's merges, the conditional-format rules **intersecting** that range (range-scoped CF, via `addressing.gridranges_intersect`), its tables / banding / protected ranges (reusing the `structure` serializers), and a validation summary. Multi-range and multi-sheet; collapses 3-4 reads into one. No cache. | read |
-| `formula_patterns` | Collapse a region's REPEATED formulas to the distinct templates per column: reads only formulas (column-major, no computed bloat), dedupes each column to its templates with relative row refs normalized to `{r}` / `{r±k}`, the row span(s) each covers, and (by default) one sample computed value. A column that does not reduce cleanly is emitted VERBATIM with `reduced=false`; `read_values(render="formula")` stays the lossless ground truth. Lossy-but-honest, token-cheap on a wide grid. | read |
+| `formula_patterns` | Collapse a region's REPEATED formulas to the distinct templates per column: reads only formulas (column-major, no computed bloat), dedupes each column to its templates with relative row refs normalized to `{r}` / `{r±k}`, the row span(s) each covers, and (by default) one sample computed value. A column that does not reduce cleanly is emitted VERBATIM with `reduced=false`; `read_values(render="formula")` stays the lossless ground truth. A bounded / whole-column range returns exactly **one entry per requested column** — trailing all-blank columns (which the API omits) are padded as `{reduced:true, templates:[]}`; only an unbounded-column range (whole-row / whole-sheet) keeps the data-extent count (ISSUES.md #16). Lossy-but-honest, token-cheap on a wide grid. | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). `diff_only` sparsifies the `render="all"` `computed` matrix against `values` (drops static-cell duplication); `max_cells` fails fast with `result_too_large` instead of blowing the caller's token cap. | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
 | `write_values` | Write/update one or more ranges; `USER_ENTERED` default; multi-range in one call. | write |
@@ -544,9 +544,20 @@ The adapters wire it identically: the CLI promotes `--json` to a global `--forma
 {text,json,jsonl,csv,tsv,markdown}` (`--json` is a permanent alias for `--format json`); the MCP
 read tools take `output_format` (the rectangular-values `read_values` offers every format, the
 structured reads offer `text`/`json`/`jsonl`/`markdown` — markdown's KV form fits any shape, but
-csv/tsv need a grid). For a data format the MCP tool returns the rendered string wrapped in a
-`ToolResult` (which keeps the tool's structured `output_schema` while emitting a plain string body —
-FastMCP refuses a bare string as `structured_content` when a schema is set).
+csv/tsv need a grid). For a data format the MCP tool returns the rendered string as a content-only
+`ToolResult` (no `structured_content`). The five `out_path`-capable read tools are registered with
+`output_schema=None` precisely so the MCP lowlevel server does **not** require structured output:
+under any non-None schema a content-only result is rejected as "outputSchema defined but no
+structured output returned" (ISSUES.md #19/#21), so suppressing the derived schema is what lets the
+csv/tsv/jsonl/markdown string body — and the `out_path` handle below — flow through unchanged. The
+normal text/json path still returns the mirror model, which FastMCP serializes into
+`structuredContent` regardless.
+
+The CLI's piped output uses the **same canonical newline convention** as `render()`/`out_path`: the
+data formats (`jsonl`/`csv`/`tsv`/`markdown`) are written **verbatim** (`render()` is already
+self-terminating — csv/tsv end in `\r\n`, jsonl in `\n`), so CLI-piped bytes are byte-for-byte equal
+to the `out_path` file and the MCP no-`out_path` string. Only the human views `text`/`json` go
+through `print()` and so keep a friendly trailing newline (ISSUES.md #20/#22).
 
 #### Markdown (SPEC §6, D-MD)
 

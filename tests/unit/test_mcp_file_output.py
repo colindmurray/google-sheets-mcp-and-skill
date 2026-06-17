@@ -323,3 +323,155 @@ def test_call_formatted_no_out_path_is_unchanged(tmp_path):
         out_path=None,
     )
     assert isinstance(out, srv.models.ReadValuesResult)
+
+
+# ------------------------------------- end-to-end regression for ISSUES.md #19/#21 (real FastMCP)
+#
+# The older tests above call ``srv._call_formatted(...)`` DIRECTLY, so they never exercise the MCP
+# lowlevel server's outputSchema-vs-structured-content validation — which is exactly why #19/#21
+# shipped. These drive the tool through the REAL FastMCP invocation (an in-memory ``fastmcp.Client``
+# / ``tool.run``) so a content-only ToolResult (file-output handle, or a rendered data-format
+# string) is validated end-to-end. Before the fix these raised "Output validation error:
+# outputSchema defined but no structured output returned".
+
+
+def _structured_payload_for(tool_name: str) -> dict:
+    """A minimal valid core-result dict for each out_path-capable tool (json-renderable)."""
+    if tool_name in ("sheets_read_values",):
+        return {
+            "ok": True,
+            "spreadsheetId": "FAKEID",
+            "render": "plain",
+            "ranges": [{"range": "S!A1:B2", "values": [["a", "b"], ["c", "d"]]}],
+        }
+    if tool_name == "sheets_inspect":
+        return {
+            "ok": True, "spreadsheetId": "FAKEID", "sheet": "S", "range": "A1:B2",
+            "rows": 2, "cols": 2, "cells": [{"a1": "A1", "value": "a"}], "merges": [],
+        }
+    if tool_name == "sheets_describe":
+        return {
+            "ok": True, "spreadsheetId": "FAKEID", "sheet": "S", "range": "A1:B2",
+            "values": {"ok": True}, "structure": {"ok": True},
+        }
+    if tool_name == "sheets_formula_patterns":
+        return {
+            "ok": True, "spreadsheetId": "FAKEID",
+            "columns": [{"col": "S!A", "reduced": True, "templates": []}],
+        }
+    if tool_name == "sheets_read_many":
+        return {
+            "ok": True, "mode": "values", "count": 1, "succeeded": 1, "failed": 0,
+            "partialFailure": False,
+            "results": [{"ok": True, "spreadsheetId": "FAKEID", "ranges": []}],
+        }
+    raise AssertionError(tool_name)
+
+
+def _args_for(tool_name: str, *, output_format: str, out_path=None) -> dict:
+    base: dict = {"output_format": output_format}
+    if out_path is not None:
+        base["out_path"] = out_path
+    if tool_name == "sheets_read_values":
+        base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
+    elif tool_name == "sheets_inspect":
+        base |= {"spreadsheet_id": "FAKEID", "range": "S!A1:B2"}
+    elif tool_name == "sheets_describe":
+        base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
+    elif tool_name == "sheets_formula_patterns":
+        base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
+    elif tool_name == "sheets_read_many":
+        base |= {"requests": [{"spreadsheetId": "FAKEID", "ranges": ["S!A1:B2"]}]}
+    return base
+
+
+_CORE_ATTR = {
+    "sheets_read_values": "_read_values",
+    "sheets_inspect": "_inspect",
+    "sheets_describe": "_describe",
+    "sheets_formula_patterns": "_formula_patterns",
+    "sheets_read_many": "_read_many",
+}
+
+
+@pytest.mark.parametrize("tool_name", sorted(_CORE_ATTR))
+def test_out_path_end_to_end_no_validation_error(tool_name, tmp_path, monkeypatch):
+    # ISSUES.md #19/#21 headline regression: through the real FastMCP Client, out_path must NOT
+    # raise an output-validation error, the file must be written, and the handle must be
+    # recoverable from the (content-only) ToolResult.
+    from fastmcp import Client
+    from gsheets.core.format import render
+
+    payload = _structured_payload_for(tool_name)
+    monkeypatch.setattr(srv, _CORE_ATTR[tool_name], lambda *a, **k: payload)
+    monkeypatch.setattr(srv, "_services", lambda ctx: object())
+    target = tmp_path / "out.json"
+
+    async def go():
+        async with Client(srv.mcp) as client:
+            return await client.call_tool(
+                tool_name,
+                _args_for(tool_name, output_format="json", out_path=str(target)),
+            )
+
+    r = asyncio.run(go())  # must NOT raise ToolError
+    # The handle is recoverable from the content-only ToolResult; no structuredContent is emitted.
+    handle = json.loads(r.content[0].text)
+    assert handle["ok"] is True
+    assert handle["format"] == "json"
+    assert handle["path"] == str(target.resolve())
+    # The file was written with exactly render(payload, "json").
+    assert target.read_bytes() == render(payload, "json").encode("utf-8")
+    assert r.structured_content is None
+
+
+def test_out_path_csv_end_to_end_writes_expected_bytes(tmp_path, monkeypatch):
+    # ISSUES.md #19/#21 (branch a, csv): read_values csv via out_path through the real Client.
+    from fastmcp import Client
+    from gsheets.core.format import render
+
+    payload = _read_values_payload([["a", "b"], ["c", "d"]])
+    monkeypatch.setattr(srv, "_read_values", lambda *a, **k: payload)
+    monkeypatch.setattr(srv, "_services", lambda ctx: object())
+    target = tmp_path / "out.csv"
+
+    async def go():
+        async with Client(srv.mcp) as client:
+            return await client.call_tool(
+                "sheets_read_values",
+                {
+                    "spreadsheet_id": "FAKEID",
+                    "ranges": ["S!A1:B2"],
+                    "output_format": "csv",
+                    "out_path": str(target),
+                },
+            )
+
+    r = asyncio.run(go())  # must NOT raise ToolError
+    handle = json.loads(r.content[0].text)
+    assert handle["format"] == "csv"
+    assert target.read_bytes() == render(payload, "csv").encode("utf-8")
+
+
+@pytest.mark.parametrize("fmt", ["csv", "tsv", "jsonl", "markdown"])
+def test_data_format_no_out_path_end_to_end_returns_rendered_string(fmt, monkeypatch):
+    # ISSUES.md #21 (branch b): a data format WITHOUT out_path returns the rendered string via the
+    # content-only ToolResult — through the real Client, with NO output-validation error. The body
+    # text must be byte-identical to core.format.render(payload, fmt).
+    from fastmcp import Client
+    from gsheets.core.format import render
+
+    payload = _read_values_payload([["a", "b"], ["c", "d"]])
+    monkeypatch.setattr(srv, "_read_values", lambda *a, **k: payload)
+    monkeypatch.setattr(srv, "_services", lambda ctx: object())
+
+    async def go():
+        async with Client(srv.mcp) as client:
+            return await client.call_tool(
+                "sheets_read_values",
+                {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"], "output_format": fmt},
+            )
+
+    r = asyncio.run(go())  # must NOT raise ToolError
+    assert r.content[0].text == render(payload, fmt)
+    assert r.structured_content is None

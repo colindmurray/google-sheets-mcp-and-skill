@@ -1467,17 +1467,26 @@ def _resolve_format(args) -> str:
 def _emit(result: dict, *, fmt: str, stream=None) -> None:
     """Print a successful core result in ``fmt`` (SPEC §1.3).
 
-    ``text`` uses the existing terse renderer; ``json`` pretty-prints the raw dict; the data
-    formats (``jsonl``/``csv``/``tsv``) go through the shared ``core.format.render`` so CLI
-    piped output is byte-identical to MCP file output (and to ``export``).
+    ``text`` and ``json`` are HUMAN/interactive views: they go through ``print()`` so each gets a
+    friendly trailing newline. The data formats (``jsonl``/``csv``/``tsv``/``markdown``) are MACHINE
+    payloads: ``core.format.render`` is already self-terminating for them (csv/tsv end in the csv
+    module's ``\\r\\n``; jsonl ends in ``\\n``), so they are written VERBATIM with ``out.write`` — no
+    second terminator. That makes CLI-piped bytes byte-identical to ``render()``, to the MCP
+    ``out_path`` file, and to the MCP no-out_path data-format string (ISSUES.md #20/#22). Adding a
+    ``print()`` newline here is exactly what produced the extra trailing blank line on piped csv.
     """
     out = stream if stream is not None else sys.stdout
     if fmt == "text":
         print(_render_text(result), file=out)
+    elif fmt == "json":
+        # Human/interactive view: pretty-printed with a friendly trailing newline.
+        print(render_format(result, "json"), file=out)
     else:
-        # render() handles json (pretty) and the data formats; raises format_unsupported on a
-        # structured result asked for csv/tsv (caught in main() -> structured error envelope).
-        print(render_format(result, fmt), file=out)
+        # Machine payloads (jsonl/csv/tsv/markdown): render() is self-terminating, so write it
+        # verbatim — NO extra newline — to preserve byte-equality with out_path / MCP / export.
+        # render() raises format_unsupported on a structured result asked for csv/tsv (caught in
+        # main() -> structured error envelope).
+        out.write(render_format(result, fmt))
 
 
 def _emit_error(err: SheetsError, *, fmt: str) -> None:
