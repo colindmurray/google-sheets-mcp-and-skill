@@ -24,6 +24,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from gsheets.core import reads as reads_mod
+from gsheets.core.addressing import sheet_index_cache
 from gsheets.core.errors import SheetsError
 from gsheets.core.reads import (
     inspect,
@@ -104,6 +105,85 @@ def _make_http_error(status: int = 403):
 
 
 SHEET_ID = "<TEST_SHEET_ID>"
+
+
+# =================================================================== #27 sheet-index cache scope
+
+
+class TestSheetIndexCacheCollapse:
+    """ISSUES.md #27: under an active ``sheet_index_cache()`` scope — which the adapters open around
+    every dispatch — the reads that resolve many GridRanges to A1 (``overview`` over named ranges,
+    ``inspect`` over merges) issue ONE sheet-index get, not one per element. The contrast tests
+    document the N+1 the scope eliminates (the same pathology fixed for ``read_conditional_formats``
+    in #26, now solved for every core function at once via the adapter-level scope).
+    """
+
+    @staticmethod
+    def _index_gets(rec):
+        return [
+            c for c in rec.calls
+            if c.get("fields") == "sheets.properties(sheetId,title,index)"
+        ]
+
+    @staticmethod
+    def _overview_payload(n):
+        named = [
+            {
+                "name": f"nr{i}",
+                "namedRangeId": f"id{i}",
+                "range": {"sheetId": 0, "startRowIndex": i, "endRowIndex": i + 1},
+            }
+            for i in range(n)
+        ]
+        return {"properties": {"title": "T"}, "sheets": [], "namedRanges": named}
+
+    @staticmethod
+    def _inspect_payload(n):
+        merges = [
+            {
+                "sheetId": 0,
+                "startRowIndex": i,
+                "endRowIndex": i + 1,
+                "startColumnIndex": 0,
+                "endColumnIndex": 2,
+            }
+            for i in range(n)
+        ]
+        return {"sheets": [{"properties": {"title": "Cliff"}, "data": [{}], "merges": merges}]}
+
+    def test_overview_named_ranges_collapse_to_one_get_in_scope(self):
+        services, rec = _make_service(
+            data_responses=[self._overview_payload(5)], sheet_index=_CLIFF_INDEX
+        )
+        with sheet_index_cache():
+            out = overview(services, SHEET_ID)
+        assert len(out["namedRanges"]) == 5
+        assert len(self._index_gets(rec)) == 1  # one cached lookup for all 5 named ranges
+
+    def test_overview_named_ranges_are_n_plus_1_without_scope(self):
+        # Documents the bug the adapter scope fixes: a direct (non-adapter) call with no scope does
+        # one sheet-index network get PER named range.
+        services, rec = _make_service(
+            data_responses=[self._overview_payload(5)], sheet_index=_CLIFF_INDEX
+        )
+        overview(services, SHEET_ID)
+        assert len(self._index_gets(rec)) == 5
+
+    def test_inspect_merges_collapse_to_one_get_in_scope(self):
+        services, rec = _make_service(
+            data_responses=[self._inspect_payload(6)], sheet_index=_CLIFF_INDEX
+        )
+        with sheet_index_cache():
+            out = inspect(services, SHEET_ID, "Cliff!A1:B100")
+        assert len(out["merges"]) == 6
+        assert len(self._index_gets(rec)) == 1  # one cached lookup for all 6 merges
+
+    def test_inspect_merges_are_n_plus_1_without_scope(self):
+        services, rec = _make_service(
+            data_responses=[self._inspect_payload(6)], sheet_index=_CLIFF_INDEX
+        )
+        inspect(services, SHEET_ID, "Cliff!A1:B100")
+        assert len(self._index_gets(rec)) == 6
 
 
 # =========================================================================== overview

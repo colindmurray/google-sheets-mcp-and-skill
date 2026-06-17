@@ -56,6 +56,7 @@ from .core import (
     structure as _structure,
     write_values as _write_values,
 )
+from .core import addressing as addressing_mod
 from .core import retry as retry_mod
 from .core.errors import SheetsError, to_sheets_error
 from .core.format import render as render_format
@@ -286,7 +287,11 @@ def _call(
     The per-call ``retry`` policy (ISSUES.md #25) is resolved and ACTIVATED here, INSIDE this sync
     body, so the contextvar is set in the same thread FastMCP offloads the tool to — making it
     visible to the auth-layer request builder's ``.execute()`` deep in core (the contextvar is
-    thread-local, so activating in the async wrapper would not propagate to the worker thread).
+    thread-local, so activating in the async wrapper would not propagate to the worker thread). For
+    the identical reason the sheet-index cache (ISSUES.md #27) is opened here too: one
+    ``addressing.sheet_index_cache()`` scope around the whole core call collapses every per-element
+    ``_sheet_index`` lookup (merges, named ranges, chart series, CF ranges, …) to a single
+    ``spreadsheets.get`` instead of one network round-trip per resolved range.
 
     Args:
         model_cls: The mirror result model for this core function.
@@ -310,7 +315,7 @@ def _call(
     """
     try:
         # Resolve INSIDE the guard so a backoff_params_conflict surfaces as a clean ToolError.
-        with retry_mod.activate(_resolve_retry(retry)):
+        with retry_mod.activate(_resolve_retry(retry)), addressing_mod.sheet_index_cache():
             result = fn(*args, **kwargs)
         # Model construction is inside the guard too: a mirror-model validation error must also
         # surface as ONE structured error, never a masked "Error calling tool" or a wall of
@@ -378,7 +383,7 @@ def _call_formatted(
         try:
             # Resolve+activate INSIDE the guard so a backoff_params_conflict (or any failure) is a
             # clean ToolError; the contextvar must be set in THIS sync body so .execute() sees it.
-            with retry_mod.activate(_resolve_retry(retry)):
+            with retry_mod.activate(_resolve_retry(retry)), addressing_mod.sheet_index_cache():
                 result = fn(*args, **kwargs)
             handle = write_file_handle(result, file_format, out_path)
             # Return the handle as a JSON-string body (the same ``ToolResult(content=...)`` shape the
@@ -395,7 +400,7 @@ def _call_formatted(
         # _call resolves + activates the retry policy itself (one chokepoint).
         return _call(model_cls, fn, *args, retry=retry, **kwargs)
     try:
-        with retry_mod.activate(_resolve_retry(retry)):
+        with retry_mod.activate(_resolve_retry(retry)), addressing_mod.sheet_index_cache():
             result = fn(*args, **kwargs)
         return ToolResult(content=render_format(result, output_format))
     except SheetsError as exc:

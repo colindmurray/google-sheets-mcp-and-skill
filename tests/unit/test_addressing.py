@@ -14,9 +14,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from gsheets.core.addressing import (
+    _SHEET_INDEX_CACHE,
     a1_to_gridrange,
     gridrange_to_a1,
     parse_a1,
+    sheet_index_cache,
 )
 from gsheets.core.errors import SheetsError
 from gsheets.core.service import SheetsServices
@@ -600,6 +602,71 @@ class TestGridRangesIntersect:
 # --------------------------------------------------------------------------------------
 # Boundary: addressing imports no transport/CLI/pydantic symbols.
 # --------------------------------------------------------------------------------------
+
+
+class TestSheetIndexCache:
+    """The per-operation sheet-index cache (ISSUES.md #26, #27).
+
+    ``_sheet_index`` — reached by every ``gridrange_to_a1`` / ``a1_to_gridrange`` — issues a network
+    ``spreadsheets.get`` once per call UNLESS a ``sheet_index_cache()`` scope is active, in which
+    case the sheet list is fetched ONCE and reused for the whole scope. The adapters open this scope
+    around the entire core dispatch, so any operation resolving N ranges does 1 sheet-index get, not
+    N (the #27 systemic fix).
+    """
+
+    @staticmethod
+    def _get_count(resource):
+        return resource.spreadsheets.return_value.get.call_count
+
+    def test_outside_scope_every_conversion_refetches(self):
+        # No scope => the contextvar default is None => no caching => one network get PER conversion.
+        services, resource = _make_services()
+        assert _SHEET_INDEX_CACHE.get() is None
+        gridrange_to_a1(services, "SID", {"sheetId": 0})
+        gridrange_to_a1(services, "SID", {"sheetId": 17})
+        assert self._get_count(resource) == 2
+
+    def test_scope_collapses_to_a_single_get(self):
+        # The whole point of #27: N conversions inside one scope share ONE sheet-index lookup.
+        services, resource = _make_services()
+        with sheet_index_cache():
+            gridrange_to_a1(services, "SID", {"sheetId": 0})
+            gridrange_to_a1(services, "SID", {"sheetId": 17})
+            a1_to_gridrange(services, "SID", "Plan!A1:B2")
+        assert self._get_count(resource) == 1
+
+    def test_scope_is_per_operation_not_shared_across_scopes(self):
+        # Two SEPARATE scopes each fetch once, so a tab renamed BETWEEN operations is never served
+        # from a stale cache (per-operation freshness): 2 conversions in 2 scopes => 2 gets.
+        services, resource = _make_services()
+        with sheet_index_cache():
+            gridrange_to_a1(services, "SID", {"sheetId": 0})
+        with sheet_index_cache():
+            gridrange_to_a1(services, "SID", {"sheetId": 17})
+        assert self._get_count(resource) == 2
+
+    def test_reentrant_inner_scope_reuses_outer_cache(self):
+        # A nested scope (the adapter opens one; a core fn such as read_conditional_formats nests its
+        # own) must REUSE the outer cache — no second fetch — and must NOT tear it down on inner exit.
+        services, resource = _make_services()
+        with sheet_index_cache():
+            outer_cache = _SHEET_INDEX_CACHE.get()
+            assert outer_cache is not None
+            gridrange_to_a1(services, "SID", {"sheetId": 0})
+            with sheet_index_cache():
+                # Same dict object — the inner scope did not shadow it with a fresh {}.
+                assert _SHEET_INDEX_CACHE.get() is outer_cache
+                gridrange_to_a1(services, "SID", {"sheetId": 17})
+            # Outer cache survives the inner exit (inner did not reset the contextvar to None).
+            assert _SHEET_INDEX_CACHE.get() is outer_cache
+        assert self._get_count(resource) == 1
+
+    def test_scope_resets_to_none_on_exit(self):
+        services, _ = _make_services()
+        assert _SHEET_INDEX_CACHE.get() is None
+        with sheet_index_cache():
+            assert _SHEET_INDEX_CACHE.get() is not None
+        assert _SHEET_INDEX_CACHE.get() is None
 
 
 def test_no_transport_imports():

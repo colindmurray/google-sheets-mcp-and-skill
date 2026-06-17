@@ -32,6 +32,7 @@ from fastmcp.exceptions import ToolError
 from fastmcp.tools.tool import ToolResult
 
 import gsheets.mcp_server as srv
+from gsheets.core import addressing as _addressing
 from gsheets.core.errors import SheetsError
 
 
@@ -309,6 +310,67 @@ def test_call_formatted_markdown_on_structured_result_returns_kv():
     text = out.content[0].text
     assert "sheet: S" in text
     assert "ok: True" in text
+
+
+# ===================================================================== #27 sheet-index cache scope
+# The adapter MUST open an ``addressing.sheet_index_cache()`` scope around the core call (the same
+# chokepoint where it activates the retry policy), so every tool that resolves many GridRanges does
+# ONE sheet-index get instead of one per element. These probe fns record whether a scope was active
+# in the thread that ran core — the systemic #27 fix wired into _call / _call_formatted.
+
+
+def _probe_payload(sid):
+    return {
+        "ok": True,
+        "spreadsheetId": sid,
+        "render": "plain",
+        "ranges": [{"range": "S!A1:A1", "values": [["x"]]}],
+    }
+
+
+def _scope_probe(seen):
+    def fn(services, sid, *args, **kwargs):
+        seen["cache"] = _addressing._SHEET_INDEX_CACHE.get()
+        return _probe_payload(sid)
+    return fn
+
+
+def test_call_opens_sheet_index_cache_scope():
+    seen: dict = {}
+    assert _addressing._SHEET_INDEX_CACHE.get() is None  # no scope before the call
+    srv._call(srv.models.ReadValuesResult, _scope_probe(seen), object(), "<ID>", [])
+    assert seen["cache"] is not None  # core ran INSIDE an active sheet-index cache scope
+    assert _addressing._SHEET_INDEX_CACHE.get() is None  # scope torn down after (per-operation)
+
+
+def test_call_formatted_text_branch_opens_scope():
+    # text/json delegates to _call — proves the transitive path is covered (no double-wrap).
+    seen: dict = {}
+    srv._call_formatted(srv.models.ReadValuesResult, _scope_probe(seen), "text", object(), "<ID>", [])
+    assert seen["cache"] is not None
+
+
+def test_call_formatted_data_format_branch_opens_scope():
+    # The csv/jsonl/tsv branch wraps fn directly (it does NOT route through _call).
+    seen: dict = {}
+    srv._call_formatted(srv.models.ReadValuesResult, _scope_probe(seen), "csv", object(), "<ID>", [])
+    assert seen["cache"] is not None
+
+
+def test_call_formatted_out_path_branch_opens_scope(tmp_path):
+    # The file-output (out_path) branch — the path big inspect/describe reads take — wraps fn too.
+    seen: dict = {}
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult,
+        _scope_probe(seen),
+        "text",
+        object(),
+        "<ID>",
+        [],
+        out_path=str(tmp_path / "out.json"),
+    )
+    assert isinstance(out, ToolResult)
+    assert seen["cache"] is not None
 
 
 def test_call_formatted_csv_on_structured_result_raises_tool_error():

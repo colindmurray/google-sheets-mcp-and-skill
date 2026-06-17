@@ -19,13 +19,16 @@ from contextlib import contextmanager
 from .errors import SheetsError
 from .service import SheetsServices
 
-# Per-operation cache for the sheet ``(title, sheetId, index)`` list. A read that serializes many
-# GridRanges — ``read_conditional_formats`` over 50+ rules, or ``structure`` over many merges —
-# calls :func:`gridrange_to_a1` (hence :func:`_sheet_index`) once PER range. Uncached, that is one
-# network ``spreadsheets.get`` PER range: 54 rules → 55 sequential gets → minutes of wall-clock and
-# per-user-quota exhaustion (ISSUES.md #26). A core read opens a ``with sheet_index_cache():`` scope
-# so the list is fetched ONCE; the scope is per-operation, so a later structural change (a renamed
-# or added tab) is never served from a stale cache.
+# Per-operation cache for the sheet ``(title, sheetId, index)`` list. ANY operation that resolves
+# more than one A1<->GridRange — ``read_conditional_formats`` over 50+ rules, ``inspect`` over many
+# merges, ``overview``/``describe`` over named ranges/regions, a multi-series ``charts`` create, a
+# multi-range ``set_conditional_format`` — calls :func:`gridrange_to_a1` / :func:`a1_to_gridrange`
+# (hence :func:`_sheet_index`) once PER element. Uncached, that is one network ``spreadsheets.get``
+# PER element: 54 rules → 55 sequential gets → minutes of wall-clock and per-user-quota exhaustion
+# (ISSUES.md #26, #27). The two thin adapters open a ``with sheet_index_cache():`` scope around the
+# WHOLE core dispatch (mirroring ``retry.activate``), so the list is fetched ONCE per tool call /
+# CLI invocation no matter which core function runs. The scope is per-operation, so a later
+# structural change (a renamed or added tab) is never served from a stale cache.
 _SHEET_INDEX_CACHE: contextvars.ContextVar = contextvars.ContextVar(
     "gsheets_sheet_index_cache", default=None
 )
@@ -35,10 +38,19 @@ _SHEET_INDEX_CACHE: contextvars.ContextVar = contextvars.ContextVar(
 def sheet_index_cache():
     """Scope in which :func:`_sheet_index` fetches each spreadsheet's sheet list only once.
 
-    Wrap a read that resolves many GridRanges to A1 (conditional-format / structure serialization)
-    so the cheap-mask sheet-index ``get`` runs a single time instead of once per range. The cache
-    lives only for the ``with`` block — never across operations — so it cannot serve stale titles.
+    The adapters wrap every core dispatch in this scope so the cheap-mask sheet-index ``get`` runs a
+    single time per operation instead of once per resolved range. The cache lives only for the
+    ``with`` block — never across operations — so it cannot serve stale titles.
+
+    Re-entrant: if an outer scope is already active (the adapter opened one, and a core function such
+    as ``read_conditional_formats`` nests its own for library callers that bypass the adapters), the
+    inner ``with`` reuses the outer cache instead of shadowing it with an empty dict — so nesting is
+    free (no redundant refetch) and direct core callers still get single-get behavior.
     """
+    if _SHEET_INDEX_CACHE.get() is not None:
+        # Outer scope already active — reuse it; do not reset on exit (the outer owns the lifetime).
+        yield
+        return
     token = _SHEET_INDEX_CACHE.set({})
     try:
         yield

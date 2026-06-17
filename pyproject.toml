@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "google-sheets-mcp-and-skill"
-version = "0.4.1"
-description = "Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable), with read-side richness — values + formulas, cell formatting, and conditional-format rules — as the thesis. v0.3 adds structure-aware reads (describe, formula-patterns), multi-format output (text/json/jsonl/csv/tsv/markdown), and MCP file-output handles. v0.4 makes retry/backoff off-by-default and per-call configurable on both adapters."
+version = "0.4.2"
+description = "Google Sheets integration for AI tools: a pure core library wrapped by an MCP server and a CLI (skill-packageable). Read-side richness is the thesis — losslessly read values + formulas, cell formatting, and conditional-format rules in a compact, structured, token-efficient form — with full CRUD symmetry (anything writable is readable back), structure-aware reads, and multi-format output (text/json/jsonl/csv/tsv/markdown)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

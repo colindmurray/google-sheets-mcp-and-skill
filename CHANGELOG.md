@@ -10,6 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.4.2] - 2026-06-17
+
+The v0.4.1 performance fix, generalized. An audit of every core module found the same
+one-network-call-per-range pathology in **9 more functions** — most importantly `overview`,
+`inspect`, and `describe` (the three primary read tools). All are fixed at once.
+
+### Fixed
+- **The N+1 sheet-index pattern affected far more than conditional formats.** Any operation that
+  resolved more than one A1↔`GridRange` — `overview` over named ranges, `inspect` over merges,
+  `describe` over regions, a multi-series `charts` create, a multi-range `set_conditional_format`,
+  developer-metadata reads, value `clear` with structural payloads, `formula_patterns` over multiple
+  ranges, `read_values`/`describe` with `data_filters` — called the sheet-index `spreadsheets.get`
+  **once per element** with no active cache. On a merge- or rule-heavy sheet this meant minutes of
+  wall-clock and per-user-quota exhaustion, exactly like the v0.4.1 conditional-format case.
+- **Fixed systemically at the adapter boundary.** Both adapters now open a single
+  `addressing.sheet_index_cache()` scope around the whole core dispatch — the same chokepoint where
+  the retry policy is activated (CLI `main`, MCP `_call` / `_call_formatted`). The sheet index is
+  therefore fetched **once per tool call / CLI invocation** no matter which core function runs, and
+  any future core function inherits the fix automatically. The cache is per-operation (torn down
+  when the call returns), so it can never serve a stale sheet title across operations and never
+  affects cell data, formats, or rules (which are not cached at all). Audited cache-safe across
+  every write path (no write re-resolves the sheet list after mutating structure in the same call).
+- `sheet_index_cache()` is now **re-entrant**: the per-function scopes already in
+  `read_conditional_formats` / `structure` (which keep direct library callers fast) reuse the outer
+  adapter scope instead of forcing a redundant refetch. Output is unchanged everywhere; not a
+  breaking change.
+
 ## [0.4.1] - 2026-06-17
 
 A performance fix: reading conditional formats (or full structure) on a large, rule-heavy sheet
@@ -364,7 +391,8 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.0...v0.3.1

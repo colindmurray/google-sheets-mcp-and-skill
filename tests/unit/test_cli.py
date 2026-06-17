@@ -201,6 +201,27 @@ def test_global_json_prints_raw_dict(patched, capsys):
     assert payload["ok"] is True and payload["title"] == "T"
 
 
+def test_dispatch_opens_sheet_index_cache_scope(monkeypatch):
+    # ISSUES.md #27: the CLI must run every core fn inside an addressing.sheet_index_cache() scope
+    # (the same chokepoint where it activates the retry policy) so a multi-range operation does ONE
+    # sheet-index get, not one per element. Probe a patched core fn for the active contextvar.
+    from gsheets.core import addressing as _addressing
+
+    seen: dict = {}
+    monkeypatch.setattr(cli.auth, "build_services", lambda scopes_mode=None: object())
+
+    def _probe(services, spreadsheet_id):
+        seen["cache"] = _addressing._SHEET_INDEX_CACHE.get()
+        return {"ok": True, "spreadsheetId": spreadsheet_id, "title": "T", "sheets": [], "namedRanges": []}
+
+    monkeypatch.setattr(cli.core, "overview", _probe)
+    assert _addressing._SHEET_INDEX_CACHE.get() is None  # no scope before dispatch
+    rc = _run(["overview", "SHEET_ID"])
+    assert rc == 0
+    assert seen["cache"] is not None  # core ran INSIDE an active sheet-index cache scope
+    assert _addressing._SHEET_INDEX_CACHE.get() is None  # torn down after dispatch (per-operation)
+
+
 # ===========================================================================================
 # Global --format {text,json,jsonl,csv,tsv} (SPEC §1.3). --json is a permanent alias for
 # --format json. text keeps the terse renderer; the data formats go through core.format.render.

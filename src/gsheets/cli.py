@@ -18,6 +18,7 @@ import json
 import sys
 
 from . import __version__, auth, core
+from .core import addressing as addressing_mod
 from .core import retry as retry_mod
 from .core.errors import SheetsError, to_sheets_error
 from .core.format import render as render_format
@@ -1714,7 +1715,12 @@ def main(argv: list[str] | None = None) -> int:
         # the WHOLE build_services + dispatch + render block so the auth-layer request builder reads
         # it via current_policy() at .execute() time (there is no central .execute() wrapper in core).
         policy = _resolve_retry_policy(args)
-        with retry_mod.activate(policy):
+        # Wrap the dispatch in a sheet-index cache scope (ISSUES.md #27) — same chokepoint as the
+        # retry policy — so every subcommand that resolves multiple A1<->GridRanges (inspect over
+        # merges, overview/describe over named ranges, a multi-series charts create, …) fetches the
+        # sheet list ONCE instead of once per element. Nested inside retry; the two contextvars are
+        # independent. auth subcommands pass services=None and never touch addressing (harmless).
+        with retry_mod.activate(policy), addressing_mod.sheet_index_cache():
             if getattr(args, "needs_services", False):
                 services = auth.build_services(scopes_mode=args.scopes)
                 result = func(services, args)
