@@ -395,7 +395,7 @@ _CORE_ATTR = {
 
 
 @pytest.mark.parametrize("tool_name", sorted(_CORE_ATTR))
-def test_out_path_end_to_end_no_validation_error(tool_name, tmp_path, monkeypatch):
+def test_out_path_end_to_end_no_validation_error(tool_name, tmp_path, monkeypatch, stub_mcp_credentials):
     # ISSUES.md #19/#21 headline regression: through the real FastMCP Client, out_path must NOT
     # raise an output-validation error, the file must be written, and the handle must be
     # recoverable from the (content-only) ToolResult.
@@ -425,7 +425,7 @@ def test_out_path_end_to_end_no_validation_error(tool_name, tmp_path, monkeypatc
     assert r.structured_content is None
 
 
-def test_out_path_csv_end_to_end_writes_expected_bytes(tmp_path, monkeypatch):
+def test_out_path_csv_end_to_end_writes_expected_bytes(tmp_path, monkeypatch, stub_mcp_credentials):
     # ISSUES.md #19/#21 (branch a, csv): read_values csv via out_path through the real Client.
     from fastmcp import Client
     from gsheets.core.format import render
@@ -454,7 +454,7 @@ def test_out_path_csv_end_to_end_writes_expected_bytes(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("fmt", ["csv", "tsv", "jsonl", "markdown"])
-def test_data_format_no_out_path_end_to_end_returns_rendered_string(fmt, monkeypatch):
+def test_data_format_no_out_path_end_to_end_returns_rendered_string(fmt, monkeypatch, stub_mcp_credentials):
     # ISSUES.md #21 (branch b): a data format WITHOUT out_path returns the rendered string via the
     # content-only ToolResult — through the real Client, with NO output-validation error. The body
     # text must be byte-identical to core.format.render(payload, fmt).

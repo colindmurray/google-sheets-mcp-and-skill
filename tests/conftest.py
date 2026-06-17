@@ -73,6 +73,22 @@ def load_golden():
 
 
 @pytest.fixture
+def stub_mcp_credentials(monkeypatch):
+    """Let an in-memory ``fastmcp.Client`` connect to the MCP server without real credentials.
+
+    The server lifespan resolves credentials via ``gsheets.auth.build_services()`` on connect. The
+    mocked unit suite has no credentials and must never need them (CI runs creds-free), so a
+    Client-based adapter test would otherwise die at connect with ``no_credentials`` — green on a
+    developer machine that happens to hold a token, red in CI. The tool body reads its handle
+    through a separately-stubbed ``_services``, so the lifespan's services value is never used; any
+    object suffices. Patched via the string target so ``gsheets.auth`` is imported lazily (only when
+    an MCP adapter test requests this fixture), keeping the module-level conftest free of the
+    auth/transport layer and the core boundary-guard meaningful.
+    """
+    monkeypatch.setattr("gsheets.auth.build_services", lambda *args, **kwargs: object())
+
+
+@pytest.fixture
 def live_service():
     """Real authed :class:`~gsheets.core.service.SheetsServices` for live integration tests.
 

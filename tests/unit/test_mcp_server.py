@@ -579,7 +579,7 @@ def test_call_model_validation_error_fails_small():
 # ------------------------------------------- ISSUES.md #19/#21 end-to-end structuredContent guard
 
 
-def test_read_values_json_no_out_path_still_emits_structured_content(monkeypatch):
+def test_read_values_json_no_out_path_still_emits_structured_content(monkeypatch, stub_mcp_credentials):
     # NO-REGRESSION (ISSUES.md #19/#21): even with output_schema=None on the tool, the normal
     # text/json (no out_path) path returns the mirror model and FastMCP still serializes it into
     # structuredContent. Driven through the REAL FastMCP invocation (in-memory Client), not the
