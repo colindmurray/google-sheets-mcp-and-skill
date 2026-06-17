@@ -1,6 +1,8 @@
 # google-sheets-mcp-and-skill
 
 [![CI](https://github.com/colindmurray/google-sheets-mcp-and-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/colindmurray/google-sheets-mcp-and-skill/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/google-sheets-mcp-and-skill)](https://pypi.org/project/google-sheets-mcp-and-skill/)
+[![Python](https://img.shields.io/pypi/pyversions/google-sheets-mcp-and-skill)](https://pypi.org/project/google-sheets-mcp-and-skill/)
 
 Read a Google Sheet the way it actually works — formulas, real colors, conditional-format rules, native tables, filter state, in-cell rich text, and the comments humans left on it — then write it back safely, or export the whole thing to PDF, Excel, or CSV. Render any read as text, JSON, JSONL, CSV, TSV, or Markdown. One core library, exposed as both an MCP server and a CLI (with a bundled skill).
 
@@ -76,14 +78,14 @@ The official spreadsheet skill in [`anthropics/skills`](https://github.com/anthr
 
 Both paths run the exact same core. Behavior is identical whether you call a tool over MCP or a subcommand in a shell.
 
-> The package is not on PyPI yet (publication is planned); until the first release lands, install straight from GitHub as shown below.
+> Published on [PyPI](https://pypi.org/project/google-sheets-mcp-and-skill/). Install with `uv` (or `pipx`) as shown below. To run the unreleased `main` instead, replace the package name with `git+https://github.com/colindmurray/google-sheets-mcp-and-skill`.
 
 ### A. MCP server
 
 Install with `uv` (this links both the `gsheets` CLI and the `google-sheets-mcp` server):
 
 ```sh
-uv tool install git+https://github.com/colindmurray/google-sheets-mcp-and-skill
+uv tool install google-sheets-mcp-and-skill
 ```
 
 Register it with Claude Code (or any MCP client). The server speaks stdio; pass auth via `--env`:
@@ -92,7 +94,7 @@ Register it with Claude Code (or any MCP client). The server speaks stdio; pass 
 claude mcp add google-sheets \
   --env GSHEETS_AUTH_MODE=oauth \
   --env GSHEETS_TOKEN_FILE="$HOME/.config/google-sheets-mcp/token.json" \
-  -- uvx --from git+https://github.com/colindmurray/google-sheets-mcp-and-skill google-sheets-mcp
+  -- uvx --from google-sheets-mcp-and-skill google-sheets-mcp
 ```
 
 The MCP server needs a **pre-existing, valid or refreshable token**: it never opens a browser consent prompt mid-session, which would hang the JSON-RPC channel. Mint the token once with `gsheets auth login` (see [Authentication](#authentication)). If credentials can't be resolved at startup, the server writes a clear message to stderr and exits non-zero instead of crashing.
@@ -106,7 +108,7 @@ The read tools (`sheets_read_values`, `sheets_inspect`, `sheets_describe`, `shee
 The same surface as a command-line tool. Install gives you `gsheets`:
 
 ```sh
-uv tool install git+https://github.com/colindmurray/google-sheets-mcp-and-skill   # provides `gsheets` and `google-sheets-mcp`
+uv tool install google-sheets-mcp-and-skill   # provides `gsheets` and `google-sheets-mcp`
 ```
 
 Every subcommand maps 1:1 to a core function. A session reading a sheet looks like this:
