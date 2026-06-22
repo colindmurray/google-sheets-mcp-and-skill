@@ -19,7 +19,7 @@ _DISTRIBUTION_NAME = "google-sheets-mcp-and-skill"
 
 # Fallback used when the distribution metadata is unavailable (e.g. running straight from a
 # source checkout that was never installed). Kept in lockstep with pyproject's ``version``.
-_FALLBACK_VERSION = "0.4.2"
+_FALLBACK_VERSION = "0.4.3"
 
 
 def _resolve_version() -> str:

@@ -78,6 +78,24 @@
       "a1": "A1:C3",
       "gridrange": {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 3, "startColumnIndex": 0, "endColumnIndex": 3},
       "roundtrip": "Cliff!A1:C3"
+    },
+    {
+      "name": "partial_column_from_row2_down",
+      "a1": "Cliff!A2:A",
+      "gridrange": {"sheetId": 0, "startRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 1},
+      "roundtrip": "Cliff!A2:A"
+    },
+    {
+      "name": "partial_column_top_to_row5",
+      "a1": "Cliff!A:A5",
+      "gridrange": {"sheetId": 0, "endRowIndex": 5, "startColumnIndex": 0, "endColumnIndex": 1},
+      "roundtrip": "Cliff!A:A5"
+    },
+    {
+      "name": "partial_row_from_colA_right",
+      "a1": "Cliff!A2:2",
+      "gridrange": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 0},
+      "roundtrip": "Cliff!A2:2"
     }
   ]
 }

@@ -1372,3 +1372,43 @@ def test_gradient_stops_structured_error_guards():
         )
     with pytest.raises(SheetsError, match="no interpolation points"):
         serialize_rule_structured({"ranges": ["S!A1"], "gradientRule": {}})
+
+
+# --------------------------------------------------------------------------------------
+# Comma-in-value safety: a single text value containing a comma must NOT be shredded on the
+# terse line round-trip (only genuinely multi-value conditions split on commas).
+# --------------------------------------------------------------------------------------
+
+
+def test_single_text_value_with_comma_not_shredded():
+    parsed = parse_rule_line("[S!A1:A1] if TEXT_EQ(Smith, John) -> bold")
+    assert parsed["condition"] == {"type": "TEXT_EQ", "values": ["Smith, John"]}
+
+
+def test_single_text_contains_value_with_comma_preserved():
+    parsed = parse_rule_line("[S!A1:A9] if TEXT_CONTAINS(1,000) -> bg #FFFFFF")
+    assert parsed["condition"] == {"type": "TEXT_CONTAINS", "values": ["1,000"]}
+
+
+def test_multi_value_one_of_list_still_splits_on_comma():
+    parsed = parse_rule_line("[S!A1:A9] if ONE_OF_LIST(a,b,c) -> bg #FFFFFF")
+    assert parsed["condition"] == {"type": "ONE_OF_LIST", "values": ["a", "b", "c"]}
+
+
+def test_multi_value_number_between_still_splits_on_comma():
+    parsed = parse_rule_line("[S!B1:B9] if NUMBER_BETWEEN(0,100) -> bg #FFFF00")
+    assert parsed["condition"] == {"type": "NUMBER_BETWEEN", "values": ["0", "100"]}
+
+
+def test_text_eq_comma_value_round_trips_through_line():
+    # Google rule -> terse line -> parsed: the comma-bearing value survives intact.
+    rule = {
+        "ranges": ["S!A1:A1"],
+        "booleanRule": {
+            "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": "Smith, John"}]},
+            "format": {"textFormat": {"bold": True}},
+        },
+    }
+    line = serialize_rule(rule)
+    assert line == "[S!A1:A1] if TEXT_EQ(Smith, John) -> bold"
+    assert parse_rule_line(line)["condition"]["values"] == ["Smith, John"]

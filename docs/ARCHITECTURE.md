@@ -711,7 +711,12 @@ defaults, never crash.
 - **`GridRange` is 0-based, half-open** (`startRowIndex` inclusive, `endRowIndex`
   exclusive); **A1 is 1-based, inclusive**. The conversion is centralized in
   `addressing` so it is done once and correctly. Unbounded ranges (`A:A`, `2:2`, whole
-  sheet) map by omitting the corresponding indices.
+  sheet) map by omitting the corresponding indices. **Half-open ranges map each endpoint
+  independently** (Google semantics): `A2:A` is column A *from row 2 down*
+  (`startRowIndex` set, `endRowIndex` omitted), `A:A5` is column A *down to row 5*
+  (`endRowIndex` set, `startRowIndex` omitted) — a partial bound is never silently widened
+  to the whole column/row (which would clobber row 1 / column A on a write), and these
+  forms round-trip through `gridrange_to_a1` unchanged.
 - **Writes always use `ColorStyle`** (`rgbColor` / `themeColor`), never the deprecated
   flat `Color`. **Reads flatten to a hex string.** Channel rounding is `round(channel *
   255)`.

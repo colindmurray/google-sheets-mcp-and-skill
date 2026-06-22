@@ -486,6 +486,16 @@ def _parse_boolean_body(body: str) -> tuple[dict, dict]:
     return condition, fmt
 
 
+# BooleanCondition types whose terse line body is genuinely a comma-separated value LIST. Every
+# OTHER condition carries 0 or 1 value, so its parenthesized body is kept VERBATIM — a lone value
+# may itself contain a comma (``TEXT_EQ(Smith, John)``) and must not be shredded into bogus values.
+# This generalizes the original CUSTOM_FORMULA carve-out (whose formulas routinely contain commas,
+# e.g. ``=AND($A1<>"", $B1=$C1)``) to ALL single-value conditions (ISSUES.md #2 + comma-in-value).
+_MULTI_VALUE_CONDITIONS: frozenset[str] = frozenset(
+    {"NUMBER_BETWEEN", "NUMBER_NOT_BETWEEN", "ONE_OF_LIST"}
+)
+
+
 def _parse_condition(text: str) -> dict:
     """Parse ``COND_TYPE`` or ``COND_TYPE(arg,arg)`` into a structured condition dict."""
     if not text:
@@ -496,15 +506,14 @@ def _parse_condition(text: str) -> dict:
         inner = text[open_paren + 1 : -1]
         if not cond_type:
             raise SheetsError("bad_rule_line", f"condition missing type: {text!r}")
-        # CUSTOM_FORMULA has EXACTLY ONE value — its formula. That formula routinely contains
-        # commas (``=AND($A1<>"", $B1=$C1)``), so splitting on commas would shred it into bogus
-        # values; keep the whole parenthesized body as the single verbatim value (ISSUES.md #2).
-        if cond_type == "CUSTOM_FORMULA":
-            return {"type": cond_type, "values": [inner.strip()] if inner.strip() else []}
-        # Other conditions are genuinely comma-separated (NUMBER_BETWEEN, ONE_OF_LIST, …); args
-        # are verbatim (formulas keep their leading "=").
-        args = [a.strip() for a in inner.split(",")] if inner != "" else []
-        return {"type": cond_type, "values": args}
+        # Only genuinely multi-value conditions split on commas; args are verbatim (formulas keep
+        # their leading "=").
+        if cond_type in _MULTI_VALUE_CONDITIONS:
+            args = [a.strip() for a in inner.split(",")] if inner != "" else []
+            return {"type": cond_type, "values": args}
+        # Single-value (or formula) conditions: the WHOLE parenthesized body is ONE value — keep
+        # embedded commas intact rather than shredding them (TEXT_EQ, NUMBER_GREATER, CUSTOM_FORMULA, …).
+        return {"type": cond_type, "values": [inner.strip()] if inner.strip() else []}
     # No-arg condition (BLANK, NOT_BLANK, ...).
     return {"type": text, "values": []}
 

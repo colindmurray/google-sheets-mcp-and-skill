@@ -761,3 +761,18 @@ def test_ensure_fresh_persist_failure_is_non_fatal(monkeypatch, tmp_path):
     creds = r._ensure_fresh(_Creds(), persist_token=token_path)
     assert creds.valid is True
     assert r.last_persist_error(token_path) is not None
+
+
+def test_write_token_locks_file_to_owner_only(tmp_path):
+    # The refreshed token embeds a long-lived refresh_token + client_secret, so _write_token must
+    # chmod it 0o600 (parity with the bootstrap writer _persist_token) — a refresh-time rewrite
+    # can't leave it group/world-readable.
+    import stat as _stat
+
+    from gsheets.auth import resolver as _resolver
+
+    creds = _make_creds(to_json='{"token": "x", "refresh_token": "rt"}')
+    path = tmp_path / "sub" / "token.json"
+    _resolver._write_token(creds, path)
+    assert path.read_text() == '{"token": "x", "refresh_token": "rt"}'
+    assert _stat.S_IMODE(path.stat().st_mode) == 0o600

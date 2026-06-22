@@ -581,3 +581,39 @@ class TestDescribeDataFilters:
                 max_cells=2,
             )
         assert exc.value.code == "result_too_large"
+
+
+class TestDescribeSheetIndexCache:
+    """describe() opens its own re-entrant sheet_index_cache() scope, so resolving N ranges +
+    per-region merges + CF rules issues exactly ONE sheet-index get even when called DIRECTLY (no
+    adapter scope). Guards the N+1 regression where describe lacked the inner scope its siblings
+    (read_conditional_formats, structure) have."""
+
+    def test_multi_region_issues_one_sheet_index_get(self):
+        merges = [
+            {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
+             "startColumnIndex": 0, "endColumnIndex": 2},
+            {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2,
+             "startColumnIndex": 0, "endColumnIndex": 2},
+        ]
+        payload = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Cliff"},
+                    "merges": merges,
+                    "conditionalFormats": [_CF_A],
+                    "data": [
+                        _block(0, 0, [{"values": [_cell(value="x"), _cell(value="y")]}]),
+                        _block(1, 0, [{"values": [_cell(value="z")]}]),
+                    ],
+                }
+            ]
+        }
+        services, rec = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        describe(services, SHEET_ID, ["Cliff!A1:B2", "Cliff!A2:A100"])
+        index_gets = [
+            c for c in rec.calls if c.get("fields") == _GetRecorder._SHEET_INDEX_FIELDS
+        ]
+        assert len(index_gets) == 1
+        # the data read itself is the single multi-range get (not multiplied either).
+        assert len(rec.data_calls) == 1

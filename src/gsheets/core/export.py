@@ -21,7 +21,7 @@ The bytes are written to ``path`` (or ``f"{spreadsheet_id}.{ext}"`` in the cwd w
 the written length is reported back so a caller can verify the download.
 
 PURE core module: imports only stdlib (``io``, ``os``) + ``googleapiclient`` + sibling core
-modules (``errors``, ``format``, ``service``, ``values``). It must NEVER import ``fastmcp``, ``mcp``,
+modules (``errors``, ``format``, ``paths``, ``service``, ``values``). It must NEVER import ``fastmcp``, ``mcp``,
 ``argparse``, ``pydantic``, or ``gsheets.models`` (DESIGN §1 boundary). ``MediaIoBaseDownload``
 (from ``googleapiclient.http``) is imported LAZILY inside :func:`_export_via_drive` rather than at
 module top: ``googleapiclient.http`` transitively pulls in ``httplib2`` -> ``argparse``, which the
@@ -37,6 +37,7 @@ from googleapiclient.errors import HttpError
 
 from .errors import SheetsError, classify_google_error
 from .format import render_grid
+from .paths import resolve_out_path
 from .service import SheetsServices
 from .values import read_values
 
@@ -115,7 +116,12 @@ def export(
     """
     fmt = _normalize_format(format)
     ext = fmt
-    out_path = path if path is not None else f"{spreadsheet_id}.{ext}"
+    # Route the destination through the SAME path-safety gate as the read-side ``out_path`` valve
+    # (``paths.resolve_out_path``): resolve relative->cwd and HARD-REFUSE credential-shaped names
+    # and the ``~/.config/google-sheets-mcp`` / ``~/.secrets`` subtrees, so an export can never
+    # clobber the very token/secret files a read is forbidden to overwrite (SPEC §2.3). Done BEFORE
+    # the fetch so a bad destination fails fast without spending an API call.
+    out_path = resolve_out_path(path if path is not None else f"{spreadsheet_id}.{ext}")
 
     if fmt in _DRIVE_MIME:
         data = _export_via_drive(services, spreadsheet_id, fmt)

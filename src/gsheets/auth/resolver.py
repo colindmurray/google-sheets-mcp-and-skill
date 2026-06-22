@@ -244,12 +244,22 @@ def _classify_refresh_failure(exc: BaseException, token_path: Path) -> SheetsErr
 
 
 def _write_token(creds, path: Path) -> None:
-    """Persist an authorized-user credential's JSON to ``path`` (creating parent dirs)."""
+    """Persist an authorized-user credential's JSON to ``path`` (creating parent dirs).
+
+    The token embeds a long-lived refresh_token + client_secret, so the file is locked to owner
+    read/write (``0o600``) — mirroring the sibling bootstrap writer ``auth.__init__._persist_token``
+    so the two token writers can't drift on credential-at-rest hardening (best-effort: a platform
+    without chmod silently no-ops).
+    """
     to_json = getattr(creds, "to_json", None)
     if not callable(to_json):
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(to_json(), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:  # pragma: no cover - best-effort on platforms without chmod
+        pass
 
 
 # ---------------------------------------------------------------------------

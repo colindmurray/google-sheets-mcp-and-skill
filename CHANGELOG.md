@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.4.3] - 2026-06-22
+
+A correctness + hardening release from a deep review (P1–P3 findings). Headline is a security gap:
+`export` wrote to a caller-supplied path with none of the credential-clobber guards the read-side
+`out_path` valve enforces.
+
+### Security
+- **`export` now routes its destination through the same path-safety gate as the read-side
+  `out_path`** (`paths.resolve_out_path`). Previously `core.export()` (and therefore the
+  `sheets_export` MCP tool and `gsheets export --path`) wrote `open(path, "wb")` directly, so an
+  agent — or prompt-injected sheet content — could overwrite `~/.config/google-sheets-mcp/token.json`,
+  `~/.secrets/*`, `*token*.json`, `credentials.json`, `*.pem`, or `.env*` with spreadsheet bytes:
+  the exact targets the read path already refuses. The guard runs **before** the API fetch (fails
+  fast). `export`'s returned `path` is now the resolved absolute path.
+
+### Changed
+- **Half-open A1 ranges now map each endpoint independently, matching Google Sheets semantics.**
+  `A2:A` previously widened silently to the **whole column A** (clobbering row 1 on a
+  format/CF/clear/filter write); it now means *column A from row 2 down* (`startRowIndex` set,
+  `endRowIndex` open). Likewise `A:A5` is *down to row 5* and `A2:2` is *row 2 from column A right*.
+  These forms also round-trip through `gridrange_to_a1` faithfully instead of collapsing to a single
+  cell. This is a behavior change for callers that passed a partially-bounded range; fully-bounded
+  (`A2:A100`) and whole-axis (`A:A`, `2:2`) ranges are unaffected.
+
+### Fixed
+- **`describe` no longer issues an N+1 sheet-index fetch for direct library callers.** It now opens
+  its own re-entrant `sheet_index_cache()` scope (like `read_conditional_formats` and `structure`),
+  collapsing the per-range / per-merge / per-CF-rule sheetId↔title lookups to **one** get. The
+  shipped MCP/CLI paths were already covered by the adapter-level scope (v0.4.2); this closes the gap
+  for `gsheets.core.describe()` used directly as a library.
+- **Terse conditional-format / filter condition lines no longer shred a single value containing a
+  comma.** Only genuinely multi-value conditions (`NUMBER_BETWEEN`, `NUMBER_NOT_BETWEEN`,
+  `ONE_OF_LIST`) split on commas; every single-value condition (`TEXT_EQ`, `TEXT_CONTAINS`,
+  `NUMBER_GREATER`, …, `CUSTOM_FORMULA`) keeps its body verbatim, so `TEXT_EQ(Smith, John)`
+  round-trips as one value instead of two. Reuses the same parser as `filters` / `slicers`.
+- **The OAuth token refresh writer now `chmod`s the file to `0o600`**, mirroring the bootstrap
+  writer, so the two token writers can't drift on credential-at-rest hardening.
+
+### Added
+- **CLI `format` flag parity with the MCP `sheets_format` tool**: `--number-format-type`,
+  `--padding` (JSON), and `--text-rotation` (JSON) are now first-class flags. They were previously
+  reachable from the CLI only via the `--fmt-json` escape hatch.
+
 ## [0.4.2] - 2026-06-17
 
 The v0.4.1 performance fix, generalized. An audit of every core module found the same
@@ -391,7 +434,8 @@ shared code, with read-side richness as the thesis.
 - Error hints are generic by default and never leak the operator's account email unless
   an opt-in verbose mode is enabled.
 
-[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/colindmurray/google-sheets-mcp-and-skill/compare/v0.3.1...v0.4.0

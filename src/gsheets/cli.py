@@ -545,10 +545,32 @@ def _add_format(sub) -> None:
     p.add_argument("--font-size", dest="fontSize", type=int, default=None)
     p.add_argument("--font-family", dest="fontFamily", default=None)
     p.add_argument("--number", dest="numberFormat", default=None, help="number/date pattern")
+    p.add_argument(
+        "--number-format-type",
+        dest="numberFormatType",
+        default=None,
+        help="number format TYPE (NUMBER | CURRENCY | PERCENT | DATE | TIME | TEXT | SCIENTIFIC)",
+    )
     p.add_argument("--halign", default=None, help="LEFT | CENTER | RIGHT")
     p.add_argument("--valign", default=None, help="TOP | MIDDLE | BOTTOM")
     p.add_argument("--wrap", default=None, help="OVERFLOW_CELL | CLIP | WRAP")
     p.add_argument("--note", default=None, help="cell note text")
+    p.add_argument(
+        "--padding",
+        dest="padding",
+        type=_json_arg,
+        default=None,
+        metavar="JSON",
+        help='cell padding dict, e.g. \'{"top":2,"right":3,"bottom":2,"left":3}\'',
+    )
+    p.add_argument(
+        "--text-rotation",
+        dest="textRotation",
+        type=_json_arg,
+        default=None,
+        metavar="JSON",
+        help='text rotation dict, e.g. \'{"angle":45}\' or \'{"vertical":true}\'',
+    )
     p.add_argument(
         "--border",
         action="append",
@@ -950,6 +972,7 @@ _FORMAT_SCALAR_DESTS = (
     "fontSize",
     "fontFamily",
     "numberFormat",
+    "numberFormatType",
     "halign",
     "valign",
     "wrap",
@@ -990,6 +1013,12 @@ def _cmd_format(services, args) -> dict:
         borders = _parse_border_flags(args.border)
         if borders is not None:
             fmt["borders"] = borders
+        # padding / textRotation are structured atomic leaves (not flat scalars), so they come in
+        # as already-parsed JSON dicts ({top,right,bottom,left} / {angle}|{vertical}).
+        if getattr(args, "padding", None) is not None:
+            fmt["padding"] = args.padding
+        if getattr(args, "textRotation", None) is not None:
+            fmt["textRotation"] = args.textRotation
     return core.format(services, args.spreadsheet_id, args.range, fmt)
 
 

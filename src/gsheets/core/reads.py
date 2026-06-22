@@ -1076,58 +1076,65 @@ def describe(
             "bad_max_cells", f"max_cells must be a positive integer, got {max_cells!r}"
         )
 
-    # Resolve each requested range to a GridRange up front (validates A1 BEFORE any data get, and
-    # gives the (sheetId, start row/col) key that maps response blocks back to ranges). The
-    # data-filter path has no A1 ranges to pre-validate (the selectors resolve server-side).
-    resolved = (
-        [a1_to_gridrange(services, spreadsheet_id, r) for r in ranges]
-        if not data_filters
-        else []
-    )
+    # Every A1<->GridRange conversion below (the up-front `resolved`, each region's label, and the
+    # per-merge / per-CF-rule / per-structure conversions inside `_build_region`) resolves
+    # sheetId<->title via `_sheet_index`. Cache it for the WHOLE operation so a multi-region read
+    # does ONE sheet-index get, not one per range/merge/rule — mirroring read_conditional_formats
+    # and structure. The scope is re-entrant, so it's a free no-op when the adapter already opened
+    # one around dispatch; it closes the N+1 only for DIRECT gsheets.core.describe() callers.
+    with sheet_index_cache():
+        # Resolve each requested range to a GridRange up front (validates A1 BEFORE any data get,
+        # and gives the (sheetId, start row/col) key that maps response blocks back to ranges). The
+        # data-filter path has no A1 ranges to pre-validate (the selectors resolve server-side).
+        resolved = (
+            [a1_to_gridrange(services, spreadsheet_id, r) for r in ranges]
+            if not data_filters
+            else []
+        )
 
-    if data_filters:
-        resp = _describe_get_by_data_filter(services, spreadsheet_id, data_filters)
-    else:
-        resp = _describe_get_by_ranges(services, spreadsheet_id, ranges)
+        if data_filters:
+            resp = _describe_get_by_data_filter(services, spreadsheet_id, data_filters)
+        else:
+            resp = _describe_get_by_ranges(services, spreadsheet_id, ranges)
 
-    # Index the response sheets by sheetId; within each sheet, walk its data blocks in order so a
-    # repeated (sheetId, startRow, startColumn) key consumes successive blocks (two requests for the
-    # same anchor each get their own block).
-    sheets_by_id: dict[object, dict] = {}
-    block_cursor: dict[object, int] = {}
-    for sheet_obj in resp.get("sheets") or []:
-        sheet_obj = sheet_obj or {}
-        sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
-        sheets_by_id[sid] = sheet_obj
-        block_cursor[sid] = 0
-
-    regions: list[dict] = []
-    total_cells = 0
-
-    if data_filters:
-        # With data filters the literal A1 / sheetId per region is not known up front (a
-        # developerMetadataLookup resolves only server-side), so walk the response sheets in order,
-        # deriving each region's effective GridRange (and A1 label) from the returned block itself.
+        # Index the response sheets by sheetId; within each sheet, walk its data blocks in order so
+        # a repeated (sheetId, startRow, startColumn) key consumes successive blocks (two requests
+        # for the same anchor each get their own block).
+        sheets_by_id: dict[object, dict] = {}
+        block_cursor: dict[object, int] = {}
         for sheet_obj in resp.get("sheets") or []:
             sheet_obj = sheet_obj or {}
             sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
-            for block in sheet_obj.get("data") or []:
-                block = block or {}
-                gr = _gridrange_from_block(sid, block)
-                a1 = gridrange_to_a1(services, spreadsheet_id, gr)
-                region = _build_region(
-                    services, spreadsheet_id, a1, gr, sheet_obj, block
-                )
+            sheets_by_id[sid] = sheet_obj
+            block_cursor[sid] = 0
+
+        regions: list[dict] = []
+        total_cells = 0
+
+        if data_filters:
+            # With data filters the literal A1 / sheetId per region is not known up front (a
+            # developerMetadataLookup resolves only server-side), so walk the response sheets in
+            # order, deriving each region's effective GridRange (and A1 label) from the block.
+            for sheet_obj in resp.get("sheets") or []:
+                sheet_obj = sheet_obj or {}
+                sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
+                for block in sheet_obj.get("data") or []:
+                    block = block or {}
+                    gr = _gridrange_from_block(sid, block)
+                    a1 = gridrange_to_a1(services, spreadsheet_id, gr)
+                    region = _build_region(
+                        services, spreadsheet_id, a1, gr, sheet_obj, block
+                    )
+                    total_cells += _region_cell_count(region)
+                    regions.append(region)
+        else:
+            for a1, gr in zip(ranges, resolved):
+                sid = gr.get("sheetId")
+                sheet_obj = sheets_by_id.get(sid) or {}
+                block = _match_block(sheet_obj, gr, block_cursor, sid)
+                region = _build_region(services, spreadsheet_id, a1, gr, sheet_obj, block)
                 total_cells += _region_cell_count(region)
                 regions.append(region)
-    else:
-        for a1, gr in zip(ranges, resolved):
-            sid = gr.get("sheetId")
-            sheet_obj = sheets_by_id.get(sid) or {}
-            block = _match_block(sheet_obj, gr, block_cursor, sid)
-            region = _build_region(services, spreadsheet_id, a1, gr, sheet_obj, block)
-            total_cells += _region_cell_count(region)
-            regions.append(region)
 
     if max_cells is not None and total_cells > max_cells:
         raise SheetsError(

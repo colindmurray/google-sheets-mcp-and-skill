@@ -158,21 +158,33 @@ def a1_to_gridrange(services: SheetsServices, spreadsheet_id: str, a1: str) -> d
     start_col, start_row = _split_cell(start, a1)
     end_col, end_row = _split_cell(end, a1)
 
-    # Rows: present only when BOTH endpoints carry a row number. A whole-column range
-    # ("A:A" / "A2:A") omits row indices entirely (unbounded over rows).
+    # Rows: map each endpoint's row INDEPENDENTLY, matching Google A1 semantics for half-open
+    # ranges. "A2:A" = column A from row 2 DOWN (startRowIndex set, endRowIndex open); "A:A5" =
+    # top down to row 5 (endRowIndex set, startRowIndex open); "A:A" (neither endpoint carries a
+    # row) = unbounded over rows. Only when BOTH endpoints carry a row do we sort, so a reversed
+    # range ("D5:A1") normalizes. (Previously a partial bound was dropped entirely, silently
+    # widening "A2:A" to the whole column and clobbering row 1 — ISSUES.md.)
     if start_row is not None and end_row is not None:
         lo, hi = sorted((start_row, end_row))
         gr["startRowIndex"] = lo - 1
         gr["endRowIndex"] = hi
+    elif start_row is not None:
+        gr["startRowIndex"] = start_row - 1
+    elif end_row is not None:
+        gr["endRowIndex"] = end_row
 
-    # Columns: present only when BOTH endpoints carry a column. A whole-row range
-    # ("2:2" / "A2:2") omits column indices entirely (unbounded over columns).
+    # Columns: the symmetric rule. "A2:C" bounds the left column and leaves the right open;
+    # "2:2" / "A2:2" leave columns unbounded. Sort only when BOTH endpoints carry a column.
     if start_col is not None and end_col is not None:
         s = _col_to_index(start_col)
         e = _col_to_index(end_col)
         lo, hi = sorted((s, e))
         gr["startColumnIndex"] = lo
         gr["endColumnIndex"] = hi + 1
+    elif start_col is not None:
+        gr["startColumnIndex"] = _col_to_index(start_col)
+    elif end_col is not None:
+        gr["endColumnIndex"] = _col_to_index(end_col) + 1
 
     return gr
 
@@ -223,19 +235,22 @@ def gridrange_to_a1(services: SheetsServices, spreadsheet_id: str, gr: dict) -> 
         hi = end_row if end_row is not None else lo
         a1 = f"{lo}:{hi}" if hi != lo else f"{lo}:{lo}"
     else:
-        # Bounded rectangle (or single cell).
+        # Bounded rectangle, single cell, OR a half-open range (one row/col bound unbounded).
+        # Each endpoint renders only its bounded parts; an absent row/col bound leaves that part
+        # empty so a half-open range round-trips faithfully ("A2:A" = col A from row 2 down;
+        # "A:A5" = col A down to row 5; "A2:2" = row 2 from col A rightward).
         start_row = gr.get("startRowIndex")
         end_row = gr.get("endRowIndex")
         start_col = gr.get("startColumnIndex")
         end_col = gr.get("endColumnIndex")
 
-        lo_row = (start_row + 1) if start_row is not None else 1
-        hi_row = end_row if end_row is not None else lo_row
-        lo_col = start_col if start_col is not None else 0
-        hi_col = (end_col - 1) if end_col is not None else lo_col
+        start_col_part = _index_to_col(start_col) if start_col is not None else ""
+        start_row_part = f"{start_row + 1}" if start_row is not None else ""
+        end_col_part = _index_to_col(end_col - 1) if end_col is not None else ""
+        end_row_part = f"{end_row}" if end_row is not None else ""
 
-        start_a1 = f"{_index_to_col(lo_col)}{lo_row}"
-        end_a1 = f"{_index_to_col(hi_col)}{hi_row}"
+        start_a1 = f"{start_col_part}{start_row_part}"
+        end_a1 = f"{end_col_part}{end_row_part}"
         a1 = start_a1 if start_a1 == end_a1 else f"{start_a1}:{end_a1}"
 
     return f"{prefix}!{a1}"

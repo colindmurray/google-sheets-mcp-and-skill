@@ -635,6 +635,31 @@ def test_format_border_flag_parsed(patched):
     assert fmt["borders"] == {"top": "SOLID #000000"}
 
 
+def test_format_number_type_padding_rotation_flags_parsed(patched):
+    # CLI parity with MCP sheets_format: numberFormatType / padding / textRotation are now
+    # first-class flags (padding/textRotation accept JSON for their structured leaves).
+    _run(
+        [
+            "format",
+            "ID",
+            "S!A1",
+            "--number",
+            "0.00",
+            "--number-format-type",
+            "CURRENCY",
+            "--padding",
+            '{"top":2,"left":3}',
+            "--text-rotation",
+            '{"angle":45}',
+        ]
+    )
+    fmt = patched["args"][1]
+    assert fmt["numberFormat"] == "0.00"
+    assert fmt["numberFormatType"] == "CURRENCY"
+    assert fmt["padding"] == {"top": 2, "left": 3}
+    assert fmt["textRotation"] == {"angle": 45}
+
+
 def test_set_conditional_format_rule_line_passthrough(patched):
     _run(
         [

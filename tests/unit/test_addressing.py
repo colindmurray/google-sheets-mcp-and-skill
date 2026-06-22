@@ -241,10 +241,48 @@ class TestA1ToGridRange:
         assert gr == {"sheetId": 0}
 
     def test_partial_column_bound_row_unbound(self):
-        # "A2:A" — column A, from row 2 down with no end row -> rows unbounded.
+        # "A2:A" — column A, from row 2 DOWN: startRowIndex set (row 2), endRowIndex OPEN. Must NOT
+        # widen to the whole column (which would silently include row 1). Matches Sheets semantics.
         services, _ = _make_services()
         gr = a1_to_gridrange(services, "SID", "Cliff!A2:A")
-        assert gr == {"sheetId": 0, "startColumnIndex": 0, "endColumnIndex": 1}
+        assert gr == {
+            "sheetId": 0,
+            "startRowIndex": 1,
+            "startColumnIndex": 0,
+            "endColumnIndex": 1,
+        }
+        # "endRowIndex" stays OPEN (range runs to the bottom of the sheet).
+        assert "endRowIndex" not in gr
+
+    def test_partial_column_bound_top_unbound(self):
+        # "A:A5" — column A from the TOP down to row 5: endRowIndex set, startRowIndex open.
+        services, _ = _make_services()
+        gr = a1_to_gridrange(services, "SID", "Cliff!A:A5")
+        assert gr == {
+            "sheetId": 0,
+            "endRowIndex": 5,
+            "startColumnIndex": 0,
+            "endColumnIndex": 1,
+        }
+        assert "startRowIndex" not in gr
+
+    def test_partial_row_bound_right_col_unbound(self):
+        # "A2:C" — from A2 to the bottom of column C: rows open below row 2, cols A..C bounded.
+        services, _ = _make_services()
+        gr = a1_to_gridrange(services, "SID", "Cliff!A2:C")
+        assert gr == {
+            "sheetId": 0,
+            "startRowIndex": 1,
+            "startColumnIndex": 0,
+            "endColumnIndex": 3,
+        }
+
+    def test_partial_ranges_round_trip(self):
+        # The half-open forms must render back to themselves, not collapse to a single cell.
+        services, _ = _make_services()
+        for a1 in ("Cliff!A2:A", "Cliff!A:A5", "Cliff!A2:C", "Cliff!A2:2"):
+            gr = a1_to_gridrange(services, "SID", a1)
+            assert gridrange_to_a1(services, "SID", gr) == a1, a1
 
     def test_two_letter_column_index(self):
         services, _ = _make_services()
@@ -380,11 +418,12 @@ class TestGridRangeToA1:
         assert ei.value.code == "bad_range"
 
     def test_open_ended_indices_default(self):
-        # startRowIndex present, endRowIndex omitted -> single-row span anchored at start.
+        # startRowIndex present, endRowIndex omitted -> OPEN-ended below (Google semantics): the
+        # range runs from row 5 to the bottom of column A, rendered faithfully as "A5:A" (NOT
+        # collapsed to the single cell "A5", which would misrepresent an unbounded range).
         services, _ = _make_services()
         gr = {"sheetId": 0, "startColumnIndex": 0, "endColumnIndex": 1, "startRowIndex": 4}
-        # rows present (start only) -> end defaults to start row.
-        assert gridrange_to_a1(services, "SID", gr) == "Cliff!A5"
+        assert gridrange_to_a1(services, "SID", gr) == "Cliff!A5:A"
 
 
 # --------------------------------------------------------------------------------------

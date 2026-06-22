@@ -181,7 +181,8 @@ class TestDriveExports:
         services = _make_service()
         out = export(services, SHEET_ID, format="ods")
         expected = f"{SHEET_ID}.ods"
-        assert out["path"] == expected
+        # path is resolved to ABSOLUTE (it now routes through paths.resolve_out_path).
+        assert out["path"] == str((tmp_path / expected).resolve())
         assert (tmp_path / expected).read_bytes() == payload
 
     def test_sheet_arg_ignored_for_whole_workbook(self, tmp_path, monkeypatch):
@@ -350,7 +351,8 @@ class TestTextExports:
         monkeypatch.chdir(tmp_path)
         services = _make_service()
         out = export(services, SHEET_ID, format="csv", sheet="S")
-        assert out["path"] == f"{SHEET_ID}.csv"
+        # path is resolved to ABSOLUTE (it now routes through paths.resolve_out_path).
+        assert out["path"] == str((tmp_path / f"{SHEET_ID}.csv").resolve())
         assert (tmp_path / f"{SHEET_ID}.csv").read_bytes() == b"a,b\r\n"
 
     def test_empty_sheet_writes_empty_file(self, tmp_path, monkeypatch):
@@ -454,3 +456,47 @@ class TestPurity:
         for name in src.values():
             mod = getattr(name, "__module__", "")
             assert not any(mod.startswith(f) for f in forbidden if isinstance(mod, str))
+
+
+class TestExportPathSafety:
+    """export() must refuse credential/secret destinations EXACTLY like the read-side out_path
+    valve (paths.resolve_out_path) — an export can never clobber a token/secret/.env file. The
+    guard fires BEFORE any API fetch (resolve_out_path runs first), so these need no read patch.
+    """
+
+    @pytest.mark.parametrize(
+        "bad_name",
+        [
+            "token.json",
+            "credentials.json",
+            "service-account.json",
+            "key.pem",
+            ".env",
+            ".env.local",
+        ],
+    )
+    def test_refuses_credential_basename(self, tmp_path, bad_name):
+        services = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            export(services, SHEET_ID, format="csv", path=str(tmp_path / bad_name), sheet="S")
+        assert ei.value.code == "bad_out_path"
+
+    def test_refuses_secrets_subtree(self, tmp_path, monkeypatch):
+        # Anything under ~/.secrets is hard-refused regardless of basename.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        secrets = tmp_path / ".secrets"
+        secrets.mkdir()
+        services = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            export(services, SHEET_ID, format="csv", path=str(secrets / "dump.csv"), sheet="S")
+        assert ei.value.code == "bad_out_path"
+
+    def test_refuses_config_subtree(self, tmp_path, monkeypatch):
+        # The app's own ~/.config/google-sheets-mcp/ (where the token lives) is never writable.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cfg = tmp_path / ".config" / "google-sheets-mcp"
+        cfg.mkdir(parents=True)
+        services = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            export(services, SHEET_ID, format="pdf", path=str(cfg / "out.pdf"))
+        assert ei.value.code == "bad_out_path"
