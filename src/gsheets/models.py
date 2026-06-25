@@ -1553,6 +1553,8 @@ class DimensionsParams(TypedDict, total=False):
     pixelSize: int
     hiddenByUser: bool
     range: str
+    sizes: bool  # read: also return rowHeights/colWidths pixel-size runs
+    runs: list[dict]  # set_props bulk: many spans in one batchUpdate (mutually exclusive w/ single-span keys)
 
 
 __all__ = [
