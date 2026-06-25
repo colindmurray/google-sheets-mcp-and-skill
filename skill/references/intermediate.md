@@ -382,12 +382,12 @@ The result echoes an action-specific summary from the API reply: `find_replace` 
 `trim_whitespace` → `cellsChangedCount`, geometry verbs echo what they changed. Read the range first
 on the destructive verbs.
 
-### `dimensions` — row & column ops
+### `dimensions` — row & column ops + the sizing toolkit
 
-Insert / delete / move / append rows or columns, auto-fit, set pixel size / hidden, and `read` which
-rows/cols are hidden. **`--action` and `--sheet` are both Required** (every action targets one tab).
-Spans are 0-based half-open (`start` inclusive, `end` exclusive). Unknown `params` key →
-`unknown_param`.
+Insert / delete / move / append rows or columns, plus a complete **row/column sizing toolkit**:
+read current pixel sizes, set fixed sizes (one span or many at once), auto-fit to content, and
+hide/unhide. **`--action` and `--sheet` are both Required** (every action targets one tab). Spans
+are 0-based half-open (`start` inclusive, `end` exclusive). Unknown `params` key → `unknown_param`.
 
 | `--action` | What it does | `--params-json` keys |
 |---|---|---|
@@ -395,18 +395,56 @@ Spans are 0-based half-open (`start` inclusive, `end` exclusive). Unknown `param
 | `delete` | Delete rows/columns | `{"dimension", "start", "end"}` (**Destructive**) |
 | `move` | Move a band | `{"dimension", "start", "end", "destinationIndex": int}` |
 | `append` | Append at the end | `{"dimension", "length": int}` |
-| `auto_resize` | Auto-fit to content | `{"dimension", "start"?: int, "end"?: int}` (omit span ⇒ whole sheet) |
-| `set_props` | Set pixel size / hide | `{"dimension", "start", "end", "pixelSize"?: int, "hiddenByUser"?: bool}` |
+| `auto_resize` | Auto-FIT to content | `{"dimension", "start"?: int, "end"?: int}` (omit span ⇒ whole sheet) |
+| `set_props` | Set FIXED size / hide — one span | `{"dimension", "start", "end", "pixelSize"?: int, "hiddenByUser"?: bool}` |
+| `set_props` | Set FIXED size / hide — MANY spans | `{"runs": [{"dimension", "start", "end", "pixelSize"?, "hiddenByUser"?}, …]}` (runs may mix ROWS+COLUMNS; mutually exclusive with the single-span keys) |
 | `read` | Report hidden rows/cols | `{"range"?: A1}` (omit ⇒ whole sheet) → `{"hiddenRows":[…], "hiddenCols":[…]}` |
+| `read` | Report hidden **+ pixel sizes** | `{"range"?: A1, "sizes": true}` → adds `rowHeights`/`colWidths` as coalesced `{start, end, pixelSize}` runs |
+
+**Fixed vs. auto-fit — the size mode you choose.** There are two kinds of row/column size:
+
+- **Fixed / forced** — `set_props {"pixelSize": N}` PINS the size; the row/col will NOT grow to
+  fit content (the equivalent of Apps Script's `setRowHeightsForced`). This is "auto-resize OFF".
+  Use it for a stable layout that ignores content height.
+- **Auto-fit** — `auto_resize` sizes the row/col to its content. This is "auto-resize ON". Use it
+  to fit-to-content / turn auto-resize back on after a fixed size.
+
+So the toggle is: `set_props {"pixelSize": N}` = fixed; `auto_resize` = auto-fit.
+
+**Reading sizes** — `read {"sizes": true}` widens the (still grid-data-free) metadata mask to pull
+`pixelSize` and returns `rowHeights`/`colWidths`: lists of coalesced runs, each
+`{"start": <abs 0-based>, "end": <abs 0-based, half-open>, "pixelSize": <int>}` (a uniform 60-row
+block collapses to one run). **API limitation:** Google exposes only `pixelSize`/`hiddenByUser` per
+dimension, so `read` reports the current pixel size but CANNOT tell you whether a row/col is in
+fixed vs auto-fit mode.
+
+**Bulk write** — pass `set_props {"runs": [...]}` to set many spans in one `batchUpdate` (one
+`updateDimensionProperties` per run); runs may freely mix ROWS and COLUMNS. This is what makes
+laying a sheet out from scratch ergonomic. Returns `{"runs": [...echoed with appliedFields...],
+"count": N}`.
 
 ```sh
+# Insert rows (shifts everything below — re-read cached A1 refs afterward).
 gsheets dimensions <YOUR_SPREADSHEET_ID> --action insert --sheet Sheet1 \
   --params-json '{"dimension":"ROWS","start":5,"end":8}'
+
+# From-scratch layout in ONE call: three column widths + a pinned header row.
 gsheets dimensions <YOUR_SPREADSHEET_ID> --action set_props --sheet Sheet1 \
-  --params-json '{"dimension":"COLUMNS","start":2,"end":5,"hiddenByUser":true}'
+  --params-json '{"runs":[
+    {"dimension":"COLUMNS","start":0,"end":1,"pixelSize":220},
+    {"dimension":"COLUMNS","start":1,"end":3,"pixelSize":100},
+    {"dimension":"ROWS","start":0,"end":1,"pixelSize":40}
+  ]}'
+
+# Auto-FIT the body rows to their content (the counterpart to the pinned header above).
 gsheets dimensions <YOUR_SPREADSHEET_ID> --action auto_resize --sheet Sheet1 \
-  --params-json '{"dimension":"COLUMNS"}'
-gsheets dimensions <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1
+  --params-json '{"dimension":"ROWS","start":1,"end":200}'
+
+# Hide a column, then read back hidden state AND pixel sizes.
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action set_props --sheet Sheet1 \
+  --params-json '{"dimension":"COLUMNS","start":4,"end":5,"hiddenByUser":true}'
+gsheets dimensions <YOUR_SPREADSHEET_ID> --action read --sheet Sheet1 \
+  --params-json '{"sizes":true}'
 ```
 
 `insert`/`append`/`move` shift the rows/cols below them — re-read any A1 references you cached

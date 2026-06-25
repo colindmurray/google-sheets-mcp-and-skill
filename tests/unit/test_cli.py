@@ -869,6 +869,73 @@ def test_dimensions_read_renders_hidden(patched, monkeypatch, capsys):
     assert "cols: (none)" in out
 
 
+def test_dimensions_read_renders_sizes(patched, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli.core,
+        "dimensions",
+        lambda services, sid, *, action, sheet=None, params=None: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "action": "read",
+            "sheet": sheet,
+            "hiddenRows": [],
+            "hiddenCols": [],
+            "rowHeights": [
+                {"start": 2, "end": 64, "pixelSize": 21},
+                {"start": 64, "end": 65, "pixelSize": 40},
+            ],
+            "colWidths": [{"start": 1, "end": 3, "pixelSize": 100}],
+        },
+    )
+    rc = _run(
+        ["dimensions", "ID", "--action", "read", "--sheet", "S", "--params-json", '{"sizes":true}']
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "sizes (S):" in out
+    assert "rows: 2-64=21px, 64-65=40px" in out
+    assert "cols: 1-3=100px" in out
+
+
+def test_dimensions_bulk_set_props_render(patched, monkeypatch, capsys):
+    """A bulk set_props result (top-level ``runs`` + ``action``) must render as an action summary,
+    NOT be mistaken for an inspect view (which also keys on ``runs``)."""
+    monkeypatch.setattr(
+        cli.core,
+        "dimensions",
+        lambda services, sid, *, action, sheet=None, params=None: {
+            "ok": True,
+            "spreadsheetId": sid,
+            "action": "set_props",
+            "sheet": sheet,
+            "runs": [
+                {"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40, "appliedFields": "pixelSize"},
+                {"dimension": "COLUMNS", "start": 1, "end": 4, "pixelSize": 120, "appliedFields": "pixelSize"},
+            ],
+            "count": 2,
+        },
+    )
+    rc = _run(
+        [
+            "dimensions",
+            "ID",
+            "--action",
+            "set_props",
+            "--sheet",
+            "S",
+            "--params-json",
+            '{"runs":[{"dimension":"ROWS","start":0,"end":1,"pixelSize":40}]}',
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "set_props:" in out
+    assert "count=2" in out
+    assert "sheet=S" in out
+    # Must NOT have fallen into the inspect renderer ("NonexNone" rows/cols header).
+    assert "None" not in out
+
+
 def test_dimensions_write_summary_render(patched, capsys):
     rc = _run(["dimensions", "ID", "--action", "insert", "--sheet", "S", "--params-json", '{"dimension":"ROWS","start":10,"end":12}'])
     assert rc == 0

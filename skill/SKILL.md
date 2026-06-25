@@ -142,8 +142,10 @@ Change (writes):
   range-level data operations in one batch request each (find/replace, dedupe, trim, sort,
   split-to-columns, autofill, copy/cut-paste). Mirrors `structure`'s `--params-json` shape.
 - `dimensions <ID> --action {insert,delete,move,append,auto_resize,set_props,read}` — row/column
-  operations: insert/delete/move/append rows or columns, auto-fit, set height/width/hidden, and
-  `read` the hidden rows/cols a viewer doesn't see. Every action targets one tab (`--sheet`).
+  operations + a full sizing toolkit: insert/delete/move/append rows or columns; `auto_resize`
+  (auto-FIT to content) vs `set_props {"pixelSize"}` (FIXED/forced size — won't auto-grow);
+  `set_props {"runs":[…]}` to set many sizes (rows+cols) in one call; set/clear hidden; and `read`
+  hidden rows/cols (add `{"sizes":true}` for `rowHeights`/`colWidths` pixel runs). One tab (`--sheet`).
 - `manage-sheets <ID> --action {add,delete,duplicate,rename,reorder}` — manage tabs.
 - `metadata <ID> --action {read,create,update,delete}` — developer metadata (durable anchors).
 - `charts <ID> --action {create,update,delete,read}` — embedded charts (read = metadata only).

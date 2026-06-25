@@ -883,6 +883,476 @@ class TestRead:
         assert exc.value.status == 404
 
 
+# =========================================================================== read (sizes)
+
+#: The extended read mask used when ``sizes`` is requested (pixelSize alongside hiddenByUser).
+_SIZES_MASK = (
+    "sheets(properties(sheetId,title),"
+    "data(rowMetadata(hiddenByUser,pixelSize),"
+    "columnMetadata(hiddenByUser,pixelSize),startRow,startColumn))"
+)
+
+
+class TestReadSizes:
+    def test_sizes_uses_extended_mask_with_pixel_size(self):
+        """read {sizes:true} must request pixelSize in the metadata mask (not the hidden-only one)."""
+        services, get_rec, _ = _make_service(metadata_responses=[{"sheets": []}])
+        dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="read",
+            sheet="Sheet1",
+            params={"sizes": True},
+        )
+        call = get_rec.metadata_calls[0]
+        assert call["fields"] == _SIZES_MASK
+        assert "pixelSize" in call["fields"]
+        assert "includeGridData" not in call
+
+    def test_sizes_coalesces_runs_with_absolute_half_open_ends(self):
+        """Golden master: rowMetadata sizes [21,21,21,40,40] at startRow=1 -> two coalesced runs.
+
+        Proves coalescing (same consecutive pixelSize folds into one run), absolute indexing
+        (block startRow applied), and the HALF-OPEN end (run covering rows 1..3 ends at 4).
+        """
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 1,
+                            "startColumn": 0,
+                            "rowMetadata": [
+                                {"pixelSize": 21},  # abs row 1
+                                {"pixelSize": 21},  # abs row 2
+                                {"pixelSize": 21},  # abs row 3
+                                {"pixelSize": 40},  # abs row 4
+                                {"pixelSize": 40},  # abs row 5
+                            ],
+                            "columnMetadata": [
+                                {"pixelSize": 100},  # abs col 0
+                                {"pixelSize": 100},  # abs col 1
+                                {"pixelSize": 220},  # abs col 2
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="read",
+            sheet="Sheet1",
+            params={"sizes": True},
+        )
+        assert out["rowHeights"] == [
+            {"start": 1, "end": 4, "pixelSize": 21},
+            {"start": 4, "end": 6, "pixelSize": 40},
+        ]
+        assert out["colWidths"] == [
+            {"start": 0, "end": 2, "pixelSize": 100},
+            {"start": 2, "end": 3, "pixelSize": 220},
+        ]
+
+    def test_sizes_absent_is_unchanged_no_size_keys(self):
+        """Regression guard: read with no ``sizes`` uses the original hidden-only mask and adds
+        NO rowHeights/colWidths keys to the result."""
+        services, get_rec, _ = _make_service(metadata_responses=[{"sheets": []}])
+        out = dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
+        assert get_rec.metadata_calls[0]["fields"] == (
+            "sheets(properties(sheetId,title),"
+            "data(rowMetadata.hiddenByUser,columnMetadata.hiddenByUser,startRow,startColumn))"
+        )
+        assert "rowHeights" not in out
+        assert "colWidths" not in out
+
+    def test_sizes_still_returns_hidden_alongside(self):
+        """read {sizes:true} keeps reporting hiddenRows/hiddenCols next to the size runs."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 0,
+                            "startColumn": 0,
+                            "rowMetadata": [
+                                {"pixelSize": 21},
+                                {"pixelSize": 21, "hiddenByUser": True},  # hidden row 1
+                            ],
+                            "columnMetadata": [
+                                {"pixelSize": 100, "hiddenByUser": True},  # hidden col 0
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="read",
+            sheet="Sheet1",
+            params={"sizes": True},
+        )
+        assert out["hiddenRows"] == [1]
+        assert out["hiddenCols"] == [0]
+        assert out["rowHeights"] == [{"start": 0, "end": 2, "pixelSize": 21}]
+        assert out["colWidths"] == [{"start": 0, "end": 1, "pixelSize": 100}]
+
+    def test_sizes_none_pixel_breaks_the_run(self):
+        """A None/absent pixelSize must break a run (defensive; not folded into a neighbour)."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 0,
+                            "rowMetadata": [
+                                {"pixelSize": 30},  # abs row 0
+                                {},                 # no pixelSize -> gap
+                                {"pixelSize": 30},  # abs row 2
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="read",
+            sheet="Sheet1",
+            params={"sizes": True},
+        )
+        # The gap at row 1 splits row 0 and row 2 into two separate single-row runs.
+        assert out["rowHeights"] == [
+            {"start": 0, "end": 1, "pixelSize": 30},
+            {"start": 2, "end": 3, "pixelSize": 30},
+        ]
+
+    def test_sizes_empty_when_no_metadata(self):
+        """No size metadata at all -> empty run lists (not missing keys)."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [{"rowMetadata": [], "columnMetadata": []}],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="read",
+            sheet="Sheet1",
+            params={"sizes": True},
+        )
+        assert out["rowHeights"] == []
+        assert out["colWidths"] == []
+
+
+# =========================================================================== set_props (bulk runs)
+
+
+class TestSetPropsBulk:
+    def test_bulk_mixes_rows_and_cols_in_one_batch(self):
+        """runs (a ROWS run + a COLUMNS run) -> ONE batchUpdate with N updateDimensionProperties."""
+        services, _, batch_rec = _make_service()
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="set_props",
+            sheet="Sheet1",
+            params={
+                "runs": [
+                    {"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40},
+                    {"dimension": "COLUMNS", "start": 1, "end": 4, "pixelSize": 120},
+                ]
+            },
+        )
+        requests = _batch_body(batch_rec)["requests"]
+        assert len(requests) == 2
+        assert requests[0] == {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": 0,
+                    "dimension": "ROWS",
+                    "startIndex": 0,
+                    "endIndex": 1,
+                },
+                "properties": {"pixelSize": 40},
+                "fields": "pixelSize",
+            }
+        }
+        assert requests[1] == {
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": 0,
+                    "dimension": "COLUMNS",
+                    "startIndex": 1,
+                    "endIndex": 4,
+                },
+                "properties": {"pixelSize": 120},
+                "fields": "pixelSize",
+            }
+        }
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SPREADSHEET_ID,
+            "action": "set_props",
+            "sheet": "Sheet1",
+            "runs": [
+                {
+                    "dimension": "ROWS",
+                    "start": 0,
+                    "end": 1,
+                    "pixelSize": 40,
+                    "appliedFields": "pixelSize",
+                },
+                {
+                    "dimension": "COLUMNS",
+                    "start": 1,
+                    "end": 4,
+                    "pixelSize": 120,
+                    "appliedFields": "pixelSize",
+                },
+            ],
+            "count": 2,
+        }
+
+    def test_bulk_run_with_hidden_only(self):
+        """A run may carry hiddenByUser only (no pixelSize) — the mask reflects just that field."""
+        services, _, batch_rec = _make_service()
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="set_props",
+            sheet="Sheet1",
+            params={"runs": [{"dimension": "ROWS", "start": 2, "end": 5, "hiddenByUser": True}]},
+        )
+        req = _batch_body(batch_rec)["requests"][0]["updateDimensionProperties"]
+        assert req["properties"] == {"hiddenByUser": True}
+        assert req["fields"] == "hiddenByUser"
+        assert out["runs"][0] == {
+            "dimension": "ROWS",
+            "start": 2,
+            "end": 5,
+            "hiddenByUser": True,
+            "appliedFields": "hiddenByUser",
+        }
+        assert out["count"] == 1
+
+    def test_bulk_run_with_both_fields(self):
+        """A run carrying pixelSize AND hiddenByUser masks both, in payload order."""
+        services, _, batch_rec = _make_service()
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="set_props",
+            sheet="Sheet1",
+            params={
+                "runs": [
+                    {
+                        "dimension": "ROWS",
+                        "start": 0,
+                        "end": 1,
+                        "pixelSize": 30,
+                        "hiddenByUser": False,
+                    }
+                ]
+            },
+        )
+        req = _batch_body(batch_rec)["requests"][0]["updateDimensionProperties"]
+        assert req["properties"] == {"pixelSize": 30, "hiddenByUser": False}
+        assert req["fields"] == "pixelSize,hiddenByUser"
+        assert out["runs"][0]["pixelSize"] == 30
+        assert out["runs"][0]["hiddenByUser"] is False
+        assert out["runs"][0]["appliedFields"] == "pixelSize,hiddenByUser"
+
+    def test_bulk_and_single_span_key_is_mutually_exclusive(self):
+        """runs present together with ANY top-level single-span key -> bad_param."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={
+                    "runs": [{"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40}],
+                    "pixelSize": 50,
+                },
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_empty_runs_rejected(self):
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": []},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_runs_must_be_a_list(self):
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": {"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40}},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_run_bad_dimension_rejected(self):
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": [{"dimension": "DIAGONAL", "start": 0, "end": 1, "pixelSize": 40}]},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_run_zero_width_span_rejected(self):
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": [{"dimension": "ROWS", "start": 3, "end": 3, "pixelSize": 40}]},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_run_negative_pixel_size_rejected(self):
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": [{"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": -5}]},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_run_empty_payload_rejected(self):
+        """A run with neither pixelSize nor hiddenByUser is a no-op -> rejected."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": [{"dimension": "ROWS", "start": 0, "end": 1}]},
+            )
+        assert exc.value.code == "empty_payload"
+
+    def test_bulk_run_unknown_key_rejected(self):
+        """A run carrying a key outside the allowed run schema is rejected as ``unknown_param``
+        (consistent with the top-level strict surface, which also uses ``unknown_param``)."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={
+                    "runs": [
+                        {"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40, "bogus": 1}
+                    ]
+                },
+            )
+        assert exc.value.code == "unknown_param"
+
+    def test_bulk_null_runs_with_single_span_keys_is_mutually_exclusive(self):
+        """``runs: null`` still selects the bulk path (presence of the key), so passing it together
+        with single-span keys raises the mutual-exclusion error rather than silently doing a
+        single-span write."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={
+                    "runs": None,
+                    "dimension": "ROWS",
+                    "start": 0,
+                    "end": 1,
+                    "pixelSize": 40,
+                },
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_null_runs_alone_rejected_not_single_span(self):
+        """``runs: null`` alone is a malformed bulk request (non-list), not a no-op single write."""
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": None},
+            )
+        assert exc.value.code == "bad_param"
+
+    def test_bulk_bad_run_does_not_resolve_sheet_or_call_api(self):
+        """An invalid run must fail BEFORE any sheet lookup / batchUpdate (validate-then-resolve).
+
+        The addressing get is wired to raise if called, proving validation precedes resolution.
+        """
+        services, get_rec, batch_rec = _make_service()
+
+        def boom(**kwargs):
+            raise AssertionError("sheet should not be resolved for an invalid run")
+
+        services.sheets.spreadsheets.return_value.get = boom
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": [{"dimension": "DIAGONAL", "start": 0, "end": 1, "pixelSize": 40}]},
+            )
+        assert exc.value.code == "bad_param"
+        assert batch_rec.calls == []
+
+    def test_bulk_run_not_a_dict_rejected(self):
+        services, _, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            dimensions(
+                services,
+                SPREADSHEET_ID,
+                action="set_props",
+                sheet="Sheet1",
+                params={"runs": ["not-a-dict"]},
+            )
+        assert exc.value.code == "bad_param"
+
+
 # =========================================================================== addressing reuse
 
 

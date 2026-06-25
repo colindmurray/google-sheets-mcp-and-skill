@@ -9,15 +9,29 @@ single-file). The write verbs each map to ONE ``batchUpdate`` request:
 - ``delete`` -> ``deleteDimension``
 - ``move`` -> ``moveDimension``
 - ``append`` -> ``appendDimension``
-- ``auto_resize`` -> ``autoResizeDimensions``
+- ``auto_resize`` -> ``autoResizeDimensions`` (AUTO-FIT to content — "auto-resize ON")
 - ``set_props`` -> ``updateDimensionProperties`` (auto fields mask via
-  ``build_fields_mask``)
+  ``build_fields_mask``). One ``set_props`` call sets a single span OR, via
+  ``params["runs"]``, MANY spans at once (one ``batchUpdate``, one request per run; runs may
+  mix ROWS and COLUMNS).
+
+Together these form a row/column SIZING toolkit. The two size modes a caller chooses between:
+
+- FIXED / FORCED size -- ``set_props {"pixelSize": N}`` pins the size; the row/col will NOT
+  auto-grow to fit content (the ``updateDimensionProperties`` equivalent of Apps Script's
+  ``setRowHeightsForced``). Use for a stable layout that ignores content height.
+- AUTO-FIT size -- ``auto_resize`` sizes the row/col to its content. Use to "turn auto-resize
+  back on" / fit-to-content.
 
 The read verb is ``set_props``'s read-side counterpart:
 
 - ``read`` -> ``spreadsheets.get`` over ``data(rowMetadata.hiddenByUser,
   columnMetadata.hiddenByUser, startRow, startColumn)`` -> ``{"hiddenRows":[idx,…],
-  "hiddenCols":[idx,…]}`` (absolute 0-based indices).
+  "hiddenCols":[idx,…]}`` (absolute 0-based indices). With ``params["sizes"]=True`` it widens
+  the mask to also pull ``pixelSize`` and returns ``rowHeights``/``colWidths`` as coalesced
+  ``{"start","end","pixelSize"}`` runs (absolute 0-based, half-open ``end``). API LIMITATION:
+  the Sheets API exposes only ``pixelSize``/``hiddenByUser`` per dimension, so ``read`` can
+  report the current pixel size but CANNOT report whether a row/col is fixed vs auto-fit.
 
 Every op targets ONE tab; ``sheet`` is REQUIRED on every action and resolved to a
 ``sheetId`` via the addressing layer (``a1_to_gridrange(services, sid, sheet)["sheetId"]``,
@@ -64,12 +78,18 @@ _DIMENSIONS_PARAMS: dict[str, set[str]] = {
     "move": {"dimension", "start", "end", "destinationIndex"},
     "append": {"dimension", "length"},
     "auto_resize": {"dimension", "start", "end"},
-    "set_props": {"dimension", "start", "end", "pixelSize", "hiddenByUser"},
-    "read": {"range"},
+    "set_props": {"dimension", "start", "end", "pixelSize", "hiddenByUser", "runs"},
+    "read": {"range", "sizes"},
 }
 
 #: Valid ``Dimension`` enum values.
 _DIMENSIONS = frozenset({"ROWS", "COLUMNS"})
+
+#: Allowed keys inside a bulk ``set_props`` run (strict — same vocabulary as the single path).
+_RUN_KEYS = frozenset({"dimension", "start", "end", "pixelSize", "hiddenByUser"})
+
+#: The single-span keys that are mutually exclusive with the bulk ``runs`` form.
+_SINGLE_SPAN_KEYS = frozenset({"dimension", "start", "end", "pixelSize", "hiddenByUser"})
 
 
 # ---------------------------------------------------------------------------------------
@@ -431,28 +451,30 @@ def _dim_auto_resize(services, spreadsheet_id, sheet, params) -> dict:
 
 
 def _dim_set_props(services, spreadsheet_id, sheet, params) -> dict:
-    """``updateDimensionProperties``: set ``pixelSize``/``hiddenByUser`` over a span.
+    """``updateDimensionProperties``: set ``pixelSize``/``hiddenByUser`` over a span (or many).
 
-    The ``fields`` mask is AUTO-built from the present ``DimensionProperties`` keys via
-    ``build_fields_mask`` (so an unspecified subfield is never wiped). At least one of
-    ``pixelSize``/``hiddenByUser`` is required — an empty payload is a no-op and rejected.
+    Two forms share this handler:
+
+    - SINGLE span: ``{dimension,start,end,pixelSize?,hiddenByUser?}`` — one request.
+    - BULK ``runs``: ``{"runs": [{dimension,start,end,pixelSize?,hiddenByUser?}, …]}`` — one
+      ``batchUpdate`` carrying one ``updateDimensionProperties`` per run, so a from-scratch
+      layout can set several column widths AND several row heights in a single call. ``runs``
+      is mutually exclusive with the single-span keys.
+
+    Either way the ``fields`` mask is AUTO-built from the present ``DimensionProperties`` keys
+    via ``build_fields_mask`` (so an unspecified subfield is never wiped), and at least one of
+    ``pixelSize``/``hiddenByUser`` is required per span — an empty payload is a no-op and rejected.
     """
+    # The PRESENCE of the key (even ``runs: null``) selects the bulk path, so a malformed
+    # ``runs`` surfaces a bulk-shape error and the mutual-exclusion guard still fires — it never
+    # silently falls back to a single-span write.
+    if "runs" in params:
+        return _dim_set_props_bulk(services, spreadsheet_id, sheet, params)
+
     dimension = _require_dimension("set_props", params)
     start, end = _require_span("set_props", params)
+    properties = _set_props_payload("set_props", params)
     sheet_id = _sheet_id_for(services, spreadsheet_id, sheet)
-
-    properties: dict = {}
-    if params.get("pixelSize") is not None:
-        properties["pixelSize"] = _require_int(
-            "set_props", params, "pixelSize", minimum=0
-        )
-    if params.get("hiddenByUser") is not None:
-        properties["hiddenByUser"] = bool(params["hiddenByUser"])
-    if not properties:
-        raise SheetsError(
-            "empty_payload",
-            "set_props needs at least one of 'pixelSize'/'hiddenByUser' to change",
-        )
 
     fields = build_fields_mask(properties)
     _batch_update(
@@ -485,6 +507,100 @@ def _dim_set_props(services, spreadsheet_id, sheet, params) -> dict:
     return out
 
 
+def _set_props_payload(action: str, run: dict) -> dict:
+    """Build the ``DimensionProperties`` payload for one span (single or bulk run).
+
+    Reads ``pixelSize``/``hiddenByUser`` from ``run`` with the SAME validation as the single
+    path (non-negative integer pixelSize; truthy-coerced hidden flag) and rejects an empty
+    payload — a span that changes neither field is a no-op.
+    """
+    properties: dict = {}
+    if run.get("pixelSize") is not None:
+        properties["pixelSize"] = _require_int(action, run, "pixelSize", minimum=0)
+    if run.get("hiddenByUser") is not None:
+        properties["hiddenByUser"] = bool(run["hiddenByUser"])
+    if not properties:
+        raise SheetsError(
+            "empty_payload",
+            "set_props needs at least one of 'pixelSize'/'hiddenByUser' to change",
+        )
+    return properties
+
+
+def _dim_set_props_bulk(services, spreadsheet_id, sheet, params) -> dict:
+    """Bulk ``set_props``: validate every run, emit ONE batchUpdate of N requests.
+
+    ``runs`` is mutually exclusive with the single-span keys (passing both is a ``bad_param``).
+    Each run is validated with the same dimension/span/payload rules as the single path; runs
+    may freely mix ROWS and COLUMNS. ALL runs are validated BEFORE the sheet id is resolved
+    (matching the single path's validate-then-resolve order, so a bad run never triggers an API
+    call), and the resolved id is reused across runs.
+    """
+    overlap = sorted(_SINGLE_SPAN_KEYS & set(params))
+    if overlap:
+        raise SheetsError(
+            "bad_param",
+            f"set_props 'runs' is mutually exclusive with single-span keys; "
+            f"also got {overlap}",
+        )
+
+    runs = params["runs"]
+    if not isinstance(runs, list) or not runs:
+        raise SheetsError("bad_param", "set_props 'runs' must be a non-empty list")
+
+    # Validate every run up front (no sheet lookup yet) so invalid input fails fast and cheap.
+    validated: list[tuple[str, int, int, dict, str]] = []
+    for i, run in enumerate(runs):
+        if not isinstance(run, dict):
+            raise SheetsError("bad_param", f"set_props run #{i} must be a dict")
+        unknown = set(run) - _RUN_KEYS
+        if unknown:
+            raise SheetsError(
+                "unknown_param",
+                f"set_props run #{i} has unknown keys {sorted(unknown)}; "
+                f"allowed: {sorted(_RUN_KEYS)}",
+            )
+        dimension = _require_dimension("set_props", run)
+        start, end = _require_span("set_props", run)
+        properties = _set_props_payload("set_props", run)
+        validated.append((dimension, start, end, properties, build_fields_mask(properties)))
+
+    sheet_id = _sheet_id_for(services, spreadsheet_id, sheet)
+    requests: list[dict] = []
+    echoed: list[dict] = []
+    for dimension, start, end, properties, fields in validated:
+        requests.append(
+            {
+                "updateDimensionProperties": {
+                    "range": _dimension_range(sheet_id, dimension, start, end),
+                    "properties": properties,
+                    "fields": fields,
+                }
+            }
+        )
+        run_out: dict = {
+            "dimension": dimension,
+            "start": start,
+            "end": end,
+            "appliedFields": fields,
+        }
+        if "pixelSize" in properties:
+            run_out["pixelSize"] = properties["pixelSize"]
+        if "hiddenByUser" in properties:
+            run_out["hiddenByUser"] = properties["hiddenByUser"]
+        echoed.append(run_out)
+
+    _batch_update(services, spreadsheet_id, requests)
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "set_props",
+        "sheet": sheet,
+        "runs": echoed,
+        "count": len(echoed),
+    }
+
+
 # ---------------------------------------------------------------------------------------
 # read (hiddenByUser — the set_props read side)
 # ---------------------------------------------------------------------------------------
@@ -495,24 +611,38 @@ _READ_FIELDS = (
     "data(rowMetadata.hiddenByUser,columnMetadata.hiddenByUser,startRow,startColumn))"
 )
 
+#: Extended read mask used when ``sizes`` is requested — adds ``pixelSize`` alongside the
+#: ``hiddenByUser`` flag for both dimensions (still NO grid data).
+_READ_FIELDS_WITH_SIZES = (
+    "sheets(properties(sheetId,title),"
+    "data(rowMetadata(hiddenByUser,pixelSize),"
+    "columnMetadata(hiddenByUser,pixelSize),startRow,startColumn))"
+)
+
 
 def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
-    """Read ``hiddenByUser`` rows/cols over ``range`` (or the whole ``sheet``).
+    """Read hidden rows/cols (and optionally pixel sizes) over ``range`` (or the whole ``sheet``).
 
-    Pulls a tight ``spreadsheets.get`` over ``data(rowMetadata.hiddenByUser,
-    columnMetadata.hiddenByUser, startRow, startColumn)`` (never grid data) and returns the
-    ABSOLUTE 0-based indices of hidden rows/cols. ``params['range']`` narrows the scan; absent
-    it scans the whole ``sheet``.
+    Pulls a tight ``spreadsheets.get`` over the per-dimension metadata (never grid data) and
+    returns the ABSOLUTE 0-based indices of hidden rows/cols. ``params['range']`` narrows the
+    scan; absent it scans the whole ``sheet``.
+
+    With ``params['sizes']`` truthy the mask widens to also pull ``pixelSize`` and the result
+    gains ``rowHeights``/``colWidths``: lists of coalesced ``{start, end, pixelSize}`` runs
+    (absolute 0-based, half-open ``end``). The Sheets API exposes only ``pixelSize``, so this
+    reports the current pixel height/width but NOT whether a row/col is fixed vs auto-fit.
     """
     range_a1 = params.get("range")
     scan_range = range_a1 if range_a1 is not None else sheet
+    want_sizes = bool(params.get("sizes"))
+    fields = _READ_FIELDS_WITH_SIZES if want_sizes else _READ_FIELDS
     try:
         resp = (
             services.sheets.spreadsheets()
             .get(
                 spreadsheetId=spreadsheet_id,
                 ranges=[scan_range],
-                fields=_READ_FIELDS,
+                fields=fields,
             )
             .execute()
         )
@@ -520,7 +650,7 @@ def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
     hidden_rows, hidden_cols = _collect_hidden(resp, sheet)
-    return {
+    out = {
         "ok": True,
         "spreadsheetId": spreadsheet_id,
         "action": "read",
@@ -528,6 +658,11 @@ def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
         "hiddenRows": hidden_rows,
         "hiddenCols": hidden_cols,
     }
+    if want_sizes:
+        row_runs, col_runs = _collect_sizes(resp, sheet)
+        out["rowHeights"] = row_runs
+        out["colWidths"] = col_runs
+    return out
 
 
 def _collect_hidden(resp: dict, sheet: str) -> tuple[list[int], list[int]]:
@@ -558,6 +693,55 @@ def _collect_hidden(resp: dict, sheet: str) -> tuple[list[int], list[int]]:
                 if isinstance(meta, dict) and meta.get("hiddenByUser"):
                     hidden_cols.add(start_col + offset)
     return sorted(hidden_rows), sorted(hidden_cols)
+
+
+def _collect_sizes(resp: dict, sheet: str) -> tuple[list[dict], list[dict]]:
+    """Collect coalesced pixel-size runs for rows and cols from a metadata ``get`` response.
+
+    Mirrors :func:`_collect_hidden`: each ``data`` block carries a ``startRow``/``startColumn``
+    origin (absent ⇒ 0) and a ``rowMetadata``/``columnMetadata`` array of ``DimensionProperties``;
+    here we read each entry's ``pixelSize``. Indices are made ABSOLUTE by adding the block origin.
+
+    To stay robust against overlapping/duplicate blocks we first build an index->size map, then
+    coalesce CONSECUTIVE indices carrying the SAME pixelSize into one half-open run
+    ``{"start", "end", "pixelSize"}``. A missing index or a size mismatch breaks the run, so a
+    uniform 60-row block collapses to a single run while a gap or a size change splits it.
+    """
+    row_sizes: dict[int, int] = {}
+    col_sizes: dict[int, int] = {}
+    for entry in resp.get("sheets", []) or []:
+        props = (entry or {}).get("properties", {}) or {}
+        if props.get("title") != sheet:
+            continue
+        for block in entry.get("data", []) or []:
+            start_row = block.get("startRow", 0) or 0
+            start_col = block.get("startColumn", 0) or 0
+            for offset, meta in enumerate(block.get("rowMetadata", []) or []):
+                if isinstance(meta, dict) and meta.get("pixelSize") is not None:
+                    row_sizes[start_row + offset] = meta["pixelSize"]
+            for offset, meta in enumerate(block.get("columnMetadata", []) or []):
+                if isinstance(meta, dict) and meta.get("pixelSize") is not None:
+                    col_sizes[start_col + offset] = meta["pixelSize"]
+    return _coalesce_runs(row_sizes), _coalesce_runs(col_sizes)
+
+
+def _coalesce_runs(sizes: dict[int, int]) -> list[dict]:
+    """Fold an index->pixelSize map into sorted, half-open ``{start, end, pixelSize}`` runs.
+
+    Consecutive indices (no gap) sharing the same size extend the current run; a gap or a size
+    change starts a new one. ``end`` is exclusive (a run covering indices 2..4 inclusive emits
+    ``end=5``).
+    """
+    runs: list[dict] = []
+    current: dict | None = None
+    for idx in sorted(sizes):
+        size = sizes[idx]
+        if current is not None and idx == current["end"] and size == current["pixelSize"]:
+            current["end"] = idx + 1
+            continue
+        current = {"start": idx, "end": idx + 1, "pixelSize": size}
+        runs.append(current)
+    return runs
 
 
 # ---------------------------------------------------------------------------------------

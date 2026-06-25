@@ -104,7 +104,7 @@ Change (writes):
 | `manage-sheets <ID> --action ...` | Add/delete/duplicate/rename/reorder tabs. |
 | `metadata <ID> --action ...` | Developer metadata (durable anchors). |
 | `data-ops <ID> --action ...` | Bulk data verbs: find/replace, dedupe, trim, sort, text-to-columns, fill, copy/cut-paste. |
-| `dimensions <ID> --action ...` | Row/column ops: insert/delete/move/append/auto_resize/set_props, or `read` hidden rows/cols. |
+| `dimensions <ID> --action ...` | Row/column ops + sizing toolkit: insert/delete/move/append; `auto_resize` (auto-fit) vs `set_props {pixelSize}` (fixed/forced); `set_props {runs:[…]}` bulk-set many row+col sizes; hide/unhide; `read` hidden rows/cols (`{sizes:true}` adds `rowHeights`/`colWidths`). |
 | `comments <ID> --action ...` | Drive threaded comments, full CRUD: read/create/reply/resolve/delete. |
 | `charts <ID> --action ...` | Embedded charts (`read` = metadata only). |
 
