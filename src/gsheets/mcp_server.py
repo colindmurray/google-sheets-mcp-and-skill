@@ -1809,24 +1809,48 @@ def sheets_dimensions(
             '"ROWS", "start": 5, "end": 8, "inheritFromBefore": true}; delete {"dimension": '
             '"COLUMNS", "start": 2, "end": 3}; move {"dimension": "ROWS", "start": 10, '
             '"end": 12, "destinationIndex": 4}; append {"dimension": "ROWS", "length": 100}; '
-            'auto_resize {"dimension": "COLUMNS"} (omit start/end for the whole sheet); '
-            'set_props {"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40, '
-            '"hiddenByUser": true}; read {"range": "Sheet1!A1:F100"} (range optional). '
-            "Unknown keys are rejected."
+            'auto_resize {"dimension": "COLUMNS"} (omit start/end for the whole sheet, auto-fit '
+            'to content); set_props ONE span {"dimension": "ROWS", "start": 0, "end": 1, '
+            '"pixelSize": 40, "hiddenByUser": true} OR MANY at once '
+            '{"runs": [{"dimension": "COLUMNS", "start": 0, "end": 1, "pixelSize": 220}, '
+            '{"dimension": "ROWS", "start": 0, "end": 1, "pixelSize": 40}]} '
+            '(runs may mix ROWS and COLUMNS; mutually exclusive with the single-span keys); '
+            'read {"range": "Sheet1!A1:F100", "sizes": true} (both optional; sizes adds '
+            "rowHeights/colWidths). Unknown keys are rejected."
         ),
     ] = None,
     retry: RetryParam = None,
 ) -> models.DimensionsResult:
-    """Insert, delete, move, append, auto-resize, or set props on ROWS/COLUMNS — or read hidden ones.
+    """Insert/delete/move/append/auto-resize/set-props ROWS or COLUMNS, or read hidden + sizes.
+
+    A complete row/column SIZING toolkit on one tab:
+      * READ current sizes — ``read {"sizes": true}`` -> ``rowHeights``/``colWidths`` as
+        coalesced ``{start, end, pixelSize}`` runs (absolute 0-based, half-open ``end``),
+        alongside the always-returned ``hiddenRows``/``hiddenCols``.
+      * SET a FIXED/FORCED size — ``set_props {"pixelSize": N}`` PINS the size; the row/col will
+        NOT auto-grow to fit content (this is "auto-resize OFF", the equivalent of Apps Script's
+        setRowHeightsForced).
+      * SET MANY sizes at once — ``set_props {"runs": [...]}`` issues one batchUpdate setting
+        several spans (and may mix ROWS and COLUMNS) — ergonomic for laying a sheet out from
+        scratch (a few column widths + a pinned header row in one call).
+      * AUTO-FIT to content — ``auto_resize`` sizes a span to its content ("auto-resize ON" /
+        fit-to-content); the counterpart to a fixed pixelSize.
+      * HIDE / UNHIDE — ``set_props {"hiddenByUser": true|false}`` + ``read`` reports hidden ones.
+      * insert/delete/move/append rows or cols (delete is destructive — drops the data too).
+
+    Toggle: ``set_props {"pixelSize": N}`` = fixed/forced (ignores content); ``auto_resize`` =
+    auto-fit (follows content). API LIMITATION: Sheets exposes only ``pixelSize``/``hiddenByUser``
+    per dimension, so ``read`` reports the current pixel size but CANNOT report whether a row/col
+    is currently in fixed vs auto-fit mode.
 
     Distinct from ``sheets_manage_sheets`` (tab-level) and ``sheets_append_rows`` (appends rows
-    of DATA — ``append`` here adds empty grid rows/cols). ``delete`` is destructive (drops
-    rows/cols and their data). ``read`` is a cheap, safe query returning which rows/cols are
-    hidden — useful before editing a filtered sheet.
+    of DATA — ``append`` here adds empty grid rows/cols).
 
     Returns:
-        write -> ``{ok, spreadsheetId, action, sheet, ...echoed geometry...}``; read ->
-        ``{ok, spreadsheetId, action, sheet, hiddenRows:[idx,...], hiddenCols:[idx,...]}``.
+        single write -> ``{ok, spreadsheetId, action, sheet, ...echoed geometry...}``; bulk
+        set_props -> ``{ok, ..., runs:[{dimension,start,end,pixelSize?,hiddenByUser?,
+        appliedFields}], count}``; read -> ``{ok, ..., hiddenRows:[...], hiddenCols:[...]}`` plus,
+        with ``sizes``, ``rowHeights``/``colWidths`` as ``{start, end, pixelSize}`` runs.
     """
     return _call(
         models.DimensionsResult,

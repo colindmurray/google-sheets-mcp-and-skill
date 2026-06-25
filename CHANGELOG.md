@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.5.0] - 2026-06-25
+
+`sheets_dimensions` (CLI `dimensions`) is now a complete, general **row/column sizing toolkit** —
+read current pixel sizes, set fixed sizes (one span or many at once), auto-fit to content, and
+hide/unhide — with the fixed-vs-auto-fit distinction documented as a first-class concept.
+
+### Added
+- **Read pixel sizes** — `read {"sizes": true}` widens the (still grid-data-free) metadata mask to
+  pull `pixelSize` and returns `rowHeights`/`colWidths`: lists of coalesced
+  `{"start", "end", "pixelSize"}` runs (absolute 0-based indices, half-open `end`; a uniform block
+  collapses to one run). `hiddenRows`/`hiddenCols` are still returned alongside. Without `sizes` the
+  read is byte-for-byte unchanged (same hidden-only mask, no new keys).
+- **Bulk `set_props`** — `set_props {"runs": [{dimension,start,end,pixelSize?,hiddenByUser?}, …]}`
+  sets MANY spans in one `batchUpdate` (one `updateDimensionProperties` per run); runs may mix ROWS
+  and COLUMNS, making from-scratch layout (several column widths + a pinned header row in one call)
+  ergonomic. Returns `{"runs": [...echoed with appliedFields...], "count": N}`. `runs` is mutually
+  exclusive with the single-span keys; each run is validated with the same rules as the single path.
+
+### Documented
+- **Fixed vs. auto-fit toggle** — the tool docstring and skill/usage docs now spell out the two size
+  modes: `set_props {"pixelSize": N}` PINS a fixed/forced size (won't auto-grow — "auto-resize OFF",
+  the `setRowHeightsForced` equivalent) vs `auto_resize` which fits content ("auto-resize ON").
+- **Read limitation** — Google exposes only `pixelSize`/`hiddenByUser` per dimension, so `read`
+  reports the current pixel size but CANNOT report whether a row/col is in fixed vs auto-fit mode.
+
 ## [0.4.3] - 2026-06-22
 
 A correctness + hardening release from a deep review (P1–P3 findings). Headline is a security gap:

@@ -1135,8 +1135,11 @@ class DimensionsResult(_Result):
 
     Row/column ops on one tab. ``action``/``sheet`` are always present on a write; the echoed
     geometry (``dimension``/``start``/``end`` + ``destinationIndex``/``length``/``pixelSize``/
-    ``hiddenByUser``) depends on the verb. The ``read`` action returns ``hiddenRows``/``hiddenCols``
-    (absolute 0-based indices) instead. All fields optional so one model mirrors every verb.
+    ``hiddenByUser``) depends on the verb. A bulk ``set_props`` (params ``runs``) returns
+    ``runs`` (each echoing its span + ``appliedFields``) and ``count`` instead of a single span.
+    The ``read`` action returns ``hiddenRows``/``hiddenCols`` (absolute 0-based indices), and —
+    when called with ``sizes`` — ``rowHeights``/``colWidths`` as coalesced ``{start,end,pixelSize}``
+    runs. All fields optional so one model mirrors every verb.
     """
 
     spreadsheetId: Optional[str] = None
@@ -1149,16 +1152,33 @@ class DimensionsResult(_Result):
     length: Optional[int] = None
     pixelSize: Optional[int] = None
     hiddenByUser: Optional[bool] = None
+    # bulk set_props shape (params runs)
+    runs: Optional[list[dict]] = None
+    count: Optional[int] = None
     # read shape
     hiddenRows: Optional[list[int]] = None
     hiddenCols: Optional[list[int]] = None
+    # read shape with sizes=true: coalesced {start,end,pixelSize} runs (absolute, half-open)
+    rowHeights: Optional[list[dict]] = None
+    colWidths: Optional[list[dict]] = None
 
     @property
     def terse(self) -> str:
         if self.action == "read":
             nr = len(self.hiddenRows or [])
             nc = len(self.hiddenCols or [])
-            return f"dimensions read [{self.sheet}]: {nr} hidden row(s), {nc} hidden col(s)"
+            base = f"dimensions read [{self.sheet}]: {nr} hidden row(s), {nc} hidden col(s)"
+            if self.rowHeights is not None or self.colWidths is not None:
+                base += (
+                    f"; {len(self.rowHeights or [])} row-size run(s), "
+                    f"{len(self.colWidths or [])} col-size run(s)"
+                )
+            return base
+        if self.runs is not None:
+            return (
+                f"dimensions set_props on {self.sheet}: "
+                f"{self.count if self.count is not None else len(self.runs)} run(s)"
+            )
         span = ""
         if self.dimension is not None:
             span = f" {self.dimension}"

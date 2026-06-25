@@ -1264,8 +1264,10 @@ def _render_text(result: dict) -> str:
                 lines.append(f"  {sl.get('line')}")
         return "\n".join(lines) if lines else "(no structural data)"
 
-    # inspect
-    if "cells" in result or "runs" in result:
+    # inspect (cells, or rich-text runs). A dimensions bulk set_props also carries top-level
+    # "runs" but is an action result (it has "action", never "rows"/"cols"); let it fall through
+    # to the action-summary renderer below rather than masquerade as an inspect view.
+    if "cells" in result or ("runs" in result and "action" not in result):
         # Core returns ``range`` already sheet-qualified; only prepend the sheet when it isn't.
         rng = str(result.get("range") or "")
         if rng and "!" not in rng and result.get("sheet"):
@@ -1308,7 +1310,8 @@ def _render_text(result: dict) -> str:
                     lines.append("  " + " | ".join("" if c is None else str(c) for c in row))
         return "\n".join(lines)
 
-    # dimensions(action="read") (DESIGN §X.7): hidden row/col index lists.
+    # dimensions(action="read") (DESIGN §X.7): hidden row/col index lists, plus pixel-size runs
+    # when read was called with {"sizes": true}.
     if "hiddenRows" in result or "hiddenCols" in result:
         sheet = result.get("sheet")
         lines.append(f"hidden ({sheet}):" if sheet else "hidden:")
@@ -1316,6 +1319,12 @@ def _render_text(result: dict) -> str:
         hidden_cols = result.get("hiddenCols") or []
         lines.append(f"  rows: {hidden_rows if hidden_rows else '(none)'}")
         lines.append(f"  cols: {hidden_cols if hidden_cols else '(none)'}")
+        if "rowHeights" in result or "colWidths" in result:
+            lines.append(f"sizes ({sheet}):" if sheet else "sizes:")
+            row_runs = result.get("rowHeights") or []
+            col_runs = result.get("colWidths") or []
+            lines.append(f"  rows: {_render_size_runs(row_runs)}")
+            lines.append(f"  cols: {_render_size_runs(col_runs)}")
         return "\n".join(lines)
 
     # export (DESIGN §3.x): a terse "exported <format> -> <path> (<bytes> bytes)" line.
@@ -1345,6 +1354,15 @@ def _render_text(result: dict) -> str:
 
     # Generic fallback: compact key/value lines (skip the always-present ok/spreadsheetId).
     return _render_generic(result)
+
+
+def _render_size_runs(runs: list[dict]) -> str:
+    """Render coalesced pixel-size runs terse + readable, e.g. ``2-64=21px, 64-65=40px``."""
+    if not runs:
+        return "(none)"
+    return ", ".join(
+        f"{r.get('start')}-{r.get('end')}={r.get('pixelSize')}px" for r in runs
+    )
 
 
 def _render_inspect_cell(cell: dict) -> str:
@@ -1529,6 +1547,7 @@ _ACTION_SUMMARY_KEYS = (
     "length",
     "pixelSize",
     "hiddenByUser",
+    "count",
     "addedRows",
     "addedColumns",
 )
