@@ -36,9 +36,9 @@ is the authoritative, always-current flag source for any single command.
   structured read — it never errors on a structured shape, but it is verbose, so for bulk values
   prefer csv to a file: `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
 - **MCP file-output (`out_path`).** The CLI pipes (`> out.csv`); the MCP tool's output goes into the
-  agent's context, so for a big read pass `out_path` to one of the five `output_format` read tools —
+  agent's context, so for a big read pass `out_path` to one of the six `output_format` read tools —
   `sheets_read_values` / `sheets_inspect` / `sheets_describe` / `sheets_formula_patterns` /
-  `sheets_read_many`. The tool writes `render(result, output_format)` to that local file (utf-8;
+  `sheets_read_many` / `sheets_read_conditional_formats`. The tool writes `render(result, output_format)` to that local file (utf-8;
   `text` is not a file format, so it resolves to `json`) and returns a small handle instead of the
   payload: `{ok, path, format, rows, cols, bytes, preview}` where `format` is one of
   `csv|tsv|jsonl|json`, `rows`/`cols` describe the value grid (jsonl/json set `rows` = record count,

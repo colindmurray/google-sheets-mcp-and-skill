@@ -914,6 +914,8 @@ def sheets_read_values(
         openWorldHint=True,
     ),
     tags={"read"},
+    # out_path-capable — suppress the derived outputSchema (ISSUES.md #19/#21, #29).
+    output_schema=None,
 )
 def sheets_read_conditional_formats(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
@@ -927,6 +929,25 @@ def sheets_read_conditional_formats(
             description="Restrict to the rules INTERSECTING this A1 range (on its own sheet), e.g. "
             '"Cliff!A1:A50". The range carries its own sheet, so it is mutually exclusive with '
             "sheet. Surviving rules keep their original priority index."
+        ),
+    ] = None,
+    output_format: Annotated[
+        StructuredFormat,
+        Field(
+            description="Output format: text (default) | json | jsonl | markdown. This is a "
+            "STRUCTURED read (per-sheet rule bodies, not a rectangular value grid), so csv/tsv are "
+            "not offered; markdown renders key/value lines."
+        ),
+    ] = "text",
+    out_path: Annotated[
+        Optional[str],
+        Field(
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered rules to this "
+            "local file (utf-8, output_format; text resolves to json) and return a small handle "
+            "{ok, path, format, rows, cols, bytes, preview} INSTEAD of the payload — use this for a "
+            "rule-heavy tab whose serialized rules would exceed the token cap. The parent directory "
+            "must already exist (it is never created); credential / config paths are refused. The "
+            "spreadsheet is NOT modified."
         ),
     ] = None,
     retry: RetryParam = None,
@@ -943,21 +964,30 @@ def sheets_read_conditional_formats(
     ``sheets_describe`` computes, but as a standalone read); a surviving rule keeps its original
     ``index`` so it still edits correctly.
 
+    Setting ``out_path`` writes the rendered rules to a LOCAL FILE (utf-8) and returns a small handle
+    instead of the payload — the escape hatch for a rule-heavy tab whose serialized rules exceed the
+    in-context token cap. It is an opt-in local side effect; the spreadsheet is never modified, so
+    this tool stays read-only.
+
     Returns:
         ``{ok, spreadsheetId, sheets:[{sheet, sheetId, rules:[{index, line, ranges, kind,
         ...}]}]}``. A boolean rule carries ``condition`` + ``format`` and a line like
         "[Sheet1!A2:A100] if CUSTOM_FORMULA(=$B2>10) -> bg #FFCDD2 bold"; a gradient rule
         carries ``stops`` (``[{slot: "min"|"mid"|"max", hexColor, interp?, value?}]``) instead,
         with a line like "[Sheet1!H2:H100] gradient min=#F44336 | mid:num:50=#FFEB3B | max=#4CAF50".
+        With ``out_path`` set, returns the file handle ``{ok, path, format, rows, cols, bytes,
+        preview}`` instead.
     """
-    return _call(
+    return _call_formatted(
         models.ConditionalFormatReport,
         _read_conditional_formats,
+        output_format,
         _services(ctx),
         spreadsheet_id,
         sheet,
-        range=range,
+        out_path=out_path,
         retry=retry,
+        range=range,
     )
 
 

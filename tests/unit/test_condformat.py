@@ -429,6 +429,73 @@ def test_build_condition_no_values_omits_values_key():
     assert "values" not in rule["booleanRule"]["condition"]
 
 
+# ISSUES.md #39: a boolean NUMBER_EQ/NUMBER_NOT_EQ condition carrying a NON-numeric literal value
+# (e.g. a UI-created "text is exactly Yes" rule that Google stores + reads back as NUMBER_EQ(Yes))
+# is rejected by Google on EVERY API write path ("Invalid ConditionValue.userEnteredValue: Yes for
+# ConditionType: NUMBER_EQ"), so a faithful read -> write round-trip 400s. Coerce it to the
+# semantically-identical text equality type on BUILD so the round-trip succeeds. Confirmed live:
+# NUMBER_EQ(text) is rejected; TEXT_EQ(text) writes fine and behaves identically.
+
+
+def test_number_eq_with_text_value_coerces_to_text_eq():
+    rule = build_google_rule(
+        {"ranges": ["S!A1"], "kind": "boolean",
+         "condition": {"type": "NUMBER_EQ", "values": ["Yes"]}, "format": {}}
+    )
+    cond = rule["booleanRule"]["condition"]
+    assert cond["type"] == "TEXT_EQ"
+    assert cond["values"] == [{"userEnteredValue": "Yes"}]
+
+
+def test_number_not_eq_with_text_value_is_not_coerced():
+    # TEXT_NOT_EQ exists in the ConditionType enum but Google REJECTS it inside a conditional format
+    # ("ConditionType 'TEXT_NOT_EQ' is not supported in conditional formats" — confirmed live), so
+    # coercing NUMBER_NOT_EQ would only swap one 400 for another. Leave it as-is (and it was never a
+    # reported real-world case — only NUMBER_EQ was).
+    rule = build_google_rule(
+        {"ranges": ["S!A1"], "kind": "boolean",
+         "condition": {"type": "NUMBER_NOT_EQ", "values": ["No"]}, "format": {}}
+    )
+    assert rule["booleanRule"]["condition"]["type"] == "NUMBER_NOT_EQ"
+
+
+def test_number_eq_with_numeric_value_stays_number_eq():
+    for val in ("0", "5", "-3.5", "12"):
+        rule = build_google_rule(
+            {"ranges": ["S!A1"], "kind": "boolean",
+             "condition": {"type": "NUMBER_EQ", "values": [val]}, "format": {}}
+        )
+        assert rule["booleanRule"]["condition"]["type"] == "NUMBER_EQ", val
+
+
+def test_number_eq_with_formula_value_stays_number_eq():
+    # A relative reference / formula under NUMBER_EQ is valid to Google (evaluates to a number);
+    # never coerce a value starting with '=' to a text match.
+    rule = build_google_rule(
+        {"ranges": ["S!A1"], "kind": "boolean",
+         "condition": {"type": "NUMBER_EQ", "values": ["=A1"]}, "format": {}}
+    )
+    assert rule["booleanRule"]["condition"]["type"] == "NUMBER_EQ"
+
+
+def test_number_greater_with_text_value_is_not_coerced():
+    # Only the equality types have a text equivalent; NUMBER_GREATER("x") has none, so leave it
+    # (Google will reject it — which is correct, it is genuinely invalid).
+    rule = build_google_rule(
+        {"ranges": ["S!A1"], "kind": "boolean",
+         "condition": {"type": "NUMBER_GREATER", "values": ["x"]}, "format": {}}
+    )
+    assert rule["booleanRule"]["condition"]["type"] == "NUMBER_GREATER"
+
+
+def test_text_eq_with_text_value_is_unchanged():
+    rule = build_google_rule(
+        {"ranges": ["S!A1"], "kind": "boolean",
+         "condition": {"type": "TEXT_EQ", "values": ["Yes"]}, "format": {}}
+    )
+    assert rule["booleanRule"]["condition"]["type"] == "TEXT_EQ"
+
+
 def test_build_gradient_rule_from_parsed():
     parsed = {
         "ranges": ["Cliff!H2:H100"],

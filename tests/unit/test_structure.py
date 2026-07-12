@@ -112,6 +112,39 @@ def _make_http_error(status: int = 403):
     return HttpError(resp=resp, content=content)
 
 
+def _make_metadata_conflict_error():
+    """The exact 400 Google's duplicateSheet raises on a developer-metadata id collision (#37)."""
+    from googleapiclient.errors import HttpError
+
+    resp = MagicMock()
+    resp.status = 400
+    resp.reason = "Bad Request"
+    content = (
+        b'{"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": '
+        b'"Conflicting developer metadata IDs were added by a collaborator: 1667059552"}}'
+    )
+    return HttpError(resp=resp, content=content)
+
+
+class _RaisingRecorder:
+    """Like ``_Recorder`` but a queued item that is an Exception is RAISED on ``.execute()``
+    (a dict is returned). Lets a test make the first batchUpdate 400 and the next succeed."""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        item = self._items.pop(0) if self._items else {}
+        request_obj = MagicMock(name="request")
+        if isinstance(item, Exception):
+            request_obj.execute.side_effect = item
+        else:
+            request_obj.execute.return_value = item
+        return request_obj
+
+
 # =========================================================================== capture_new_ids
 
 
@@ -853,6 +886,47 @@ class TestManageSheets:
         assert req["newSheetName"] == "Copy"
         assert req["insertSheetIndex"] == 4
         assert out["sheet"] == {"sheetId": 11, "title": "Copy", "index": 4}
+
+    def test_duplicate_falls_back_to_copy_to_on_metadata_conflict(self, monkeypatch):
+        # ISSUES.md #37: Google's duplicateSheet can 400 "Conflicting developer metadata IDs were
+        # added by a collaborator" on a book carrying developer metadata. copyTo does NOT copy
+        # developer metadata (confirmed live — metadata-safe), so fall back to copyTo + rename +
+        # reorder to produce the same result.
+        services = _make_service()
+        _patch_addressing(monkeypatch, sheet_id=2, title="Tmpl")
+        # duplicateSheet 400s with the conflict; the follow-up rename+reorder batchUpdate succeeds.
+        bu = _RaisingRecorder([_make_metadata_conflict_error(), {}])
+        setattr(services.sheets.spreadsheets.return_value, "batchUpdate", bu)
+        copy_rec = _Recorder([{"sheetId": 55, "title": "Copy of Tmpl", "index": 9}])
+        services.sheets.spreadsheets.return_value.sheets.return_value.copyTo = copy_rec
+
+        out = manage_sheets(
+            services, SHEET_ID, action="duplicate", sheet="Tmpl",
+            params={"newName": "Tmpl copy", "newIndex": 2},
+        )
+        # copyTo was called with the source sheetId + the SAME book as destination.
+        assert copy_rec.calls[0]["sheetId"] == 2
+        assert copy_rec.calls[0]["body"]["destinationSpreadsheetId"] == SHEET_ID
+        # rename + reorder applied to the copy in the follow-up batchUpdate.
+        reqs = bu.calls[1]["body"]["requests"]
+        assert {"updateSheetProperties": {
+            "properties": {"sheetId": 55, "title": "Tmpl copy"}, "fields": "title"}} in reqs
+        assert {"updateSheetProperties": {
+            "properties": {"sheetId": 55, "index": 2}, "fields": "index"}} in reqs
+        assert out["sheet"] == {"sheetId": 55, "title": "Tmpl copy", "index": 2}
+
+    def test_duplicate_reraises_non_conflict_400(self, monkeypatch):
+        # A different 400 (not the metadata conflict) must propagate — never trigger the fallback.
+        services = _make_service()
+        _patch_addressing(monkeypatch, sheet_id=2, title="Tmpl")
+        bu = _RaisingRecorder([_make_http_error(400)])
+        setattr(services.sheets.spreadsheets.return_value, "batchUpdate", bu)
+        copy_rec = _Recorder([{"sheetId": 55}])
+        services.sheets.spreadsheets.return_value.sheets.return_value.copyTo = copy_rec
+        with pytest.raises(SheetsError) as exc:
+            manage_sheets(services, SHEET_ID, action="duplicate", sheet="Tmpl", params={})
+        assert exc.value.status == 400
+        assert copy_rec.calls == []  # fallback NOT taken
 
     def test_rename_builds_mask(self, monkeypatch):
         services = _make_service()

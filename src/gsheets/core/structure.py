@@ -1198,6 +1198,10 @@ def manage_sheets(
     ``sheet``); ``duplicate`` -> ``{"newName", "newIndex"}``; ``rename`` -> ``{"newName"}``
     (required); ``reorder`` -> ``{"newIndex"}`` (required).
 
+    ``duplicate`` self-heals a Google-side quirk (ISSUES.md #37): if ``duplicateSheet`` 400s with
+    "Conflicting developer metadata IDs" (seen on books carrying developer metadata), it falls back
+    transparently to a metadata-safe ``sheets.copyTo`` + rename + reorder that yields the same result.
+
     Args:
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
@@ -1270,16 +1274,81 @@ def _manage_duplicate(services, spreadsheet_id, sheet, params) -> dict:
         req["newSheetName"] = params["newName"]
     if params.get("newIndex") is not None:
         req["insertSheetIndex"] = int(params["newIndex"])
-    resp = _batch_update(
-        services,
-        spreadsheet_id,
-        [{"duplicateSheet": req}],
-    )
+    try:
+        resp = _batch_update(
+            services,
+            spreadsheet_id,
+            [{"duplicateSheet": req}],
+        )
+    except SheetsError as exc:
+        # ISSUES.md #37: on a book carrying developer metadata, Google's duplicateSheet can 400
+        # with "Conflicting developer metadata IDs were added by a collaborator: <id>" (it re-emits
+        # the copied sheet's metadata without re-keying). ``spreadsheets.sheets.copyTo`` into the
+        # SAME book does NOT copy developer metadata (confirmed live — metadata-safe), so fall back
+        # to copyTo + rename + reorder, which yields the same result. This trigger was NOT
+        # reproducible on 2026-07-11 (Google appears to have fixed it), so the branch normally
+        # never fires — it is a defensive, self-healing fallback that costs nothing on the happy path.
+        if not _is_developer_metadata_conflict(exc):
+            raise
+        return _duplicate_via_copy_to(services, spreadsheet_id, sheet_id, params)
     return {
         "ok": True,
         "spreadsheetId": spreadsheet_id,
         "action": "duplicate",
         "sheet": _added_sheet_props(resp),
+    }
+
+
+def _is_developer_metadata_conflict(exc: SheetsError) -> bool:
+    """True iff ``exc`` is the duplicateSheet developer-metadata id collision 400 (#37)."""
+    return exc.status == 400 and "conflicting developer metadata" in (exc.message or "").lower()
+
+
+def _duplicate_via_copy_to(services, spreadsheet_id, source_sheet_id, params) -> dict:
+    """Metadata-safe duplicate fallback: ``sheets.copyTo`` (same book) + rename + reorder (#37)."""
+    try:
+        copied = (
+            services.sheets.spreadsheets()
+            .sheets()
+            .copyTo(
+                spreadsheetId=spreadsheet_id,
+                sheetId=source_sheet_id,
+                body={"destinationSpreadsheetId": spreadsheet_id},
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+    new_id = copied.get("sheetId")
+    title = copied.get("title")
+    index = copied.get("index")
+
+    # copyTo names the copy "Copy of <source>" and appends it at the end; apply the caller's
+    # requested newName / newIndex so the fallback matches the duplicateSheet contract.
+    prop_updates: list[dict] = []
+    new_name = params.get("newName")
+    if new_name is not None:
+        prop_updates.append(
+            {"updateSheetProperties": {
+                "properties": {"sheetId": new_id, "title": new_name}, "fields": "title"}}
+        )
+        title = new_name
+    new_index = params.get("newIndex")
+    if new_index is not None:
+        prop_updates.append(
+            {"updateSheetProperties": {
+                "properties": {"sheetId": new_id, "index": int(new_index)}, "fields": "index"}}
+        )
+        index = int(new_index)
+    if prop_updates:
+        _batch_update(services, spreadsheet_id, prop_updates)
+
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "action": "duplicate",
+        "sheet": {"sheetId": new_id, "title": title, "index": index},
     }
 
 
