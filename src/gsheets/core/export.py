@@ -121,7 +121,12 @@ def export(
     # and the ``~/.config/google-sheets-mcp`` / ``~/.secrets`` subtrees, so an export can never
     # clobber the very token/secret files a read is forbidden to overwrite (SPEC §2.3). Done BEFORE
     # the fetch so a bad destination fails fast without spending an API call.
-    out_path = resolve_out_path(path if path is not None else f"{spreadsheet_id}.{ext}")
+    # ``overwrite=True``: an export is a deliberate download-to-disk (re-exporting the same
+    # spreadsheet is expected to REPLACE the prior file), unlike the read-side out_path valve whose
+    # default refuses to clobber. The credential / config / secrets guards still apply.
+    out_path = resolve_out_path(
+        path if path is not None else f"{spreadsheet_id}.{ext}", overwrite=True
+    )
 
     if fmt in _DRIVE_MIME:
         data = _export_via_drive(services, spreadsheet_id, fmt)

@@ -57,6 +57,80 @@ def _structured():
     }
 
 
+def _inspect(n=1000):
+    """An ``inspect``-shaped payload: TWO top-level lists (``cells`` + ``merges``), ~n cells.
+
+    ``_primary_list`` returns ``None`` for a two-list result, so the old ``_jsonl_records`` fell
+    back to ``[whole result]`` — i.e. the preview WAS the ~n-cell payload. This is the regression the
+    byte-bound + structural-summary must catch.
+    """
+    return {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "sheet": "S",
+        "range": f"A1:E{n}",
+        "rows": n,
+        "cols": 5,
+        "cells": [
+            {
+                "a1": f"A{i + 1}",
+                "value": f"value-number-{i}-with-some-payload-text",
+                "format": {"bold": True, "bg": "#ffffff", "font": "Arial", "size": 11},
+            }
+            for i in range(n)
+        ],
+        "merges": [],
+    }
+
+
+def _describe_two_lists(n=300):
+    """A ``describe``-shaped payload with two top-level lists (``columns`` + ``merges``)."""
+    return {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "sheet": "S",
+        "range": f"A1:Z{n}",
+        "rows": n,
+        "cols": 26,
+        "columns": [
+            {
+                "col": f"C{i}",
+                "header": f"header-column-{i}",
+                "type": "text",
+                "density": 1.0,
+                "formulaRatio": 0.0,
+                "distinctSample": [f"v{j}" for j in range(10)],
+            }
+            for i in range(n)
+        ],
+        "merges": [],
+    }
+
+
+def _describe_one_giant_record():
+    """A ``describe``-shaped payload that is ONE giant record with NO top-level list.
+
+    ``_primary_list`` returns ``None`` (no list values), so the old code emitted ``[whole result]``.
+    The huge nested ``profile`` dict makes that preview approach the full payload size.
+    """
+    return {
+        "ok": True,
+        "spreadsheetId": "<ID>",
+        "profile": {
+            f"col_{i}": {
+                "type": "text",
+                "density": 1.0,
+                "distinct": [f"value-{i}-{j}" for j in range(20)],
+            }
+            for i in range(120)
+        },
+    }
+
+
+def _preview_size(preview) -> int:
+    return len(json.dumps(preview, ensure_ascii=False, default=str).encode("utf-8"))
+
+
 # =========================================================================== resolve_out_path
 
 
@@ -151,6 +225,37 @@ class TestResolveOutPath:
         target = secrets / "out.csv"
         with pytest.raises(SheetsError) as exc:
             paths.resolve_out_path(str(target))
+        assert exc.value.code == "bad_out_path"
+
+    def test_existing_file_refused_without_overwrite(self, tmp_path):
+        # A read is read-only: refuse to clobber an existing file unless overwrite is explicit.
+        target = tmp_path / "exists.csv"
+        target.write_text("old contents")
+        with pytest.raises(SheetsError) as exc:
+            paths.resolve_out_path(str(target))
+        assert exc.value.code == "out_path_exists"
+        assert exc.value.hint
+        # The parent-dir + credential guards still apply on the same call.
+        assert target.read_text() == "old contents"
+
+    def test_existing_file_allowed_with_overwrite(self, tmp_path):
+        target = tmp_path / "exists.csv"
+        target.write_text("old contents")
+        resolved = paths.resolve_out_path(str(target), overwrite=True)
+        assert resolved == str(target.resolve())
+
+    def test_new_file_fine_with_default_overwrite(self, tmp_path):
+        # overwrite defaults to False, but a not-yet-existing file is always allowed.
+        target = tmp_path / "fresh.csv"
+        assert paths.resolve_out_path(str(target)) == str(target.resolve())
+
+    def test_credential_guard_precedes_overwrite_check(self, tmp_path):
+        # An existing credential-shaped file is refused as bad_out_path (credential guard first),
+        # not out_path_exists — overwrite must never unlock a credential target.
+        target = tmp_path / "token.json"
+        target.write_text("{}")
+        with pytest.raises(SheetsError) as exc:
+            paths.resolve_out_path(str(target), overwrite=True)
         assert exc.value.code == "bad_out_path"
 
 
@@ -248,6 +353,82 @@ class TestWriteFileHandle:
             paths.write_file_handle(result, "json", str(target))
         assert exc.value.code == "bad_out_path"
         assert not target.exists()
+
+    # ----------------------------------------------------------------- overwrite (Problem B)
+
+    def test_existing_file_refused_without_overwrite(self, tmp_path):
+        target = tmp_path / "out.json"
+        target.write_text("OLD CONTENT MUST SURVIVE")
+        result = _read_values([("S!A1:A1", [["x"]])])
+        with pytest.raises(SheetsError) as exc:
+            paths.write_file_handle(result, "json", str(target))
+        assert exc.value.code == "out_path_exists"
+        # The pre-existing file is NOT truncated / clobbered.
+        assert target.read_text() == "OLD CONTENT MUST SURVIVE"
+
+    def test_overwrite_true_truncates_existing_file(self, tmp_path):
+        target = tmp_path / "out.json"
+        target.write_text("OLD CONTENT THAT IS LONGER THAN THE NEW PAYLOAD")
+        result = _read_values([("S!A1:A1", [["x"]])])
+        handle = paths.write_file_handle(result, "json", str(target), overwrite=True)
+        on_disk = target.read_text(encoding="utf-8")
+        assert on_disk == fmtmod.render(result, "json")
+        assert "OLD CONTENT" not in on_disk
+        assert handle["bytes"] == target.stat().st_size
+
+    def test_new_file_writes_with_default_no_overwrite(self, tmp_path):
+        target = tmp_path / "fresh.json"
+        result = _read_values([("S!A1:A1", [["x"]])])
+        handle = paths.write_file_handle(result, "json", str(target))
+        assert handle["ok"] is True
+        assert target.exists()
+
+    # ----------------------------------------------------------------- preview byte-bound (Problem A)
+
+    def test_small_structured_result_previews_normally(self, tmp_path):
+        # A small structured result stays under the cap → preview is the record form, unchanged.
+        result = _structured()
+        target = tmp_path / "small.json"
+        handle = paths.write_file_handle(result, "json", str(target))
+        assert _preview_size(handle["preview"]) <= paths._PREVIEW_BYTE_CAP
+        assert handle["preview"] == [result]
+
+    def test_inspect_preview_bounded_by_bytes_json(self, tmp_path):
+        result = _inspect(1000)
+        target = tmp_path / "inspect.json"
+        handle = paths.write_file_handle(result, "json", str(target))
+        # The full payload really is large (the regression precondition).
+        full_size = _preview_size([result])
+        assert full_size > paths._PREVIEW_BYTE_CAP
+        # The preview is under the hard cap and is NOT the whole payload.
+        assert _preview_size(handle["preview"]) <= paths._PREVIEW_BYTE_CAP
+        assert handle["preview"] != [result]
+        assert _preview_size(handle["preview"]) < full_size
+        # The FULL payload still hit disk.
+        assert target.stat().st_size == len(fmtmod.render(result, "json").encode("utf-8"))
+
+    def test_inspect_preview_bounded_by_bytes_jsonl(self, tmp_path):
+        result = _inspect(1000)
+        target = tmp_path / "inspect.jsonl"
+        handle = paths.write_file_handle(result, "jsonl", str(target))
+        assert _preview_size(handle["preview"]) <= paths._PREVIEW_BYTE_CAP
+        assert handle["preview"] != [result]
+
+    def test_describe_two_lists_preview_bounded(self, tmp_path):
+        result = _describe_two_lists(300)
+        target = tmp_path / "describe.json"
+        handle = paths.write_file_handle(result, "json", str(target))
+        assert _preview_size([result]) > paths._PREVIEW_BYTE_CAP
+        assert _preview_size(handle["preview"]) <= paths._PREVIEW_BYTE_CAP
+        assert handle["preview"] != [result]
+
+    def test_describe_one_giant_record_preview_bounded(self, tmp_path):
+        result = _describe_one_giant_record()
+        target = tmp_path / "describe2.json"
+        handle = paths.write_file_handle(result, "json", str(target))
+        assert _preview_size([result]) > paths._PREVIEW_BYTE_CAP
+        assert _preview_size(handle["preview"]) <= paths._PREVIEW_BYTE_CAP
+        assert handle["preview"] != [result]
 
 
 # =========================================================================== purity guard
