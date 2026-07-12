@@ -71,8 +71,8 @@ gsheets --json read-values <YOUR_SPREADSHEET_ID> --data-filter-json '[
 
 `ranges` and `--data-filter-json` are the **two mutually exclusive addressing paths** — pass exactly
 one (CLI accepts `@file.json`; MCP arg is `data_filters`). An invalid selector → `bad_data_filters`.
-`describe` takes the same selector grammar; `read-many` accepts per-request `data_filters` in values
-mode. Pair developer-metadata addressing with `metadata` (advanced) to set the keys you look up here.
+`read-many` accepts per-request `data_filters` in values mode. Pair developer-metadata addressing
+with `metadata` (advanced) to set the keys you look up here.
 
 **The write side is symmetric.** `write-values-by-data-filter` and `clear-by-data-filter` take the
 **same selectors**, so a block tagged once with a metadata key can be written or cleared long after
@@ -443,12 +443,15 @@ so to report what a viewer actually sees, check both.
 **Fixed vs. auto-fit — the size mode you choose.** There are two kinds of row/column size:
 
 - **Fixed / forced** — `set_props {"pixelSize": N}` PINS the size; the row/col will NOT grow to
-  fit content (the equivalent of Apps Script's `setRowHeightsForced`). This is "auto-resize OFF".
-  Use it for a stable layout that ignores content height.
-- **Auto-fit** — `auto_resize` sizes the row/col to its content. This is "auto-resize ON". Use it
-  to fit-to-content / turn auto-resize back on after a fixed size.
+  fit content (the equivalent of Apps Script's `setRowHeightsForced`). Use it for a stable layout
+  that ignores content height.
+- **Auto-fit** — `auto_resize` does a **one-time** fit of the row/col to its **current** content
+  (Google's `autoResizeDimensions`). It is a single fit, not a persistent mode that keeps tracking
+  future edits — re-run it after the content changes. Use it to fit-to-content, e.g. to undo a
+  previously pinned fixed size.
 
-So the toggle is: `set_props {"pixelSize": N}` = fixed; `auto_resize` = auto-fit.
+So: `set_props {"pixelSize": N}` pins a fixed size; `auto_resize` performs a one-time fit to the
+current content.
 
 **Reading sizes** — `read {"sizes": true}` widens the (still grid-data-free) metadata mask to pull
 `pixelSize` and returns `rowHeights`/`colWidths`: lists of coalesced runs, each

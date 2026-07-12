@@ -80,27 +80,26 @@ Understand (read-only):
   (date/number interpretation signal), and — when the workbook has a theme — the `theme` map
   (`{ACCENT1:"#4285F4", TEXT:"#000000", …}`) + `themeFontFamily`. That map is the RESOLVER for the
   `theme:NAME` colors every other read emits. No grid data. Start here.
-- `describe <ID> <RANGE...>` — the "understand a region" verb: ONE call returns, per range, the
-  cells (values + formulas + both formats + validation), the sheet's merges, the conditional-format
-  rules that INTERSECT that range, its tables, banding, and protected ranges, plus a validation
-  summary. Multi-range AND multi-sheet. Collapses what used to be `inspect` + `structure` +
-  `read-conditional-formats` into one `spreadsheets.get` — start here to characterize a region.
-  `--max-cells N` fails fast on a region that is too big. Address by A1 ranges OR by
-  `--data-filter-json` (exactly one) — the latter selects by gridRange or a developer-metadata key
-  (`{"developerMetadataLookup":{"metadataKey":"block:totals"}}`).
+- `describe <ID> <RANGE>` — the compact region PROFILER: ONE tight-mask call returns a per-column
+  summary — inferred `type` (number/date/text/bool/formula-heavy/empty), fill `density`,
+  `formulaRatio`, and a small `distinctSample` — for a single range, plus the sheet's `merges`. It
+  returns NO per-cell data; it aggregates and discards the grid, so it is cheap and small. Use it to
+  learn WHERE to drill, then `inspect` to read the cells there. `--no-header` profiles row 1 too;
+  `--max-cells N` refuses an over-large range (a bounded range is refused up front, before any
+  fetch). (Breaking change from v0.5: describe no longer returns per-cell `cells`/`regions` — that
+  moved to `inspect`.)
 - `inspect <ID> <RANGE>` — flagship rich read: per-cell values + formulas + userEntered &
   effective formats + merges + validation. `--compact` collapses repeats into rectangular runs.
   `--rich-text` adds per-run rich text (styled segments + in-cell links) and the cell `hyperlink`;
   `--pivot` adds pivot-table definitions; `--chips` adds serialized smart chips
   (person/file/place/finance/rating) — the only way to recover a chip that otherwise reads back as
   plain text (all three attached only to the cells that have them). Reach for `inspect` when you
-  want one tab/range richly (or the rich-text / pivot / chips / compact-runs facets); `describe`
-  when you want the region's structure + CF scoped alongside the cells.
+  want the actual per-cell values/formulas/formats of a region; `describe` first when you only want
+  to know the region's SHAPE (column types + density) before paying for cells.
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
   (`all` returns formulas and computed values side by side). `--major {rows,columns}` (default
   `rows`; MCP `major_dimension`) transposes the read so a column-oriented region comes back keyed by
-  column. Address by A1 ranges OR by `--data-filter-json` (exactly one), same selector grammar as
-  `describe`. For big reads: `--diff-only` drops the duplicate `computed` matrix on static sheets;
+  column. Address by A1 ranges OR by `--data-filter-json` (exactly one). For big reads: `--diff-only` drops the duplicate `computed` matrix on static sheets;
   `--max-cells N` fails fast instead of blowing the token cap (and for pure value dumps, `export
   csv` is better than either — see the gotchas).
 - `formula-patterns <ID> <RANGE...>` — collapse a region's REPEATED formulas to the distinct
@@ -203,11 +202,11 @@ conditional-format results).
 # 1. Orient: cheap, no grid data — tabs, sizes, frozen panes, CF/protected counts.
 gsheets --json overview <YOUR_SPREADSHEET_ID>
 
-# 2. Characterize a region in ONE call: cells + merges + range-scoped CF + tables/banding/
-#    protected + a validation summary. The default first move for "what is this region?".
+# 2. Profile a region cheaply: per-column type + fill density + formula ratio, NO per-cell data.
+#    The default first move for "what shape is this region?" — then drill in with inspect.
 gsheets --json describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50'
 
-# 3. Or drill into a tab/range richly: values + formulas + both formats + validation.
+# 3. Drill into a tab/range richly: values + formulas + both formats + validation.
 #    --compact collapses identical cells into rectangular runs for large/repetitive blocks.
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20'
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:Z1000' --compact
@@ -347,16 +346,19 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   to a concrete `#RRGGBB`, look it up in `overview`'s `theme` map (`theme["ACCENT1"]`). If you
   compare a raw read-back color against a literal `#RRGGBB` WITHOUT resolving, a theme-colored cell
   will not match — that is expected, not a bug.
-- Read AND write by a durable anchor when A1 shifts. `read-values` and `describe` accept
+- Read AND write by a durable anchor when A1 shifts. `read-values` accepts
   `--data-filter-json` (MCP `data_filters`) instead of A1 — each selector is exactly one of
   `{"a1":...}`, `{"gridRange":...}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`.
   The write side is symmetric: `write-values-by-data-filter` / `clear-by-data-filter` take the same
   selectors. Pair any of them with a `metadata --action create` anchor so a region survives inserted
   rows/cols that would break a hard-coded A1 range. You pass A1 ranges OR a data filter, never both
   (core enforces exactly one).
-- Single-quote A1 ranges in the shell. A range like `'WEEK-TEMPLATES!AS$START'` contains `!` and
-  `$`, which zsh/bash will history-expand or variable-expand if unquoted, silently corrupting the
-  argument. Always wrap A1 ranges in single quotes.
+- Single-quote A1 ranges in the shell. A range like `'WEEK-TEMPLATES'!AS5` (A1's own
+  single-quotes wrap the hyphenated sheet name) contains `!` and embedded quotes, which zsh/bash
+  will history-expand or mis-parse if unquoted, silently corrupting the argument. Because the
+  reference already embeds single quotes, pass it with the `'\''`-escape idiom — e.g.
+  `''\''WEEK-TEMPLATES'\''!AS5'` — so the shell hands the whole ref through literally. (This tool's
+  A1 grammar does not accept `$` absolute markers — write `AS5`, not `$AS$5`.) Always quote A1 ranges.
 
 ## Detailed references — read on demand
 
@@ -365,7 +367,7 @@ split by how often a task needs them and each organized Reading / Writing / Oper
 the tier the task calls for (pull in a lower tier first if you haven't):
 
 - **`references/basic.md`** — ~80% of tasks, the everyday loop. `overview`, `describe` (the
-  "understand a region" verb), `inspect` (core flags), `read-values`, `read-conditional-formats`;
+  compact region profiler), `inspect` (core flags), `read-values`, `read-conditional-formats`;
   `write-values`, `append-rows`, `clear`, `format`; `manage-sheets`. Also the core concepts: A1
   addressing, the global `--json`/`--scopes` placement, `USER_ENTERED`, effective-vs-userEntered
   format, and the conditional-format line grammar. Start here for any ordinary read or edit.

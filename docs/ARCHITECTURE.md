@@ -91,7 +91,7 @@ Helper modules with disjoint responsibilities back the function surface:
 |---|---|
 | `service` | `SheetsServices` — the frozen authed handle (sheets resource, optional drive resource, optional account email). |
 | `errors` | `SheetsError` + `classify_google_error()` — maps a Google `HttpError` to a coded, hinted error. |
-| `addressing` | A1 ↔ `GridRange` and sheet-name → `sheetId` (per-call cached); `gridranges_intersect()` — the geometric overlap test `describe` uses to scope conditional-format rules to a requested range. |
+| `addressing` | A1 ↔ `GridRange` and sheet-name → `sheetId` (per-call cached); `gridranges_intersect()` — the geometric overlap test `read_conditional_formats` uses to scope conditional-format rules to a requested range. |
 | `colors` | hex ↔ `ColorStyle` (`rgbColor` / `themeColor`); reads flatten to hex. |
 | `fieldsmask` | `build_fields_mask(payload)` — the minimal `fields` mask covering exactly the keys present. |
 | `flatten` | `flatten_cell_format()` — Google's nested `CellFormat` → flat shape. |
@@ -231,16 +231,16 @@ Two write-side subtleties worth knowing:
 
 Twenty-four core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
 auth-only `auth` subcommand that has no core function). The understanding path is
-`overview → describe → inspect → read_conditional_formats` (`describe` is the unified one-call
-region read that subsumes the latter three for a single region), with `formula_patterns` as the
-token-cheap "what's the formula logic across this wide grid" read; the change path is the writers;
-the raw escape hatch is presented last.
+`overview → describe → inspect → read_conditional_formats` (`describe` is the cheap per-column
+profiler that tells you *where* to drill; `inspect` is the full per-cell read you drill *with*),
+with `formula_patterns` as the token-cheap "what's the formula logic across this wide grid" read;
+the change path is the writers; the raw escape hatch is presented last.
 
 | Core fn | What it does | Kind |
 |---|---|---|
 | `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`, and the workbook `theme` map (`{NAME: hex}`) + `themeFontFamily` (T2.1 — the resolver for `theme:NAME` colors). No grid data. | read |
 | `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`), pivot-table definitions (`include_pivot`), and smart chips (`chips` — person/file/place/finance, T2.2), each attached only to cells that carry them. | read |
-| `describe` | The unified "understand a region" read: ONE `spreadsheets.get(includeGridData=True)` over a tight union mask returns, per requested range, the cells (reusing `inspect`'s flatten), the sheet's merges, the conditional-format rules **intersecting** that range (range-scoped CF, via `addressing.gridranges_intersect`), its tables / banding / protected ranges (reusing the `structure` serializers), and a validation summary. Multi-range and multi-sheet; collapses 3-4 reads into one. No cache. | read |
+| `describe` | The compact per-column PROFILER (T4.1, audit #15): ONE tight-mask `spreadsheets.get` (`effectiveValue` + `effectiveFormat.numberFormat.type` + `userEnteredValue.formulaValue` + `formattedValue`, plus merges) is AGGREGATED to per-column stats — inferred `type` (number/date/text/bool/formula-heavy/empty), fill `density`, `formulaRatio`, and a bounded `distinctSample` — then every per-cell value is DISCARDED. Profiles ONE range (header-aware); `max_cells` refuses a bounded over-large range up front. Returns NO per-cell data — `inspect` is the full per-cell read. **Breaking vs v0.5** (it returned per-cell `regions`/`cells`). | read |
 | `formula_patterns` | Collapse a region's REPEATED formulas to the distinct templates per column: reads only formulas (column-major, no computed bloat), dedupes each column to its templates with relative row refs normalized to `{r}` / `{r±k}`, the row span(s) each covers, and (by default) one sample computed value. A column that does not reduce cleanly is emitted VERBATIM with `reduced=false`; `read_values(render="formula")` stays the lossless ground truth. A bounded / whole-column range returns exactly **one entry per requested column** — trailing all-blank columns (which the API omits) are padded as `{reduced:true, templates:[]}`; only an unbounded-column range (whole-row / whole-sheet) keeps the data-extent count (ISSUES.md #16). Lossy-but-honest, token-cheap on a wide grid. | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). `diff_only` sparsifies the `render="all"` `computed` matrix against `values` (drops static-cell duplication); `max_cells` fails fast with `result_too_large` instead of blowing the caller's token cap. | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
@@ -643,7 +643,7 @@ the Sheets API has no cross-file atomic write, so a multi-file mutation could on
 
 ### Data-filter selectors (`dataselector`)
 
-`read_values`, `describe`, and the per-request `values` mode of `read_many` accept a `data_filters`
+`read_values` and the per-request `values` mode of `read_many` accept a `data_filters`
 list as an **alternative to literal `ranges`** — the durable, position-independent way to address a
 region (a `metadata`-tagged block survives row/column inserts that would shift an A1 range). Core
 enforces **exactly one of `ranges` / `data_filters`** per call; the CLI surfaces the selector list as

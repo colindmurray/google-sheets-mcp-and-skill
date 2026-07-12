@@ -69,7 +69,18 @@ def patched(monkeypatch):
     monkeypatch.setattr(
         cli.core,
         "describe",
-        _make("describe", {"ok": True, "spreadsheetId": "X", "regions": []}),
+        _make(
+            "describe",
+            {
+                "ok": True,
+                "spreadsheetId": "X",
+                "sheet": "S",
+                "range": "A1:B2",
+                "rows": 0,
+                "cols": 0,
+                "columns": [],
+            },
+        ),
     )
     monkeypatch.setattr(
         cli.core,
@@ -469,29 +480,19 @@ def test_inspect_include_flags_map_one_to_one(patched):
     assert kw["include_effective_format"] is True  # untouched default
 
 
-def test_describe_maps_ranges_and_max_cells(patched):
-    _run(["describe", "ID", "Cliff!A1:C2", "Plan!A1", "--max-cells", "500"])
+def test_describe_maps_range_and_max_cells(patched):
+    _run(["describe", "ID", "Cliff!A1:C2", "--max-cells", "500"])
     assert patched["name"] == "describe"
-    # ranges is the first positional core arg after spreadsheet_id; max_cells is a kwarg.
-    assert patched["args"][0] == ["Cliff!A1:C2", "Plan!A1"]
+    # range is the first positional core arg after spreadsheet_id; max_cells/header are kwargs.
+    assert patched["args"][0] == "Cliff!A1:C2"
     assert patched["kwargs"]["max_cells"] == 500
-    assert patched["kwargs"]["data_filters"] is None
+    assert patched["kwargs"]["header"] is True
 
 
-def test_describe_data_filter_json_maps_and_drops_ranges(patched):
-    # SPEC §6 P2: --data-filter-json drives core.describe(data_filters=...); the empty ranges
-    # positional becomes None (core enforces the exactly-one contract).
-    _run([
-        "describe",
-        "ID",
-        "--data-filter-json",
-        '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]',
-    ])
+def test_describe_no_header_flag(patched):
+    _run(["describe", "ID", "Cliff!A1:C2", "--no-header"])
     assert patched["name"] == "describe"
-    assert patched["args"][0] is None
-    assert patched["kwargs"]["data_filters"] == [
-        {"developerMetadataLookup": {"metadataKey": "block:totals"}}
-    ]
+    assert patched["kwargs"]["header"] is False
 
 
 def test_describe_max_cells_defaults_unlimited(patched):
@@ -500,39 +501,45 @@ def test_describe_max_cells_defaults_unlimited(patched):
 
 
 def test_describe_text_render(patched, monkeypatch, capsys):
-    # The text renderer surfaces per-region cells, range-scoped CF (with index), and merges.
+    # The text renderer surfaces the range extent, merges, and one line per column profile.
     monkeypatch.setattr(
         cli.core,
         "describe",
         lambda *a, **k: {
             "ok": True,
             "spreadsheetId": "X",
-            "regions": [
+            "sheet": "Cliff",
+            "range": "Cliff!A1:C2",
+            "rows": 2,
+            "cols": 3,
+            "columns": [
                 {
-                    "range": "Cliff!A1:C2",
-                    "sheet": "Cliff",
-                    "cells": [
-                        {"a1": "A1", "value": "30", "formula": "=SUM(B2:C2)"},
-                    ],
-                    "merges": ["Cliff!B1:C1"],
-                    "conditionalFormats": [
-                        {"index": 0, "line": "[Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9"}
-                    ],
-                    "tables": [],
-                    "bandedRanges": [],
-                    "protectedRanges": [],
-                    "validationSummary": {"cells": 0, "rules": []},
-                }
+                    "col": "A",
+                    "header": "Region",
+                    "type": "text",
+                    "density": 1.0,
+                    "formulaRatio": 0.0,
+                    "distinctSample": ["West", "East"],
+                },
+                {
+                    "col": "C",
+                    "header": "Total",
+                    "type": "formula-heavy",
+                    "density": 1.0,
+                    "formulaRatio": 1.0,
+                },
             ],
+            "merges": ["Cliff!B1:C1"],
         },
     )
     rc = cli.main(["describe", "ID", "Cliff!A1:C2"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "# Cliff!A1:C2" in out
-    assert "=SUM(B2:C2)" in out
-    assert "CF [0]: [Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9" in out
+    assert "# Cliff!A1:C2  2x3" in out
     assert "merge: Cliff!B1:C1" in out
+    assert "A (Region): text, density 1.0" in out
+    assert "e.g. West, East" in out
+    assert "C (Total): formula-heavy, density 1.0, formula 1.0" in out
 
 
 def test_formula_patterns_maps_ranges_and_sample_default(patched):

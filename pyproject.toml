@@ -54,6 +54,14 @@ Repository = "https://github.com/colindmurray/google-sheets-mcp-and-skill"
 [tool.hatch.build.targets.wheel]
 packages = ["src/gsheets"]
 
+# Ship the bundled skill *inside* the wheel as package data under gsheets/skill/.
+# The distribution is literally named "…-and-skill", so an installed wheel must
+# expose SKILL.md + references/*.md. force-include maps the repo-root skill/ tree
+# to gsheets/skill/ inside the built package. (The default hatchling sdist already
+# ships the tracked skill/ tree, so `pip install <sdist>` also carries the skill.)
+[tool.hatch.build.targets.wheel.force-include]
+"skill" = "gsheets/skill"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

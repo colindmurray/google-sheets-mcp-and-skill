@@ -455,7 +455,8 @@ def _structured_payload_for(tool_name: str) -> dict:
     if tool_name == "sheets_describe":
         return {
             "ok": True, "spreadsheetId": "FAKEID", "sheet": "S", "range": "A1:B2",
-            "values": {"ok": True}, "structure": {"ok": True},
+            "rows": 2, "cols": 2,
+            "columns": [{"col": "A", "type": "text", "density": 1.0, "formulaRatio": 0.0}],
         }
     if tool_name == "sheets_formula_patterns":
         return {
@@ -488,7 +489,7 @@ def _args_for(tool_name: str, *, output_format: str, out_path=None) -> dict:
     elif tool_name == "sheets_inspect":
         base |= {"spreadsheet_id": "FAKEID", "range": "S!A1:B2"}
     elif tool_name == "sheets_describe":
-        base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
+        base |= {"spreadsheet_id": "FAKEID", "range": "S!A1:B2"}
     elif tool_name == "sheets_formula_patterns":
         base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
     elif tool_name == "sheets_read_many":

@@ -164,14 +164,17 @@ def test_read_values_exposes_data_filters_optional_and_ranges_not_required():
     assert "ranges" not in required
 
 
-def test_describe_exposes_data_filters_optional_and_ranges_not_required():
-    # SPEC §6 P2: describe also accepts data_filters (symbolic addressing); ranges optional.
+def test_describe_profiles_a_single_range_with_header_flag():
+    # T4.1: describe is now the compact profiler over a SINGLE range; header is an optional bool.
     tool = _tools()["sheets_describe"]
     props = tool.parameters.get("properties", {})
     required = tool.parameters.get("required", [])
-    assert "data_filters" in props
-    assert "data_filters" not in required
-    assert "ranges" not in required
+    assert "range" in props and "range" in required
+    assert "header" in props
+    assert props["header"].get("default") is True
+    # the old multi-range / symbolic-addressing knobs are gone.
+    assert "ranges" not in props
+    assert "data_filters" not in props
 
 
 def test_read_conditional_formats_exposes_range_optional():

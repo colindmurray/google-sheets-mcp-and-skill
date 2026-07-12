@@ -115,32 +115,30 @@ def test_inspect_compact_runs():
 
 
 def test_describe_result_mirrors_core_dict_and_round_trips():
-    # The DescribeResult mirror validates a describe core dict and (with null pruning) reproduces
-    # it field-for-field — the model is a mechanical mirror, no reshaping (SPEC §3.5 round-trip).
+    # The DescribeResult mirror validates the compact-profiler core dict and (with null pruning)
+    # reproduces it field-for-field — a mechanical mirror, no reshaping (T4.1 round-trip).
     import json
     from pathlib import Path
 
     golden = json.loads(
-        (Path(__file__).parent / "golden" / "describe_region.json").read_text()
+        (Path(__file__).parent / "golden" / "describe_profile.json").read_text()
     )
     core_dict = golden["expected"]
     m = models.DescribeResult.model_validate(core_dict)
-    # The two regions mirror through, typed.
-    assert [r.range for r in m.regions] == ["Cliff!A1:C2", "Plan!A1"]
-    region0 = m.regions[0]
-    assert region0.cells[0].formula == "=SUM(B2:C2)"
-    assert region0.cells[0].effectiveFormat.bold is True
-    assert region0.merges == ["Cliff!B1:C1"]
-    # range-scoped CF: only the intersecting rule survives, keeping its index.
-    assert len(region0.conditionalFormats) == 1
-    assert region0.conditionalFormats[0].index == 0
-    assert region0.protectedRanges[0].protectedRangeId == 5
-    assert region0.validationSummary.cells == 0
+    assert m.range == "Sales!A1:D5"
+    assert m.rows == 5 and m.cols == 4
+    assert [c.col for c in m.columns] == ["A", "B", "C", "D"]
+    # types + header + formula ratio mirror through, typed.
+    assert m.columns[1].type == "date"
+    assert m.columns[1].header == "Date"
+    assert m.columns[3].type == "formula-heavy"
+    assert m.columns[3].formulaRatio == 1.0
+    assert m.merges == ["Sales!A1:D1"]
     # Null-pruned dump reproduces the core dict exactly (mechanical mirror).
     assert m.model_dump() == core_dict
-    # Terse render leads with the range + a compact tally.
-    assert "[Cliff!A1:C2]" in m.terse
-    assert "CF 0:" in m.terse
+    # Terse render leads with the range + extent, one line per column.
+    assert "[Sales!A1:D5] 5x4" in m.terse
+    assert "A (Region): text" in m.terse
 
 
 def test_formula_patterns_result_mirrors_core_dict_and_terse():
@@ -475,6 +473,103 @@ def test_batch_result_new_ids():
     m = models.BatchResult.model_validate(data)
     assert m.newIds.sheetIds == [7]
     assert "2 reply" in m.terse and "sheets=[7]" in m.terse
+
+
+def test_structure_mutate_ack_add_table_banding_filter_view_ids():
+    # T4.2/#31: StructureResult must DECLARE the ids core returns from add_table /
+    # add_banding / add_filter_view (tableId/bandedRangeId/filterViewId) so the advertised
+    # MCP output schema surfaces them — not just tolerate them via extra="allow".
+    declared = set(models.StructureResult.model_fields)
+    assert {"tableId", "bandedRangeId", "filterViewId"} <= declared
+
+    table = models.StructureResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "action": "add_table",
+            "range": "Sheet1!A1:F500",
+            "tableId": "abc",
+        }
+    )
+    assert table.tableId == "abc"
+
+    banding = models.StructureResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "action": "add_banding",
+            "range": "Sheet1!A1:F500",
+            "bandedRangeId": 7,
+        }
+    )
+    assert banding.bandedRangeId == 7
+
+    fview = models.StructureResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "action": "add_filter_view",
+            "range": "Sheet1!A1:F500",
+            "filterViewId": 123,
+        }
+    )
+    assert fview.filterViewId == 123
+
+
+def test_new_ids_declares_all_nine_buckets():
+    # T4.2/#31: NewIds must DECLARE all nine capture_new_ids buckets so the batch output
+    # schema advertises every id core can surface (not only the original five).
+    declared = set(models.NewIds.model_fields)
+    assert {
+        "sheetIds",
+        "chartIds",
+        "namedRangeIds",
+        "protectedRangeIds",
+        "metadataIds",
+        "tableIds",
+        "bandedRangeIds",
+        "filterViewIds",
+        "slicerIds",
+    } == declared
+
+    ids = models.NewIds.model_validate(
+        {
+            "sheetIds": [7],
+            "chartIds": [42],
+            "namedRangeIds": ["nr_abc"],
+            "protectedRangeIds": [3],
+            "metadataIds": [99],
+            "tableIds": ["tbl_1"],
+            "bandedRangeIds": [11],
+            "filterViewIds": [123],
+            "slicerIds": [4],
+        }
+    )
+    assert ids.tableIds == ["tbl_1"]
+    assert ids.bandedRangeIds == [11]
+    assert ids.filterViewIds == [123]
+    assert ids.slicerIds == [4]
+
+
+def test_batch_result_terse_surfaces_new_id_buckets():
+    # T4.2/#31: BatchResult.terse must summarize the four newly-declared buckets too.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "replies": [{}, {}, {}, {}],
+        "newIds": {
+            "tableIds": ["tbl_1"],
+            "bandedRangeIds": [11],
+            "filterViewIds": [123],
+            "slicerIds": [4],
+        },
+    }
+    m = models.BatchResult.model_validate(data)
+    terse = m.terse
+    assert "tables=['tbl_1']" in terse
+    assert "banded=[11]" in terse
+    assert "filterViews=[123]" in terse
+    assert "slicers=[4]" in terse
 
 
 # --------------------------------------------------------------------------------------

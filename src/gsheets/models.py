@@ -277,38 +277,22 @@ class SheetCFRules(_Sub):
     rules: Optional[list[CFRule]] = None
 
 
-class ValidationSummary(_Sub):
-    """The per-region validation rollup in ``describe`` (SPEC §3.2 ``validationSummary``).
+class DescribeColumn(_Sub):
+    """One column's profile in ``describe`` (T4.1 — the compact per-column profiler).
 
-    Mirrors ``core.reads._validation_summary``: ``cells`` is how many cells in the region carry a
-    data-validation rule; ``rules`` is the DISTINCT terse one-liners present (first-seen order).
-    Token-cheap — the per-cell ``validation``/``validationRule`` keys still ride each cell.
+    Mirrors ``core.reads._profile_block``'s per-column dict: ``col`` is the A1 column letter;
+    ``header`` the header text (header mode only, when the first row's cell is non-empty); ``type``
+    the inferred column type (``number``/``date``/``text``/``bool``/``formula-heavy``/``empty``);
+    ``density`` the non-empty data-cell ratio; ``formulaRatio`` the formula-cell ratio; and
+    ``distinctSample`` up to five distinct display values (omitted when empty).
     """
 
-    cells: Optional[int] = None
-    rules: Optional[list[str]] = None
-
-
-class DescribeRegion(_Sub):
-    """One requested range's merged region view in ``describe`` (SPEC §3.2).
-
-    Mirrors ``core.reads.describe``'s per-region dict — built by REUSING the existing serializers,
-    so each field is the SAME shape the standalone read emits: ``cells`` are :class:`Cell` (inspect's
-    full per-cell flatten), ``conditionalFormats`` are :class:`CFRule` (filtered to rules
-    INTERSECTING this range, each keeping its priority ``index``), ``tables``/``bandedRanges``/
-    ``protectedRanges`` are the structure read shapes, ``merges`` are A1 strings, and
-    ``validationSummary`` is the token-cheap rollup.
-    """
-
-    range: Optional[str] = None
-    sheet: Optional[str] = None
-    cells: Optional[list[Cell]] = None
-    merges: Optional[list[str]] = None
-    conditionalFormats: Optional[list[CFRule]] = None
-    tables: Optional[list["Table"]] = None
-    bandedRanges: Optional[list["Banding"]] = None
-    protectedRanges: Optional[list[ProtectedRange]] = None
-    validationSummary: Optional[ValidationSummary] = None
+    col: Optional[str] = None
+    header: Optional[str] = None
+    type: Optional[str] = None
+    density: Optional[float] = None
+    formulaRatio: Optional[float] = None
+    distinctSample: Optional[list[str]] = None
 
 
 class ValueRange(_Sub):
@@ -405,13 +389,23 @@ class CFMutationResult(_Sub):
 
 
 class NewIds(_Sub):
-    """Captured reply ids from ``batch`` (DESIGN §3.3/§5.4). Every bucket is always a list."""
+    """Captured reply ids from ``batch`` (DESIGN §3.3/§5.4). Every bucket is always a list.
+
+    Mirrors ``core.structure.capture_new_ids``'s nine buckets exactly (T4.2/#31): the original
+    five plus the v0.2 ``tableIds``/``bandedRangeIds``/``filterViewIds``/``slicerIds`` — so the
+    advertised MCP output schema declares every id core can surface from a ``batchUpdate``.
+    """
 
     sheetIds: list[int] = []
     chartIds: list[int] = []
     namedRangeIds: list[str] = []
     protectedRangeIds: list[int] = []
     metadataIds: list[int] = []
+    # T4.2/#31 — v0.2 add-reply ids (tables carry a STRING id; the rest are ints).
+    tableIds: list[str] = []
+    bandedRangeIds: list[int] = []
+    filterViewIds: list[int] = []
+    slicerIds: list[int] = []
 
 
 # --- v0.2 extension sub-models (DESIGN §Extensions / §X.0) ------------------------------
@@ -830,42 +824,35 @@ class ConditionalFormatReport(_Result):
 
 
 class DescribeResult(_Result):
-    """Mirror of ``core.describe`` — one-call merged region view (SPEC §3.2).
+    """Mirror of ``core.describe`` — the compact per-column region PROFILE (T4.1, audit #15).
 
-    ``regions`` is one :class:`DescribeRegion` per requested range (multi-range AND multi-sheet),
-    each merging cells + structure + range-scoped conditional formats from a SINGLE
-    ``spreadsheets.get``. The terse render leads with the range and a compact per-region tally.
+    ``describe`` no longer returns per-cell ``cells`` (BREAKING vs v0.5): it profiles ONE range into
+    ``columns`` (one :class:`DescribeColumn` each), with the region's ``rows``/``cols`` extent and
+    the sheet's ``merges``. For the full per-cell read use ``inspect``. The terse render leads with
+    the range + extent and lists each column's type/density.
     """
 
     spreadsheetId: Optional[str] = None
-    regions: list[DescribeRegion] = []
+    sheet: Optional[str] = None
+    range: Optional[str] = None
+    rows: Optional[int] = None
+    cols: Optional[int] = None
+    columns: list[DescribeColumn] = []
+    merges: Optional[list[str]] = None
 
     @property
     def terse(self) -> str:
-        lines: list[str] = []
-        for region in self.regions:
-            cells = region.cells or []
-            non_empty = sum(
-                1 for c in cells if c.value is not None or c.formula is not None
-            )
-            bits = [f"{non_empty}/{len(cells)} cells"]
-            if region.merges:
-                bits.append(f"{len(region.merges)} merge(s)")
-            if region.conditionalFormats:
-                bits.append(f"{len(region.conditionalFormats)} CF")
-            if region.tables:
-                bits.append(f"{len(region.tables)} table(s)")
-            if region.bandedRanges:
-                bits.append(f"{len(region.bandedRanges)} banding")
-            if region.protectedRanges:
-                bits.append(f"{len(region.protectedRanges)} protected")
-            vs = region.validationSummary
-            if vs and vs.cells:
-                bits.append(f"{vs.cells} validated")
-            lines.append(f"[{region.range}] {', '.join(bits)}")
-            for r in region.conditionalFormats or []:
-                lines.append(f"  CF {r.index}: {r.line}")
-        return "\n".join(lines) if lines else "no regions"
+        head = f"[{self.range}] {self.rows}x{self.cols}"
+        if self.merges:
+            head += f", {len(self.merges)} merge(s)"
+        lines: list[str] = [head]
+        for col in self.columns:
+            name = f"{col.col} ({col.header})" if col.header else (col.col or "?")
+            bits = [f"{col.type}", f"density {col.density}"]
+            if col.formulaRatio:
+                bits.append(f"formula {col.formulaRatio}")
+            lines.append(f"  {name}: {', '.join(bits)}")
+        return "\n".join(lines)
 
 
 class FormulaPatternsResult(_Result):
@@ -1063,6 +1050,12 @@ class StructureResult(_Result):
     end: Optional[int] = None
     # v0.2 §X.16 — slicer write CRUD (add/update/delete) surfaces the captured slicer id.
     slicerId: Optional[int] = None
+    # T4.2/#31 — add/update/delete table/banding/filter-view acks surface the captured id
+    # (``add_*`` from ``capture_new_ids``, ``update_*``/``delete_*`` echoed from params). A
+    # table id is a STRING; banding/filter-view ids are ints.
+    tableId: Optional[str] = None
+    bandedRangeId: Optional[int] = None
+    filterViewId: Optional[int] = None
 
     @property
     def terse(self) -> str:
@@ -1158,6 +1151,14 @@ class BatchResult(_Result):
                 captured.append(f"protected={ids.protectedRangeIds}")
             if ids.metadataIds:
                 captured.append(f"metadata={ids.metadataIds}")
+            if ids.tableIds:
+                captured.append(f"tables={ids.tableIds}")
+            if ids.bandedRangeIds:
+                captured.append(f"banded={ids.bandedRangeIds}")
+            if ids.filterViewIds:
+                captured.append(f"filterViews={ids.filterViewIds}")
+            if ids.slicerIds:
+                captured.append(f"slicers={ids.slicerIds}")
             if captured:
                 new = " | newIds: " + ", ".join(captured)
         return f"batch: {len(self.replies)} reply(ies){new}"
@@ -1701,8 +1702,7 @@ __all__ = [
     "CFCondition",
     "CFRule",
     "SheetCFRules",
-    "ValidationSummary",
-    "DescribeRegion",
+    "DescribeColumn",
     "ValueRange",
     "SheetRef",
     "AppendUpdates",

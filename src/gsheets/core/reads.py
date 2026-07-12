@@ -913,8 +913,8 @@ def read_conditional_formats(
 
     ``range`` (SPEC §6 P3 — range-scoped read): an OPTIONAL A1 range. When given, the read is
     scoped to THAT range's sheet and each rule is kept only when its ranges actually INTERSECT the
-    range — reusing the SAME ``addressing.gridranges_intersect`` filter ``describe`` uses (SPEC §3.3),
-    so "which rules touch this region" is one shared codepath. A surviving rule keeps its ORIGINAL
+    range — via the shared ``addressing.gridranges_intersect`` geometric filter (SPEC §3.3), so
+    "which rules touch this region" is one shared codepath. A surviving rule keeps its ORIGINAL
     positional ``index`` (priority is array position — never renumbered by filtering), so it still
     addresses correctly via ``set_conditional_format``. ``range`` carries its own sheet, so passing
     both ``range`` and ``sheet`` raises ``conflicting_args``.
@@ -1042,10 +1042,9 @@ def _serialize_cf_rules(
     """Serialize a sheet's ``conditionalFormats`` array to the read-side rule list (SPEC §3.3).
 
     The list-level counterpart of :func:`_serialize_cf_rule`, callable on a pre-fetched per-sheet
-    ``conditionalFormats`` array — so ``describe`` reuses the SAME line-grammar serializer instead
-    of re-implementing it. Each rule keeps its ORIGINAL positional ``index`` (priority — 0 highest)
-    regardless of any filtering, so a rule surfaced by ``describe`` still addresses correctly via
-    ``set_conditional_format``.
+    ``conditionalFormats`` array. Each rule keeps its ORIGINAL positional ``index`` (priority — 0
+    highest) regardless of any filtering, so a rule surfaced by a range-scoped read still addresses
+    correctly via ``set_conditional_format``.
 
     When ``intersecting`` (a ``GridRange``) is supplied, only rules whose ranges actually overlap it
     are emitted (via ``addressing.gridranges_intersect``) — the SPEC §3.3 "rules intersecting this
@@ -1087,353 +1086,343 @@ def _rule_intersects(raw_rule: dict, target: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# describe — unified one-call region read (SPEC §3)
+# describe — compact per-column PROFILER (T4.1, audit #15) — BREAKING v0.6
 # ---------------------------------------------------------------------------
-
-# The tight UNION mask: the per-cell facets ``inspect`` requests (full per-cell, since describe is
-# the "understand a region" verb) + the structural facets ``structure``/``read_conditional_formats``
-# request — merges, conditionalFormats (whole rule bodies), tables, bandedRanges, protectedRanges.
-# ONE get carries all of them. ``includeGridData`` is a get PARAMETER (set True separately), never a
-# field in this mask. The per-cell ``values(...)`` subfields mirror ``_inspect_fields`` at its full
-# (every-flag-on) form.
+#
+# describe is the CHEAP "shape/profile" verb, the complement of ``inspect`` (the full per-cell read).
+# It answers "what does this region look like?" — per-column inferred type, fill density, and formula
+# ratio — WITHOUT returning any per-cell array. The mask is deliberately tight: enough to type each
+# cell (``effectiveValue`` + ``effectiveFormat.numberFormat.type`` so a serial-number date is not
+# mistaken for a plain number), detect a formula (``userEnteredValue.formulaValue``), and label a
+# column (``formattedValue`` for a readable ``distinctSample``), plus the sheet's ``merges``. The
+# per-cell grid is aggregated to column stats and then DISCARDED — nothing per-cell is returned.
+#
+# BREAKING (from v0.5 and earlier): describe no longer returns ``regions``/``cells``. Callers that
+# need per-cell values/formulas/formats move to ``inspect`` (or ``read_values`` for a plain grid).
+# The tight fields mask returns grid data WITHOUT ``includeGridData=True`` (a field mask that names
+# grid-data subfields makes Google return them regardless — same as ``inspect``).
 _DESCRIBE_CELL_FIELDS = (
-    "effectiveValue,formattedValue,userEnteredValue,userEnteredFormat,"
-    "effectiveFormat,dataValidation,note"
+    "effectiveValue,formattedValue,"
+    "effectiveFormat.numberFormat.type,userEnteredValue.formulaValue"
 )
 _DESCRIBE_FIELDS = (
     "sheets(properties(sheetId,title),"
     f"data(rowData(values({_DESCRIBE_CELL_FIELDS})),startRow,startColumn),"
-    "merges,conditionalFormats,"
-    "tables,bandedRanges,"
-    "protectedRanges(protectedRangeId,range,description,editors,warningOnly))"
+    "merges)"
 )
+
+# How many distinct display values a column's ``distinctSample`` carries (a bounded profile
+# statistic — NOT a per-cell dump).
+_DISTINCT_SAMPLE_LIMIT = 5
+
+# effectiveFormat.numberFormat.type values that mean a numeric cell is really a DATE/TIME.
+_DATE_NUMBER_FORMATS = frozenset({"DATE", "TIME", "DATE_TIME"})
 
 
 def describe(
     services: SheetsServices,
     spreadsheet_id: str,
-    ranges: list[str] | None = None,
+    range: str,
     *,
     max_cells: int | None = None,
-    data_filters: list[dict] | None = None,
+    header: bool = True,
 ) -> dict:
-    """One-call merged region view: cells + structure + CF for one or more ranges (SPEC §3).
+    """Cheap region PROFILE — per-column type/density/formula-ratio, NO per-cell data (T4.1).
 
-    Characterizing one region the old way cost 3-4 reads (``inspect`` + ``structure`` +
-    ``read_conditional_formats`` [+ ``read_values``]). ``describe`` issues ONE
-    ``spreadsheets.get(ranges=[...], includeGridData=True, fields=<tight union mask>)`` — multi-range
-    AND multi-sheet in a single request — then, per requested range, returns a merged view built by
-    reusing the EXISTING serializers (``_serialize_cells``, ``_serialize_cf_rules`` + the addressing
-    intersect filter, ``structure._serialize_{tables,banding,protected}``) on slices of that one
-    response. There is NO cache: the quota win is the single multi-range get, not stored state (a
-    stale read after a write is worse for an agent than a human).
+    ``describe`` is the "what does this region look like?" verb, the complement of ``inspect`` (the
+    full per-cell read). It issues ONE tight-mask ``spreadsheets.get`` — just enough to type each
+    cell (``effectiveValue`` + the number-format type, so a serial-number date is not mistaken for a
+    plain number), detect a formula (``userEnteredValue.formulaValue``), and sample a readable label
+    (``formattedValue``) — then AGGREGATES the grid to per-column statistics and DISCARDS every
+    per-cell value. The result is a compact profile, not a grid dump.
 
-    Per requested range the result carries ``{range, sheet, cells, merges, conditionalFormats,
-    tables, bandedRanges, protectedRanges, validationSummary}``. ``conditionalFormats`` is filtered
-    to ONLY the rules whose ranges intersect that requested range (range-scoped CF for free),
-    each keeping its original priority ``index``. The structural facets (merges/tables/banding/
-    protected) are sheet-scoped — every region on a sheet sees that sheet's full structural set.
+    Per column the profile carries ``{col, header?, type, density, formulaRatio, distinctSample?}``:
 
-    ``data_filters`` (SPEC §6 P2 — metadata-addressed reads): an OPTIONAL alternative to ``ranges``
-    for SYMBOLIC, insert-proof addressing. When supplied, core issues ONE
-    ``spreadsheets.getByDataFilter(dataFilters=[...], includeGridData=True)`` and derives each
-    region's effective ``GridRange`` from the RETURNED grid block (start offset + dimensions) — so a
-    ``developerMetadataLookup`` selector, whose range is unknown until the response, still gets a
-    correctly range-scoped CF filter. Each selector is one of ``{"a1": ...}`` / ``{"gridRange": ...}``
-    / ``{"developerMetadataLookup": ...}``. Pass EITHER ``ranges`` OR ``data_filters`` (not both).
+    * ``col`` — the A1 column letter (absolute, e.g. ``"B"``).
+    * ``header`` — the column's header text (only in ``header`` mode, when the first row's cell has a
+      non-empty display string).
+    * ``type`` — inferred from the column's non-empty DATA cells: ``number`` | ``date`` | ``text`` |
+      ``bool`` | ``formula-heavy`` (>= half the non-empty cells are formulas) | ``empty``.
+    * ``density`` — non-empty data cells / data-row count (0.0–1.0, 3 decimals).
+    * ``formulaRatio`` — formula cells / non-empty data cells (0.0–1.0, 3 decimals).
+    * ``distinctSample`` — up to five distinct display values (first-seen order), omitted when empty.
 
-    ``max_cells`` (like ``read_values``): when the total cells across all regions exceed it, raise
-    ``result_too_large`` rather than return a payload that only fails at the caller's token cap;
-    ``None`` (default) is unlimited.
+    ``header`` (default ``True``): treat the region's FIRST returned row as a header row — each
+    column's header text is taken from it and it is EXCLUDED from the type/density/formula stats.
+    Pass ``header=False`` for headerless data (row 0 is profiled like any other).
+
+    ``max_cells``: refuse an over-large region UP FRONT. When the requested range is fully bounded
+    (e.g. ``A1:C100``), core estimates ``rows*cols`` from the resolved range and raises
+    ``result_too_large`` BEFORE issuing the data get (no wasted fetch). An unbounded range (a whole
+    column/sheet, whose extent is unknown until fetched) is still guarded against the actual returned
+    cell count after the fetch. ``None`` (default) is unlimited.
+
+    For the full per-cell values/formulas/formats of a region use ``inspect``; for a plain
+    rectangular value grid use ``read_values``.
 
     Args:
         services: The authed handle.
         spreadsheet_id: Target spreadsheet id.
-        ranges: One or more A1 ranges (multi-sheet allowed). ``None`` ⇒ use ``data_filters``.
-        max_cells: Raise ``result_too_large`` past this many cells. Default unlimited.
-        data_filters: SYMBOLIC selectors used INSTEAD of ``ranges`` (read via getByDataFilter).
-            Mutually exclusive with ``ranges``.
+        range: The A1 range to profile (a single range; sheet-qualified or not).
+        max_cells: Raise ``result_too_large`` past this many cells (pre-fetch when bounded). Default
+            unlimited.
+        header: Treat the first returned row as a header row (default ``True``).
 
     Returns:
-        ``{"ok": True, "spreadsheetId": ..., "regions": [{range, sheet, cells, merges,
-        conditionalFormats, tables, bandedRanges, protectedRanges, validationSummary}, ...]}``.
+        ``{"ok": True, "spreadsheetId": ..., "sheet": ..., "range": ..., "rows": ..., "cols": ...,
+        "columns": [{col, header?, type, density, formulaRatio, distinctSample?}, ...], "merges"?}``.
+        ``merges`` is present only when the profiled range's sheet has merges.
     """
-    if ranges and data_filters:
-        raise SheetsError(
-            "conflicting_args", "pass EITHER `ranges` OR `data_filters`, not both"
-        )
-    if not ranges and not data_filters:
-        raise SheetsError(
-            "empty_ranges",
-            "describe requires at least one range (or a data_filters selector)",
-        )
+    # Validate the A1 up front (raises bad_range on garbage) BEFORE any network call.
+    parse_a1(range)
     if max_cells is not None and max_cells < 1:
         raise SheetsError(
             "bad_max_cells", f"max_cells must be a positive integer, got {max_cells!r}"
         )
 
-    # Every A1<->GridRange conversion below (the up-front `resolved`, each region's label, and the
-    # per-merge / per-CF-rule / per-structure conversions inside `_build_region`) resolves
-    # sheetId<->title via `_sheet_index`. Cache it for the WHOLE operation so a multi-region read
-    # does ONE sheet-index get, not one per range/merge/rule — mirroring read_conditional_formats
-    # and structure. The scope is re-entrant, so it's a free no-op when the adapter already opened
-    # one around dispatch; it closes the N+1 only for DIRECT gsheets.core.describe() callers.
+    # One sheet-index cache for the whole op: the range resolution AND every merge's
+    # gridrange_to_a1 share a single sheet-index get (mirrors read_conditional_formats / structure).
     with sheet_index_cache():
-        # Resolve each requested range to a GridRange up front (validates A1 BEFORE any data get,
-        # and gives the (sheetId, start row/col) key that maps response blocks back to ranges). The
-        # data-filter path has no A1 ranges to pre-validate (the selectors resolve server-side).
-        resolved = (
-            [a1_to_gridrange(services, spreadsheet_id, r) for r in ranges]
-            if not data_filters
-            else []
-        )
+        gr = a1_to_gridrange(services, spreadsheet_id, range)
 
-        if data_filters:
-            resp = _describe_get_by_data_filter(services, spreadsheet_id, data_filters)
-        else:
-            resp = _describe_get_by_ranges(services, spreadsheet_id, ranges)
-
-        # Index the response sheets by sheetId; within each sheet, walk its data blocks in order so
-        # a repeated (sheetId, startRow, startColumn) key consumes successive blocks (two requests
-        # for the same anchor each get their own block).
-        sheets_by_id: dict[object, dict] = {}
-        block_cursor: dict[object, int] = {}
-        for sheet_obj in resp.get("sheets") or []:
-            sheet_obj = sheet_obj or {}
-            sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
-            sheets_by_id[sid] = sheet_obj
-            block_cursor[sid] = 0
-
-        regions: list[dict] = []
-        total_cells = 0
-
-        if data_filters:
-            # With data filters the literal A1 / sheetId per region is not known up front (a
-            # developerMetadataLookup resolves only server-side), so walk the response sheets in
-            # order, deriving each region's effective GridRange (and A1 label) from the block.
-            for sheet_obj in resp.get("sheets") or []:
-                sheet_obj = sheet_obj or {}
-                sid = ((sheet_obj.get("properties") or {}).get("sheetId"))
-                for block in sheet_obj.get("data") or []:
-                    block = block or {}
-                    gr = _gridrange_from_block(sid, block)
-                    a1 = gridrange_to_a1(services, spreadsheet_id, gr)
-                    region = _build_region(
-                        services, spreadsheet_id, a1, gr, sheet_obj, block
-                    )
-                    total_cells += _region_cell_count(region)
-                    regions.append(region)
-        else:
-            for a1, gr in zip(ranges, resolved):
-                sid = gr.get("sheetId")
-                sheet_obj = sheets_by_id.get(sid) or {}
-                block = _match_block(sheet_obj, gr, block_cursor, sid)
-                region = _build_region(services, spreadsheet_id, a1, gr, sheet_obj, block)
-                total_cells += _region_cell_count(region)
-                regions.append(region)
-
-    if max_cells is not None and total_cells > max_cells:
-        raise SheetsError(
-            "result_too_large",
-            f"describe spans {total_cells} cells, exceeding max_cells={max_cells}",
-            hint=(
-                "narrow the ranges, or use 'inspect'/'read_values' (render='formula') on a tighter "
-                "region — describe pulls full per-cell grid data for every range"
-            ),
-        )
-
-    return {"ok": True, "spreadsheetId": spreadsheet_id, "regions": regions}
-
-
-def _describe_get_by_ranges(
-    services: SheetsServices, spreadsheet_id: str, ranges: list[str]
-) -> dict:
-    """Issue the one ``spreadsheets.get(ranges=[...], includeGridData=True)`` for ``describe``."""
-    try:
-        return (
-            services.sheets.spreadsheets()
-            .get(
-                spreadsheetId=spreadsheet_id,
-                ranges=list(ranges),
-                includeGridData=True,
-                fields=_DESCRIBE_FIELDS,
+        # PRE-FETCH max_cells guard: when the resolved range is fully bounded, estimate rows*cols and
+        # refuse up front — never fetch a grid only to trim it (T4.1). An unbounded range (open
+        # row/col) can't be sized without the sheet dimensions, so it is guarded post-fetch below.
+        estimate = _bounded_cell_estimate(gr)
+        if max_cells is not None and estimate is not None and estimate > max_cells:
+            raise SheetsError(
+                "result_too_large",
+                f"range {range!r} spans ~{estimate} cells, exceeding max_cells={max_cells}",
+                hint="narrow the range, or drop max_cells to profile it anyway",
             )
-            .execute()
-        )
-    except HttpError as exc:
-        raise classify_google_error(exc, account_email=services.account_email) from exc
 
-
-def _describe_get_by_data_filter(
-    services: SheetsServices, spreadsheet_id: str, data_filters: list[dict]
-) -> dict:
-    """Issue ONE ``spreadsheets.getByDataFilter`` for ``describe`` (SPEC §6 P2 symbolic addressing).
-
-    Translates the public selectors via the shared :mod:`gsheets.core.dataselector` (so the A1 /
-    gridRange / developerMetadataLookup mapping is the SAME one ``read_values`` / ``read_many`` use)
-    and sends the same tight union ``fields`` mask + ``includeGridData=True`` as the ranges path,
-    so the downstream block serialization is identical for both addressing modes.
-    """
-    from .dataselector import build_data_filters
-
-    google_filters = build_data_filters(services, spreadsheet_id, data_filters)
-    body = {"dataFilters": google_filters, "includeGridData": True}
-    try:
-        return (
-            services.sheets.spreadsheets()
-            .getByDataFilter(
-                spreadsheetId=spreadsheet_id,
-                body=body,
-                fields=_DESCRIBE_FIELDS,
+        try:
+            resp = (
+                services.sheets.spreadsheets()
+                .get(spreadsheetId=spreadsheet_id, ranges=[range], fields=_DESCRIBE_FIELDS)
+                .execute()
             )
-            .execute()
-        )
-    except HttpError as exc:
-        raise classify_google_error(exc, account_email=services.account_email) from exc
+        except HttpError as exc:
+            raise classify_google_error(
+                exc, account_email=services.account_email
+            ) from exc
+
+        sheets = resp.get("sheets") or []
+        if not sheets:
+            raise SheetsError(
+                "no_data",
+                f"no sheet data returned for range {range!r}",
+                hint="check the spreadsheet id and that the range names an existing sheet",
+            )
+        sheet_obj = sheets[0] or {}
+        sheet_title = (sheet_obj.get("properties") or {}).get("title")
+
+        data_blocks = sheet_obj.get("data") or []
+        block = data_blocks[0] if data_blocks else {}
+
+        n_rows, n_cols, columns = _profile_block(block or {}, header=header)
+
+        # POST-FETCH max_cells guard for unbounded ranges (the pre-fetch estimate was None).
+        if max_cells is not None and estimate is None:
+            actual = n_rows * n_cols
+            if actual > max_cells:
+                raise SheetsError(
+                    "result_too_large",
+                    f"range {range!r} spans {actual} cells, exceeding max_cells={max_cells}",
+                    hint="narrow the range, or drop max_cells to profile it anyway",
+                )
+
+        merges = [
+            gridrange_to_a1(services, spreadsheet_id, m)
+            for m in (sheet_obj.get("merges") or [])
+        ]
+
+    out: dict = {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "sheet": sheet_title,
+        "range": range,
+        "rows": n_rows,
+        "cols": n_cols,
+        "columns": columns,
+    }
+    if merges:
+        out["merges"] = merges
+    return out
 
 
-def _gridrange_from_block(sid: object, block: dict) -> dict:
-    """Derive a region's effective ``GridRange`` from a returned grid block (SPEC §6 P2).
+def _bounded_cell_estimate(gr: dict) -> int | None:
+    """Estimate a resolved ``GridRange``'s rows*cols, or ``None`` if unbounded on either axis.
 
-    With ``data_filters`` the literal requested range is unknown up front (a developerMetadataLookup
-    resolves only server-side), so the region's bounds come from the response block itself: its
-    ``startRow``/``startColumn`` offset plus the actual ``rowData`` row count and max row width. This
-    GridRange anchors the region's A1 label AND scopes its conditional-format intersect filter.
+    A bounded range (``endRowIndex`` and ``endColumnIndex`` both present) yields an exact cell count
+    for the pre-fetch ``max_cells`` guard. A range left open in either direction (a whole column, a
+    whole row, a whole sheet) can't be sized without the sheet's dimensions, so ``None`` signals the
+    caller to fall back to the post-fetch (actual-cell) guard.
     """
-    start_row = block.get("startRow", 0) or 0
+    end_row = gr.get("endRowIndex")
+    end_col = gr.get("endColumnIndex")
+    if end_row is None or end_col is None:
+        return None
+    rows = end_row - (gr.get("startRowIndex") or 0)
+    cols = end_col - (gr.get("startColumnIndex") or 0)
+    if rows <= 0 or cols <= 0:
+        return 0
+    return rows * cols
+
+
+def _profile_block(block: dict, *, header: bool) -> tuple[int, int, list[dict]]:
+    """Aggregate a PRE-FETCHED grid block into ``(rows, cols, columns)`` per-column stats (T4.1).
+
+    Builds the rectangular grid of raw Google cell dicts (padding jagged rows), optionally peels the
+    first row off as a header row, then for each column computes the inferred type, fill density,
+    formula ratio, and a bounded distinct-value sample from the DATA rows — discarding every per-cell
+    value. ``rows``/``cols`` describe the returned data extent (trailing-empty-trimmed, like a values
+    read); ``columns`` has one entry per column in that extent.
+    """
     start_col = block.get("startColumn", 0) or 0
     row_data = block.get("rowData") or []
-    n_rows = len(row_data)
-    n_cols = max(
-        (len((r or {}).get("values") or []) for r in row_data), default=0
-    )
-    gr: dict = {"sheetId": sid}
-    if n_rows:
-        gr["startRowIndex"] = start_row
-        gr["endRowIndex"] = start_row + n_rows
-    if n_cols:
-        gr["startColumnIndex"] = start_col
-        gr["endColumnIndex"] = start_col + n_cols
-    return gr
+
+    grid: list[list[dict]] = []
+    for r_row in row_data:
+        grid.append([c or {} for c in ((r_row or {}).get("values") or [])])
+    n_rows = len(grid)
+    n_cols = max((len(r) for r in grid), default=0)
+
+    header_row: list[dict] = []
+    if header and n_rows >= 1:
+        header_row = grid[0]
+        data_rows = grid[1:]
+    else:
+        data_rows = grid
+    data_row_count = len(data_rows)
+
+    columns: list[dict] = []
+    for c in range(n_cols):
+        col_letter = _col_letters(start_col + c)
+        col_out: dict = {"col": col_letter}
+
+        if header and c < len(header_row):
+            header_text = _cell_display(header_row[c])
+            if header_text:
+                col_out["header"] = header_text
+
+        non_empty = 0
+        formula_cnt = 0
+        type_counts: dict[str, int] = {"number": 0, "date": 0, "text": 0, "bool": 0}
+        sample: list[str] = []
+        for row in data_rows:
+            cell = row[c] if c < len(row) else {}
+            if _cell_is_empty(cell):
+                continue
+            non_empty += 1
+            if _cell_has_formula(cell):
+                formula_cnt += 1
+            type_counts[_classify_cell_type(cell)] += 1
+            disp = _cell_display(cell)
+            if disp and disp not in sample and len(sample) < _DISTINCT_SAMPLE_LIMIT:
+                sample.append(disp)
+
+        col_out["type"] = _infer_column_type(non_empty, formula_cnt, type_counts)
+        col_out["density"] = (
+            round(non_empty / data_row_count, 3) if data_row_count else 0.0
+        )
+        col_out["formulaRatio"] = (
+            round(formula_cnt / non_empty, 3) if non_empty else 0.0
+        )
+        if sample:
+            col_out["distinctSample"] = sample
+        columns.append(col_out)
+
+    return n_rows, n_cols, columns
 
 
-def _match_block(
-    sheet_obj: dict, gr: dict, block_cursor: dict, sid: object
-) -> dict:
-    """Return the response grid block for a requested range, mapping by (start row/col) offset.
+def _cell_is_empty(cell: dict) -> bool:
+    """True when a raw Google cell carries no value (no effective/formatted value, no formula)."""
+    if not cell:
+        return True
+    if cell.get("effectiveValue"):
+        return False
+    fv = cell.get("formattedValue")
+    if isinstance(fv, str) and fv != "":
+        return False
+    return not _cell_has_formula(cell)
 
-    With ``includeGridData=True`` and multiple ranges, each sheet's ``data[]`` holds one block per
-    requested range on that sheet (in request order). A block carries ``startRow``/``startColumn``;
-    we match a requested range's resolved ``GridRange`` start to a not-yet-consumed block with the
-    same offset (a 0-based start; an unbounded/whole-sheet range starts at 0,0). Falls back to the
-    next block in order if no offset match is found (defensive — Google preserves request order).
+
+def _cell_has_formula(cell: dict) -> bool:
+    """True when the cell's ``userEnteredValue`` is a formula string (begins with ``=``)."""
+    uev = cell.get("userEnteredValue")
+    if isinstance(uev, dict):
+        formula = uev.get("formulaValue")
+        return isinstance(formula, str) and formula.startswith("=")
+    return False
+
+
+def _classify_cell_type(cell: dict) -> str:
+    """Classify a non-empty cell's VALUE type: ``bool`` | ``date`` | ``number`` | ``text``.
+
+    Reads the typed ``effectiveValue`` (a boolean is a bool, a number is a number UNLESS the cell's
+    ``effectiveFormat.numberFormat.type`` marks it a DATE/TIME/DATE_TIME serial, a string is text) and
+    treats an error value as text. Falls back to ``text`` when only a formatted string is present.
     """
-    blocks = sheet_obj.get("data") or []
-    want_row = gr.get("startRowIndex", 0) or 0
-    want_col = gr.get("startColumnIndex", 0) or 0
-    # First, an exact (startRow, startColumn) match among un-consumed blocks (preserves order via
-    # the cursor for repeated identical anchors).
-    start = block_cursor.get(sid, 0)
-    for i in range(start, len(blocks)):
-        b = blocks[i] or {}
-        if (b.get("startRow", 0) or 0) == want_row and (
-            (b.get("startColumn", 0) or 0) == want_col
-        ):
-            block_cursor[sid] = i + 1
-            return b
-    # Fallback: consume the next block in order.
-    if start < len(blocks):
-        block_cursor[sid] = start + 1
-        return blocks[start] or {}
-    return {}
+    ev = cell.get("effectiveValue")
+    if isinstance(ev, dict):
+        if "boolValue" in ev:
+            return "bool"
+        if "numberValue" in ev:
+            nf_type = (
+                ((cell.get("effectiveFormat") or {}).get("numberFormat") or {}).get(
+                    "type"
+                )
+            )
+            return "date" if nf_type in _DATE_NUMBER_FORMATS else "number"
+        if "stringValue" in ev:
+            return "text"
+        if "errorValue" in ev:
+            return "text"
+    return "text"
 
 
-def _build_region(
-    services: SheetsServices,
-    spreadsheet_id: str,
-    a1: str,
-    gr: dict,
-    sheet_obj: dict,
-    block: dict,
-) -> dict:
-    """Build one region's merged view from the single ``describe`` response (SPEC §3.2).
+def _infer_column_type(
+    non_empty: int, formula_cnt: int, type_counts: dict[str, int]
+) -> str:
+    """Reduce a column's per-cell tallies to one label (``empty``/``formula-heavy``/value type).
 
-    Reuses the SAME serializers the standalone reads use — ``_serialize_cells`` (inspect's cell
-    flatten, full per-cell mask), ``_serialize_cf_rules(..., intersecting=gr)`` (the CF line grammar,
-    filtered to rules touching this range), and ``structure._serialize_{tables,banding,protected}``
-    — on slices of the one fetched sheet. ``merges`` are the sheet's merges resolved to A1; the
-    structural facets are sheet-scoped (every region on a sheet sees that sheet's set).
+    An all-empty column is ``empty``; a column where at least half the non-empty cells are formulas
+    is ``formula-heavy`` (the formula-ness dominates the value type); otherwise the majority value
+    type wins, ties broken by the fixed order ``number > date > bool > text`` (so a truly mixed
+    column falls to the most specific present, ending at ``text``).
     """
-    # Reach the ``structure`` MODULE explicitly: ``core/__init__`` re-exports a ``structure``
-    # FUNCTION, so a bare ``from . import structure`` would resolve to the function, not the module
-    # (the same shadow ``paths``/``export`` work around for ``format``). ``import_module`` returns
-    # the real module object carrying ``_serialize_{tables,banding,protected}``.
-    import importlib
-
-    _structure = importlib.import_module("gsheets.core.structure")
-
-    sheet_title = (sheet_obj.get("properties") or {}).get("title")
-
-    cell_view = _serialize_cells(
-        block,
-        compact=False,
-        include_effective_format=True,
-        include_user_entered_format=True,
-        include_formulas=True,
-        include_validation=True,
-        services=services,
-        spreadsheet_id=spreadsheet_id,
-    )
-    cells = cell_view["cells"]
-
-    merges = [
-        gridrange_to_a1(services, spreadsheet_id, m)
-        for m in (sheet_obj.get("merges") or [])
-    ]
-
-    conditional_formats = _serialize_cf_rules(
-        services,
-        spreadsheet_id,
-        sheet_obj.get("conditionalFormats") or [],
-        intersecting=gr,
-    )
-
-    return {
-        "range": a1,
-        "sheet": sheet_title,
-        "cells": cells,
-        "merges": merges,
-        "conditionalFormats": conditional_formats,
-        "tables": _structure._serialize_tables(services, spreadsheet_id, sheet_obj),
-        "bandedRanges": _structure._serialize_banding(services, spreadsheet_id, sheet_obj),
-        "protectedRanges": _structure._serialize_protected(
-            services, spreadsheet_id, sheet_obj
-        ),
-        "validationSummary": _validation_summary(cells),
-    }
+    if non_empty == 0:
+        return "empty"
+    if formula_cnt * 2 >= non_empty:
+        return "formula-heavy"
+    best_type = "text"
+    best_count = -1
+    for candidate in ("number", "date", "bool", "text"):
+        if type_counts.get(candidate, 0) > best_count:
+            best_count = type_counts[candidate]
+            best_type = candidate
+    return best_type
 
 
-def _validation_summary(cells: list[dict]) -> dict:
-    """Summarize the data-validation across a region's cells (SPEC §3.2 ``validationSummary``).
+def _cell_display(cell: dict) -> str:
+    """A cell's readable display string for headers / distinct samples (prefers ``formattedValue``).
 
-    Token-cheap rollup rather than per-cell repetition: how many cells carry a validation rule, and
-    the DISTINCT terse one-liners present (in first-seen order). The per-cell ``validation`` /
-    ``validationRule`` keys are still on the ``cells`` themselves for full fidelity.
+    Uses ``formattedValue`` (what the viewer sees) when present; else the typed ``effectiveValue``
+    scalar stringified; else ``""`` (an empty/absent cell).
     """
-    count = 0
-    distinct: list[str] = []
-    for cell in cells:
-        line = cell.get("validation")
-        if line:
-            count += 1
-            if line not in distinct:
-                distinct.append(line)
-    return {"cells": count, "rules": distinct}
-
-
-def _region_cell_count(region: dict) -> int:
-    """Count a region's serialized cells (for the ``max_cells`` guard)."""
-    return len(region.get("cells") or [])
+    fv = cell.get("formattedValue")
+    if isinstance(fv, str) and fv != "":
+        return fv
+    ev = cell.get("effectiveValue")
+    if isinstance(ev, dict):
+        for key in ("stringValue", "numberValue", "boolValue"):
+            if key in ev:
+                return str(ev[key])
+        error = ev.get("errorValue")
+        if isinstance(error, dict):
+            return str(error.get("type") or error.get("message") or "")
+    return ""
 
 
 def _serialize_cf_rule(

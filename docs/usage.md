@@ -83,7 +83,7 @@ Understand (read-only):
 |---|---|
 | `overview <ID>` | Cheap orientation: tabs, sizes, frozen panes, CF/protected counts, named ranges, and the workbook `theme` map (`{NAME: hex}`) + `themeFontFamily` — the resolver for `theme:NAME` colors. No grid data. Start here. |
 | `inspect <ID> <RANGE>` | Rich per-cell read: values + formulas + both formats + merges + validation. `--compact` collapses repeats into rectangular runs. `--rich-text`/`--pivot`/`--chips` (smart chips: person/file/place/finance) opt in. |
-| `describe <ID> [RANGE...]` | Structured shape/profile read — orient on what's *in* a sheet without pulling every cell. Optional ranges or `--data-filter-json`; `--max-cells N` aborts oversize reads up front. |
+| `describe <ID> <RANGE>` | Compact per-column PROFILE of one range — inferred type, fill density, and formula ratio per column, *without* any per-cell data. `--no-header` profiles row 1 too; `--max-cells N` aborts an oversize range up front (bounded ranges refuse before fetch). Use `inspect` for cells. |
 | `formula-patterns <ID> <RANGE...>` | Group a range's formulas into reusable patterns (one entry per distinct relative formula). Column-major; `--no-sample` skips the formatted-sample pass. Ranges required. |
 | `read-values <ID> [RANGE...]` | Values with `--render {plain,unformatted,formula,all}` (`all` = formula + computed side by side). `--major {rows,columns}` picks the major dimension; `--data-filter-json` reads by selector instead of A1; `--diff-only` (with `--render all`) nulls computed cells equal to their value; `--max-cells N` aborts oversize reads. |
 | `read-conditional-formats <ID> [--sheet N \| --range A1]` | CF rules as terse round-trippable lines with positional `index`. Scope by `--sheet` (whole tab) **or** `--range` (the range carries its own sheet) — the two are mutually exclusive. |
@@ -131,8 +131,10 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 ```
 
 `describe` is the cheap middle step between `overview` (no grid) and `inspect`/`read-values` (full
-cells): it profiles what a region *contains* — column types, density, formula vs. literal — so you
-know where to drill before paying for cells. `formula-patterns` collapses a column of structurally
+cells): from ONE tight-mask read it profiles what a region *contains* — per-column inferred type,
+fill density, and formula-vs-literal ratio, plus a small sample of distinct values — then discards
+every cell, so you know where to drill before paying for cells. It never returns per-cell data;
+reach for `inspect` when you need the values/formulas/formats themselves. `formula-patterns` collapses a column of structurally
 identical formulas (`=C2*D2`, `=C3*D3`, …) into the single relative pattern they share, so an
 auditor reads one line instead of two hundred.
 
@@ -191,17 +193,16 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action delete_slicer --params-json '{"
 
 ## Reading by selector, by dimension, and to a file
 
-**Read by data filter instead of A1** — `read-values` and `describe` accept `--data-filter-json`
-in place of A1 ranges. Each selector is exactly one of an A1 string, a `gridRange`, or a developer
-metadata lookup. Pass exactly one addressing path — A1 ranges **or** `--data-filter-json`, not both
-(`@file.json` is accepted to read the JSON from a file):
+**Read by data filter instead of A1** — `read-values` accepts `--data-filter-json` in place of A1
+ranges. Each selector is exactly one of an A1 string, a `gridRange`, or a developer metadata lookup.
+Pass exactly one addressing path — A1 ranges **or** `--data-filter-json`, not both (`@file.json` is
+accepted to read the JSON from a file):
 
 ```sh
 gsheets read-values <YOUR_SPREADSHEET_ID> \
   --data-filter-json '[{"a1":"Sheet1!A1:B10"}]'
 gsheets read-values <YOUR_SPREADSHEET_ID> \
   --data-filter-json '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]'  # durable anchor
-gsheets describe <YOUR_SPREADSHEET_ID> --data-filter-json @filters.json
 ```
 
 A developer-metadata selector is the durable way to read a block that rows/cols may shift around —
@@ -228,6 +229,8 @@ gsheets --json read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:C3' --major columns
 
 **Cap an oversize read** — `--max-cells N` on `read-values`/`describe` fails fast with
 `result_too_large` *before* fetching a payload that would only blow the token budget downstream.
+For `describe`, a bounded range (e.g. `A1:C100`) is refused up front from its estimated `rows*cols`,
+so no grid is fetched at all.
 
 ## Output format and writing reads to a file
 
@@ -240,13 +243,13 @@ adapters expose output differently:
   with no extra trailing newline, so CLI-piped bytes are byte-for-byte identical to the `out_path`
   file and the MCP no-`out_path` string (the renderer already self-terminates — csv/tsv with `\r\n`,
   jsonl with `\n`). Only the human views `text`/`json` add a friendly trailing newline.
-- **MCP**: a per-tool `output_format` arg, present only on the five read tools that render
+- **MCP**: a per-tool `output_format` arg, present only on the six read tools that render
   (`sheets_read_values`, `sheets_inspect`, `sheets_describe`, `sheets_formula_patterns`,
-  `sheets_read_many`). `sheets_read_values` accepts the full set including `csv`/`tsv`; the
-  structured reads top out at `markdown` (no `csv`/`tsv`). Other tools return their mirror model
-  only and have no `output_format`.
+  `sheets_read_conditional_formats`, `sheets_read_many`). `sheets_read_values` accepts the full set
+  including `csv`/`tsv`; the structured reads top out at `markdown` (no `csv`/`tsv`). Other tools
+  return their mirror model only and have no `output_format`.
 
-**`out_path` (MCP only)** — those same five read tools take an optional `out_path`. When set, the
+**`out_path` (MCP only)** — those same six read tools take an optional `out_path`. When set, the
 rendered read is written to that local file (utf-8) and a small **handle** is returned instead of the
 payload — `{ok, path, format, rows, cols, bytes, preview}` with `preview` capped at the first few
 records. This is an MCP-side escape valve for large reads; it is **not** a CLI flag and **not** a

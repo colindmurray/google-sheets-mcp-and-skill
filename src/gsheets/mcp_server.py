@@ -698,45 +698,42 @@ def sheets_inspect(
 def sheets_describe(
     spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
     ctx: Context,
-    ranges: Annotated[
-        Optional[list[str]],
+    range: Annotated[
+        str,
         Field(
-            description='One or more A1 ranges to characterize, e.g. ["Cliff!A1:F50", '
-            '"Plan!A1:B20"] — multi-range AND multi-sheet in one call. Omit and pass data_filters '
-            "instead for symbolic (insert-proof) addressing. Exactly one of ranges / data_filters."
+            description='A single A1 range to PROFILE, e.g. "Cliff!A1:F500" — sheet-qualified or '
+            "not. describe reads a compact per-column summary, NOT the cells; use sheets_inspect for "
+            "the full per-cell values/formulas/formats."
         ),
-    ] = None,
+    ],
+    header: Annotated[
+        bool,
+        Field(
+            description="Treat the first row of the range as a HEADER row: its text becomes each "
+            "column's header and it is excluded from the type/density/formula stats. Pass false for "
+            "headerless data (row 1 is profiled like any other). Default true."
+        ),
+    ] = True,
     max_cells: Annotated[
         Optional[int],
         Field(
-            description="Fail with result_too_large if the regions span more than this many cells, "
-            "instead of returning a payload that only fails at the token cap. null = unlimited. "
-            "describe pulls full per-cell grid data, so narrow the ranges for a big region."
-        ),
-    ] = None,
-    data_filters: Annotated[
-        Optional[list[dict]],
-        Field(
-            description="Symbolic addressing INSTEAD of ranges (insert-proof): a list of selectors, "
-            'each one of {"a1": "Sheet1!A1:B10"} | {"gridRange": {...}} | '
-            '{"developerMetadataLookup": {"metadataKey": "block:totals"}}. Reads via '
-            "getByDataFilter; each region's range is derived from the returned block. Mutually "
-            "exclusive with ranges."
+            description="Fail with result_too_large if the range spans more than this many cells. "
+            "For a bounded range (e.g. A1:C100) describe refuses UP FRONT, before any fetch. "
+            "null = unlimited."
         ),
     ] = None,
     output_format: Annotated[
         StructuredFormat,
         Field(
             description="Output format: text (default) | json | jsonl | markdown. This is a "
-            "STRUCTURED read (merged cells + structure + CF, not a rectangular value grid), so "
-            "csv/tsv are not offered — use sheets_read_values for those; markdown renders "
-            "key/value lines for a structured read."
+            "STRUCTURED profile (per-column stats, not a rectangular value grid), so csv/tsv are "
+            "not offered — use sheets_read_values for those; markdown renders key/value lines."
         ),
     ] = "text",
     out_path: Annotated[
         Optional[str],
         Field(
-            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered region view to "
+            description="OPT-IN LOCAL FILE SIDE EFFECT: when set, write the rendered profile to "
             "this local file (utf-8, output_format; text resolves to json) and return a small handle "
             "{ok, path, format, rows, cols, bytes, preview} INSTEAD of the payload. The parent "
             "directory must already exist (it is never created); credential / config paths are "
@@ -746,33 +743,33 @@ def sheets_describe(
     overwrite: OverwritePath = False,
     retry: RetryParam = None,
 ) -> models.DescribeResult:
-    """Understand a region in ONE call: per requested range, the cells (values + formulas + both
-    formats + validation), the sheet's merges, the conditional-format rules that INTERSECT that
-    range, its native tables, banding, and protected ranges, plus a validation summary.
+    """Profile a region CHEAPLY: per-column inferred type, fill density, and formula ratio — WITHOUT
+    returning any per-cell data. This is the "what does this region look like?" verb, the complement
+    of ``sheets_inspect`` (the full per-cell read).
 
-    This is the "understand a region" verb: it collapses what used to be 3-4 calls
-    (``sheets_inspect`` + ``sheets_structure`` + ``sheets_read_conditional_formats``) into one
-    ``spreadsheets.get`` — cheaper against the read-quota wall and self-consistent. The
-    conditional-format rules are scoped to each requested range automatically (only rules whose
-    ranges touch it), and each keeps its priority ``index`` so you can edit it with
-    ``sheets_set_conditional_format``. For a plain bulk value dump use ``sheets_read_values``; for
-    just the rules across a whole tab use ``sheets_read_conditional_formats``.
+    It issues ONE tight-mask ``spreadsheets.get`` — just enough to type each cell (a serial-number
+    date is distinguished from a plain number), detect formulas, and sample a readable label — then
+    aggregates the grid to per-column statistics and DISCARDS the per-cell values. Cheap against the
+    read-quota wall and small in the agent's context.
 
-    Pass ``data_filters`` INSTEAD of ``ranges`` for symbolic, insert-proof addressing (read via
-    getByDataFilter): a block tagged once via ``sheets_metadata`` is described by
-    ``{"developerMetadataLookup": {"metadataKey": "block:totals"}}`` even after rows shift; each
-    region's range is derived from the returned block. (Exactly one of ``ranges`` / ``data_filters``.)
+    Per column: ``{col, header?, type, density, formulaRatio, distinctSample?}`` where ``type`` is
+    ``number`` | ``date`` | ``text`` | ``bool`` | ``formula-heavy`` | ``empty``. With ``header=true``
+    (the default) the first row supplies each column's header and is excluded from the stats.
 
-    Setting ``out_path`` writes the rendered view to a LOCAL FILE (utf-8) and returns a small handle
-    instead of the payload — an opt-in local side effect; the spreadsheet itself is never modified,
-    so this tool stays read-only. It REFUSES to overwrite an existing file unless ``overwrite=True``.
+    For the full per-cell values/formulas/formats use ``sheets_inspect``; for a plain rectangular
+    value grid use ``sheets_read_values``; for the conditional-format rules on a tab use
+    ``sheets_read_conditional_formats``.
+
+    Setting ``out_path`` writes the rendered profile to a LOCAL FILE (utf-8) and returns a small
+    handle instead of the payload — an opt-in local side effect; the spreadsheet itself is never
+    modified, so this tool stays read-only. It REFUSES to overwrite an existing file unless
+    ``overwrite=True``.
 
     Returns:
-        ``{ok, spreadsheetId, regions:[{range, sheet, cells:[{a1, value, formula, userEnteredFormat,
-        effectiveFormat, note, validation, validationRule}], merges, conditionalFormats:[{index,
-        line, ranges, kind, ...}], tables, bandedRanges, protectedRanges, validationSummary:{cells,
-        rules}}]}`` — one region per requested range, in request order. With ``out_path`` set,
-        returns the file handle ``{ok, path, format, rows, cols, bytes, preview}`` instead.
+        ``{ok, spreadsheetId, sheet, range, rows, cols, columns:[{col, header?, type, density,
+        formulaRatio, distinctSample?}], merges?}`` — ``merges`` present only when the sheet has
+        merges. With ``out_path`` set, returns the file handle ``{ok, path, format, rows, cols,
+        bytes, preview}`` instead.
     """
     return _call_formatted(
         models.DescribeResult,
@@ -780,12 +777,12 @@ def sheets_describe(
         output_format,
         _services(ctx),
         spreadsheet_id,
-        ranges,
+        range,
         out_path=out_path,
         overwrite=overwrite,
         retry=retry,
         max_cells=max_cells,
-        data_filters=data_filters,
+        header=header,
     )
 
 

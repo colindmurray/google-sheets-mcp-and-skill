@@ -1,0 +1,279 @@
+{
+  "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+  "range": "Sales!A1:D5",
+  "kwargs": {},
+  "sheet_index": {
+    "sheets": [
+      {
+        "properties": {
+          "sheetId": 0,
+          "title": "Sales",
+          "index": 0
+        }
+      }
+    ]
+  },
+  "response": {
+    "sheets": [
+      {
+        "properties": {
+          "sheetId": 0,
+          "title": "Sales"
+        },
+        "data": [
+          {
+            "startRow": 0,
+            "startColumn": 0,
+            "rowData": [
+              {
+                "values": [
+                  {
+                    "effectiveValue": {
+                      "stringValue": "Region"
+                    },
+                    "formattedValue": "Region"
+                  },
+                  {
+                    "effectiveValue": {
+                      "stringValue": "Date"
+                    },
+                    "formattedValue": "Date"
+                  },
+                  {
+                    "effectiveValue": {
+                      "stringValue": "Units"
+                    },
+                    "formattedValue": "Units"
+                  },
+                  {
+                    "effectiveValue": {
+                      "stringValue": "Total"
+                    },
+                    "formattedValue": "Total"
+                  }
+                ]
+              },
+              {
+                "values": [
+                  {
+                    "effectiveValue": {
+                      "stringValue": "West"
+                    },
+                    "formattedValue": "West"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 45001
+                    },
+                    "effectiveFormat": {
+                      "numberFormat": {
+                        "type": "DATE"
+                      }
+                    },
+                    "formattedValue": "2023-03-16"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 10
+                    },
+                    "formattedValue": "10"
+                  },
+                  {
+                    "userEnteredValue": {
+                      "formulaValue": "=C2*10"
+                    },
+                    "effectiveValue": {
+                      "numberValue": 100
+                    },
+                    "formattedValue": "100"
+                  }
+                ]
+              },
+              {
+                "values": [
+                  {
+                    "effectiveValue": {
+                      "stringValue": "East"
+                    },
+                    "formattedValue": "East"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 45002
+                    },
+                    "effectiveFormat": {
+                      "numberFormat": {
+                        "type": "DATE"
+                      }
+                    },
+                    "formattedValue": "2023-03-17"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 20
+                    },
+                    "formattedValue": "20"
+                  },
+                  {
+                    "userEnteredValue": {
+                      "formulaValue": "=C3*10"
+                    },
+                    "effectiveValue": {
+                      "numberValue": 200
+                    },
+                    "formattedValue": "200"
+                  }
+                ]
+              },
+              {
+                "values": [
+                  {
+                    "effectiveValue": {
+                      "stringValue": "West"
+                    },
+                    "formattedValue": "West"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 45003
+                    },
+                    "effectiveFormat": {
+                      "numberFormat": {
+                        "type": "DATE"
+                      }
+                    },
+                    "formattedValue": "2023-03-18"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 30
+                    },
+                    "formattedValue": "30"
+                  },
+                  {
+                    "userEnteredValue": {
+                      "formulaValue": "=C4*10"
+                    },
+                    "effectiveValue": {
+                      "numberValue": 300
+                    },
+                    "formattedValue": "300"
+                  }
+                ]
+              },
+              {
+                "values": [
+                  {
+                    "effectiveValue": {
+                      "stringValue": "North"
+                    },
+                    "formattedValue": "North"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 45004
+                    },
+                    "effectiveFormat": {
+                      "numberFormat": {
+                        "type": "DATE"
+                      }
+                    },
+                    "formattedValue": "2023-03-19"
+                  },
+                  {
+                    "effectiveValue": {
+                      "numberValue": 40
+                    },
+                    "formattedValue": "40"
+                  },
+                  {
+                    "userEnteredValue": {
+                      "formulaValue": "=C5*10"
+                    },
+                    "effectiveValue": {
+                      "numberValue": 400
+                    },
+                    "formattedValue": "400"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "merges": [
+          {
+            "sheetId": 0,
+            "startRowIndex": 0,
+            "endRowIndex": 1,
+            "startColumnIndex": 0,
+            "endColumnIndex": 4
+          }
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "ok": true,
+    "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+    "sheet": "Sales",
+    "range": "Sales!A1:D5",
+    "rows": 5,
+    "cols": 4,
+    "columns": [
+      {
+        "col": "A",
+        "header": "Region",
+        "type": "text",
+        "density": 1.0,
+        "formulaRatio": 0.0,
+        "distinctSample": [
+          "West",
+          "East",
+          "North"
+        ]
+      },
+      {
+        "col": "B",
+        "header": "Date",
+        "type": "date",
+        "density": 1.0,
+        "formulaRatio": 0.0,
+        "distinctSample": [
+          "2023-03-16",
+          "2023-03-17",
+          "2023-03-18",
+          "2023-03-19"
+        ]
+      },
+      {
+        "col": "C",
+        "header": "Units",
+        "type": "number",
+        "density": 1.0,
+        "formulaRatio": 0.0,
+        "distinctSample": [
+          "10",
+          "20",
+          "30",
+          "40"
+        ]
+      },
+      {
+        "col": "D",
+        "header": "Total",
+        "type": "formula-heavy",
+        "density": 1.0,
+        "formulaRatio": 1.0,
+        "distinctSample": [
+          "100",
+          "200",
+          "300",
+          "400"
+        ]
+      }
+    ],
+    "merges": [
+      "Sales!A1:D1"
+    ]
+  }
+}

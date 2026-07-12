@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING — `describe` is now a compact per-column PROFILER (Tier 4, audit #15, T4.1).**
+  `describe` previously requested `includeGridData=True` and returned full per-cell `regions`/`cells`
+  — duplicating `inspect` while its docs promised a cheap "shape/profile" read. It now issues ONE
+  tight-mask `spreadsheets.get` (`effectiveValue` + `effectiveFormat.numberFormat.type` +
+  `userEnteredValue.formulaValue` + `formattedValue`, plus `merges`), aggregates the grid to
+  per-column statistics, and DISCARDS every per-cell value. The new shape is
+  `{ok, spreadsheetId, sheet, range, rows, cols, columns:[{col, header?, type, density, formulaRatio,
+  distinctSample?}], merges?}`, where per-column `type` is inferred
+  (`number`/`date`/`text`/`bool`/`formula-heavy`/`empty`), `density` is the non-empty ratio, and
+  `formulaRatio` is formula cells / non-empty cells.
+  - **Signature change.** `describe` now profiles a SINGLE `range` (was multi-range `ranges` +
+    symbolic `data_filters`). The MCP tool takes `range` + a `header` bool; the CLI takes one
+    positional `range` + `--no-header`. `header=true` (default) treats the first row as a header
+    (its text becomes each column's `header`, excluded from the stats).
+  - **`max_cells` now refuses UP FRONT.** For a bounded range (e.g. `A1:C100`) `describe` estimates
+    `rows*cols` from the resolved range and raises `result_too_large` BEFORE any grid fetch, rather
+    than fetching then trimming. An unbounded range is still guarded against the actual returned
+    cell count post-fetch.
+  - **Migration:** anything that relied on `describe` returning per-cell `cells` (or multi-range
+    `regions`, or `data_filters` addressing) moves to `inspect` (full per-cell read) or `read_values`
+    (plain grid). `inspect` is unchanged.
+  - Logic lives entirely in `core/reads.py`; the two adapters, the `DescribeResult`/`DescribeColumn`
+    mirror models, the bundled skill, `README.md`, and `docs/` were reconciled to the profile shape.
+
 ### Fixed
 - **Tier 1 audit correctness sweep (audit #1–#8).** A batch of shared-core request-builder fixes
   from the codebase audit (see `AUDIT_REPORT.md` / `AUDIT_TASKS.md`). All fixes live in `core/**`

@@ -61,10 +61,10 @@ is the authoritative, always-current flag source for any single command.
 
 ## Reading
 
-The ladder is `overview` (orient cheaply, no grid data) → `describe` (one-call merged region view)
-→ `inspect` (rich per-cell read of one range) → `read-conditional-formats` (the dynamic-coloring
-rules a value read never shows). Reading formulas and `effectiveFormat`, not just values, is the
-point.
+The ladder is `overview` (orient cheaply, no grid data) → `describe` (compact per-column profile of
+a region) → `inspect` (rich per-cell read of one range) → `read-conditional-formats` (the
+dynamic-coloring rules a value read never shows). Reading formulas and `effectiveFormat`, not just
+values, is the point.
 
 ### overview
 
@@ -86,38 +86,45 @@ which tab/range is worth a closer look.
 
 ### describe
 
-The "understand a region" verb: ONE `spreadsheets.get` returns, **per requested range**, a merged
-view — the cells, the sheet's merges, the conditional-format rules that **intersect** that range,
-its native tables, banding, and protected ranges, plus a validation summary. It collapses what used
-to be `inspect` + `structure` + `read-conditional-formats` into a single call, so it is the default
-first move when you want to know what a region IS (not just its raw values).
+The compact region PROFILER: ONE tight-mask `spreadsheets.get` is aggregated to a **per-column**
+summary and then the grid is discarded — so it is cheap and small and returns **no per-cell data**.
+It answers "what shape is this region?" (which columns are numbers vs. dates vs. formulas, how full
+each is) so you know where to drill before paying for cells with `inspect`.
 
 ```sh
 gsheets --json describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50'
-gsheets describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50' 'Plan!A1:B20'   # multi-range, multi-sheet
+gsheets describe <YOUR_SPREADSHEET_ID> 'Sheet1!A1:F50' --no-header    # profile row 1 too
 ```
 
 | Flag | Effect |
 |---|---|
-| `RANGE...` (positional, ≥1) | One or more A1 ranges; multi-range AND multi-sheet in one call. |
-| `--max-cells N` | Fail with `result_too_large` if the regions span more than `N` cells (default: unlimited). describe pulls full per-cell grid data, so narrow the range for a big region. |
+| `RANGE` (positional, exactly one) | A single A1 range to profile. |
+| `--no-header` | Do NOT treat the first row as a header (row 1 is profiled like any other; by default the first row supplies each column's `header` and is excluded from the stats). |
+| `--max-cells N` | Fail with `result_too_large` if the range exceeds `N` cells (default: unlimited). A **bounded** range (e.g. `A1:C100`) is refused UP FRONT from its estimated `rows*cols`, before any grid is fetched. |
 
-Returns `{regions: [...]}`, one entry per requested range in request order:
+Returns the profile envelope — `rows`/`cols` are the region's data extent, `columns` one entry per
+column, `merges` present only when the sheet has merges:
 
 ```jsonc
-{ "range": "Sheet1!A1:F50", "sheet": "Sheet1",
-  "cells": [ /* same flattened Cell shape inspect emits — value, formula, both formats, validation */ ],
-  "merges": ["Sheet1!B1:C1"],
-  "conditionalFormats": [ /* the read-conditional-formats line grammar, ONLY rules whose ranges
-                             intersect this region, each keeping its priority `index` */ ],
-  "tables": [ ... ], "bandedRanges": [ ... ], "protectedRanges": [ ... ],
-  "validationSummary": { "cells": 3, "rules": ["ONE_OF_LIST(Yes,No)"] } }
+{ "ok": true, "spreadsheetId": "…", "sheet": "Sheet1", "range": "Sheet1!A1:F50",
+  "rows": 50, "cols": 6,
+  "columns": [
+    { "col": "A", "header": "Region", "type": "text",  "density": 1.0,  "formulaRatio": 0.0,
+      "distinctSample": ["West", "East", "North"] },
+    { "col": "B", "header": "Date",   "type": "date",  "density": 0.98, "formulaRatio": 0.0 },
+    { "col": "F", "header": "Total",  "type": "formula-heavy", "density": 1.0, "formulaRatio": 1.0 }
+  ],
+  "merges": ["Sheet1!A1:F1"] }
 ```
 
-The conditional-format rules are scoped to the region automatically (range-scoped CF) — and each
-keeps the positional `index` you pass to `set-conditional-format` to edit it. Use `inspect` instead
-when you want one range's rich-text / pivot / compact-runs facets; use `read-conditional-formats`
-when you want every rule on a whole tab regardless of range.
+Each column's `type` is inferred as `number` | `date` | `text` | `bool` | `formula-heavy`
+(≥ half the non-empty cells are formulas) | `empty`; `density` is the non-empty ratio and
+`formulaRatio` the formula ratio over the data rows. Use `inspect` to read the actual cells of a
+column that looks interesting; use `read-conditional-formats` for the CF rules on a tab.
+
+> **Breaking change (v0.6):** `describe` no longer returns per-cell `cells` / multi-range `regions`.
+> Anything that needs cells (values, formulas, formats) now uses `inspect`; a plain grid uses
+> `read-values`.
 
 ### inspect
 
@@ -213,8 +220,8 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID>          # every sheet
 ```
 
 `--sheet NAME` restricts to one tab; omit for every sheet. `--range A1` instead restricts to the
-rules **intersecting** that range (on its own sheet) — the same range-scoped CF `describe` computes,
-but as a standalone read; a surviving rule keeps its original `index`. `--sheet` and `--range` are
+rules **intersecting** that range (on its own sheet) — range-scoped CF as a standalone read; a
+surviving rule keeps its original `index`. `--sheet` and `--range` are
 mutually exclusive (a range carries its own sheet). Each rule returns structured fields plus a `line`
 that is the rule **body only** (no index token — the index lives in the structured `index` field):
 

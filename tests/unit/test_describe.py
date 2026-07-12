@@ -1,19 +1,19 @@
-"""Unit tests for ``gsheets.core.describe`` (SPEC §3 — unified one-call region read).
+"""Unit tests for ``gsheets.core.describe`` — the compact per-column PROFILER (T4.1, audit #15).
 
-``describe`` issues ONE ``spreadsheets.get(ranges=[...], includeGridData=True, fields=<union mask>)``
-and, per requested range, returns ``{range, cells, merges, conditionalFormats, tables, bandedRanges,
-protectedRanges, validationSummary}`` by reusing the EXISTING serializers (``reads._serialize_cells``,
-``reads._serialize_cf_rules`` + the addressing intersect filter, ``structure._serialize_{tables,
-banding,protected}``) on slices of that single response.
+BREAKING (v0.6): ``describe`` no longer returns per-cell ``cells``/``regions``. It issues ONE
+tight-mask ``spreadsheets.get`` (``effectiveValue`` + ``effectiveFormat.numberFormat.type`` +
+``userEnteredValue.formulaValue`` + ``formattedValue``, plus ``merges``), AGGREGATES the grid to
+per-column statistics, and DISCARDS every per-cell value. The full per-cell read is ``inspect``.
 
-These tests run against a MOCKED service: one ``_GetRecorder`` serves both the describe data get
-(``includeGridData=True``) and the sheet-index get the addressing layer issues. They pin:
+These tests run against a MOCKED service: one ``_GetRecorder`` serves both the profiler data get
+and the sheet-index get the addressing layer issues. They pin:
 
-* the ONE get's outbound mask (tight union; never the heavy bare ``includeGridData`` blob);
-* multi-range AND multi-sheet block-to-range mapping;
-* CF rules filtered to those INTERSECTING each requested range (range-scoped CF for free);
-* ``max_cells`` -> ``result_too_large`` (like ``read_values``);
-* NO cache (each call re-issues the get).
+* the ONE data get's outbound mask (tight profiler mask; never the heavy per-cell/CF/table blob);
+* per-column type inference (number/date/text/bool/formula-heavy/empty);
+* density + formulaRatio + distinctSample + header extraction;
+* ``max_cells`` raises ``result_too_large`` BEFORE the data get for a bounded range;
+* NO cache (each call re-issues the get);
+* a golden-master profile.
 """
 
 from __future__ import annotations
@@ -45,8 +45,7 @@ class _GetRecorder:
 
     Dispatches by the requested ``fields`` mask: the sheet-index lookup
     (``sheets.properties(sheetId,title,index)``) returns the fixed index; everything else pops the
-    data-response queue. The data queue is RE-USED per call so a second describe call (no-cache
-    assertion) needs its own queued response.
+    data-response queue.
     """
 
     _SHEET_INDEX_FIELDS = "sheets.properties(sheetId,title,index)"
@@ -93,7 +92,6 @@ def _make_http_error(status=403):
 
 SHEET_ID = "<TEST_SHEET_ID>"
 
-# A two-tab index (Cliff=0, Plan=7) for multi-sheet mapping.
 _INDEX = {
     "sheets": [
         {"properties": {"sheetId": 0, "title": "Cliff", "index": 0}},
@@ -102,41 +100,58 @@ _INDEX = {
 }
 
 
-def _cell(value=None, formula=None):
-    cell: dict = {}
-    if formula is not None:
-        cell["userEnteredValue"] = {"formulaValue": formula}
-    if value is not None:
-        cell["formattedValue"] = str(value)
+def _num(n, *, number_format=None):
+    """A number cell (optionally with an effectiveFormat.numberFormat.type)."""
+    cell: dict = {"effectiveValue": {"numberValue": n}, "formattedValue": str(n)}
+    if number_format is not None:
+        cell["effectiveFormat"] = {"numberFormat": {"type": number_format}}
     return cell
+
+
+def _text(s):
+    return {"effectiveValue": {"stringValue": s}, "formattedValue": s}
+
+
+def _bool(b):
+    return {"effectiveValue": {"boolValue": b}, "formattedValue": "TRUE" if b else "FALSE"}
+
+
+def _formula(formula, computed, *, formatted=None):
+    """A formula cell: userEnteredValue.formulaValue + an effective (computed) value."""
+    ev = {"numberValue": computed} if isinstance(computed, (int, float)) else {
+        "stringValue": str(computed)
+    }
+    return {
+        "userEnteredValue": {"formulaValue": formula},
+        "effectiveValue": ev,
+        "formattedValue": formatted if formatted is not None else str(computed),
+    }
+
+
+def _date(serial, display):
+    return {
+        "effectiveValue": {"numberValue": serial},
+        "effectiveFormat": {"numberFormat": {"type": "DATE"}},
+        "formattedValue": display,
+    }
 
 
 def _block(start_row, start_col, rowdata):
     return {"startRow": start_row, "startColumn": start_col, "rowData": rowdata}
 
 
-# A boolean CF rule over Cliff!A2:A100 (cols A, rows 1..99 0-based half-open).
-_CF_A = {
-    "ranges": [
-        {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 100,
-         "startColumnIndex": 0, "endColumnIndex": 1}
-    ],
-    "booleanRule": {
-        "condition": {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}]},
-        "format": {"backgroundColorStyle": {"rgbColor": {"red": 0.0, "green": 1.0, "blue": 0.0}}},
-    },
-}
-# A boolean CF rule over Cliff!Z2:Z100 (col Z) — should NOT intersect a request in column A.
-_CF_Z = {
-    "ranges": [
-        {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 100,
-         "startColumnIndex": 25, "endColumnIndex": 26}
-    ],
-    "booleanRule": {
-        "condition": {"type": "TEXT_CONTAINS", "values": [{"userEnteredValue": "x"}]},
-        "format": {"backgroundColorStyle": {"rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}}},
-    },
-}
+def _payload(rowdata, *, start_row=0, start_col=0, sheet_id=0, title="Cliff", merges=None):
+    sheet: dict = {
+        "properties": {"sheetId": sheet_id, "title": title},
+        "data": [_block(start_row, start_col, rowdata)],
+    }
+    if merges is not None:
+        sheet["merges"] = merges
+    return {"sheets": [sheet]}
+
+
+def _row(*cells):
+    return {"values": list(cells)}
 
 
 # =========================================================================== mask
@@ -144,246 +159,265 @@ _CF_Z = {
 
 class TestDescribeMask:
     def _run(self):
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="x")]}])],
-                }
-            ]
-        }
+        payload = _payload([_row(_text("x"))])
         services, rec = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        describe(services, SHEET_ID, ["Cliff!A1:B2"])
+        describe(services, SHEET_ID, "Cliff!A1:B2")
         return rec.data_calls[0]
 
-    def test_one_get_with_include_grid_data_and_ranges(self):
+    def test_one_get_scoped_to_the_range(self):
         sent = self._run()
         assert sent["spreadsheetId"] == SHEET_ID
         assert sent["ranges"] == ["Cliff!A1:B2"]
-        assert sent["includeGridData"] is True
+        # The profiler does NOT use includeGridData (a tight field mask returns grid data anyway).
+        assert "includeGridData" not in sent
 
-    def test_mask_unions_inspect_structure_cf(self):
+    def test_mask_is_the_tight_profiler_mask(self):
         fields = self._run()["fields"]
-        # per-cell (inspect) facets
+        # enough to type + detect a formula + label a column
         assert "effectiveValue" in fields
-        assert "userEnteredValue" in fields
-        assert "userEnteredFormat" in fields
-        assert "effectiveFormat" in fields
-        assert "dataValidation" in fields
-        # structural facets
+        assert "userEnteredValue" in fields  # formulaValue presence
+        assert "numberFormat" in fields  # date-vs-number discrimination
+        assert "formattedValue" in fields
         assert "merges" in fields
-        assert "conditionalFormats" in fields
-        assert "tables" in fields
-        assert "bandedRanges" in fields
-        assert "protectedRanges" in fields
-        # never the heavy bare includeGridData blob in the mask itself
-        assert "includeGridData" not in fields
+        # NEVER the heavy per-cell/structure facets the old describe pulled
+        assert "userEnteredFormat" not in fields
+        assert "dataValidation" not in fields
+        assert "conditionalFormats" not in fields
+        assert "tables" not in fields
+        assert "protectedRanges" not in fields
 
 
-# =========================================================================== single range
+# =========================================================================== envelope
 
 
-class TestDescribeSingleRange:
-    def test_cells_merges_and_intersecting_cf(self):
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [
-                        _block(
-                            0, 0,
-                            [{"values": [_cell(formula="=SUM(B:B)", value="10"), _cell(value="hi")]}],
-                        )
-                    ],
-                    "merges": [
-                        {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
-                         "startColumnIndex": 0, "endColumnIndex": 2}
-                    ],
-                    "conditionalFormats": [_CF_A, _CF_Z],
-                    "tables": [],
-                    "bandedRanges": [],
-                    "protectedRanges": [],
-                }
+class TestDescribeEnvelope:
+    def test_top_level_shape(self):
+        payload = _payload(
+            [
+                _row(_text("Name"), _text("Score")),
+                _row(_text("Ann"), _num(10)),
+                _row(_text("Bob"), _num(20)),
             ]
-        }
+        )
         services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        out = describe(services, SHEET_ID, ["Cliff!A1:B2"])
-
+        out = describe(services, SHEET_ID, "Cliff!A1:B3")
         assert out["ok"] is True
         assert out["spreadsheetId"] == SHEET_ID
-        assert len(out["regions"]) == 1
-        region = out["regions"][0]
-        assert region["range"] == "Cliff!A1:B2"
-        # cells reuse inspect's serializer (padded to the returned grid block's extent, exactly
-        # like inspect — one rowData row here -> two cells).
-        assert region["cells"] == [
-            {"a1": "A1", "value": "10", "formula": "=SUM(B:B)"},
-            {"a1": "B1", "value": "hi"},
-        ]
-        # merges resolved to A1
-        assert region["merges"] == ["Cliff!A1:B1"]
-        # ONLY the CF rule whose range (col A) intersects the request is kept; col Z dropped.
-        assert len(region["conditionalFormats"]) == 1
-        cf = region["conditionalFormats"][0]
-        assert cf["index"] == 0  # original array index preserved
-        assert cf["ranges"] == ["Cliff!A2:A100"]
-        assert cf["condition"]["type"] == "NUMBER_GREATER"
-        assert region["tables"] == []
-        assert region["bandedRanges"] == []
-        assert region["protectedRanges"] == []
+        assert out["sheet"] == "Cliff"
+        assert out["range"] == "Cliff!A1:B3"
+        assert out["rows"] == 3
+        assert out["cols"] == 2
+        assert "regions" not in out
+        assert "cells" not in out
+        assert isinstance(out["columns"], list) and len(out["columns"]) == 2
 
-    def test_cf_index_preserved_when_earlier_rule_filtered_out(self):
-        # _CF_Z (index 0) is filtered out for a col-A request, but the surviving _CF_A keeps
-        # its ORIGINAL index 1 (priority is array position — must not renumber).
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="x")]}])],
-                    "conditionalFormats": [_CF_Z, _CF_A],
-                }
-            ]
-        }
+    def test_absolute_column_letters_from_start_offset(self):
+        # A block anchored at C3 -> the first profiled column is "C", not "A".
+        payload = _payload([_row(_text("h"), _num(1))], start_row=2, start_col=2)
         services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        out = describe(services, SHEET_ID, ["Cliff!A1:A50"])
-        rules = out["regions"][0]["conditionalFormats"]
-        assert len(rules) == 1
-        assert rules[0]["index"] == 1
-        assert rules[0]["ranges"] == ["Cliff!A2:A100"]
+        out = describe(services, SHEET_ID, "Cliff!C3:D3", header=False)
+        assert [c["col"] for c in out["columns"]] == ["C", "D"]
 
 
-# =========================================================================== validation summary
+# =========================================================================== type inference
 
 
-class TestDescribeValidationSummary:
-    def test_validation_summary_counts_and_distinct_lines(self, monkeypatch):
-        from gsheets.core import reads as reads_mod
+class TestColumnTypeInference:
+    def _profile(self, rowdata, **kw):
+        payload = _payload(rowdata)
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        return describe(services, SHEET_ID, "Cliff!A1:D100", **kw)
 
-        monkeypatch.setattr(
-            reads_mod, "validation_to_rule",
-            lambda g: {"type": "ONE_OF_LIST", "values": ["Yes", "No"]},
+    def test_number_date_text_bool_columns(self):
+        out = self._profile(
+            [
+                _row(_text("num"), _text("when"), _text("who"), _text("flag")),
+                _row(_num(1), _date(45000, "2023-03-15"), _text("ann"), _bool(True)),
+                _row(_num(2), _date(45001, "2023-03-16"), _text("bob"), _bool(False)),
+            ]
         )
-        v = {"condition": {"type": "ONE_OF_LIST"}}
-        rowdata = [
-            {"values": [_cell(value="Yes"), _cell(value="No")]},
+        types = {c["col"]: c["type"] for c in out["columns"]}
+        assert types["A"] == "number"
+        assert types["B"] == "date"
+        assert types["C"] == "text"
+        assert types["D"] == "bool"
+
+    def test_formula_heavy_column(self):
+        out = self._profile(
+            [
+                _row(_text("total")),
+                _row(_formula("=SUM(B1:B9)", 10)),
+                _row(_formula("=SUM(C1:C9)", 20)),
+                _row(_num(5)),  # a lone literal — still a majority of formulas -> formula-heavy
+            ]
+        )
+        col = out["columns"][0]
+        assert col["type"] == "formula-heavy"
+        # formulaRatio = 2 formulas / 3 non-empty
+        assert col["formulaRatio"] == round(2 / 3, 3)
+
+    def test_empty_column(self):
+        # Column B never carries a value across the data rows -> "empty".
+        out = self._profile(
+            [
+                _row(_text("A-header"), _text("B-header")),
+                _row(_num(1), {}),
+                _row(_num(2), {}),
+            ]
+        )
+        types = {c["col"]: c["type"] for c in out["columns"]}
+        assert types["A"] == "number"
+        assert types["B"] == "empty"
+        b = next(c for c in out["columns"] if c["col"] == "B")
+        assert b["density"] == 0.0
+        assert b["formulaRatio"] == 0.0
+        assert "distinctSample" not in b
+
+
+# =========================================================================== density / ratio / sample
+
+
+class TestDensityRatioSample:
+    def test_density_and_distinct_sample(self):
+        # A col: 2 of 3 data rows filled -> density 0.667; distinct sample of the 2 values.
+        payload = _payload(
+            [
+                _row(_text("cat")),
+                _row(_text("red")),
+                _row({}),
+                _row(_text("red")),
+            ]
+        )
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A4")
+        col = out["columns"][0]
+        assert col["density"] == round(2 / 3, 3)
+        # "red" appears twice but the sample is DISTINCT.
+        assert col["distinctSample"] == ["red"]
+
+    def test_distinct_sample_capped_at_five(self):
+        rows = [_row(_text("hdr"))] + [_row(_text(f"v{i}")) for i in range(8)]
+        payload = _payload(rows)
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A9")
+        assert out["columns"][0]["distinctSample"] == ["v0", "v1", "v2", "v3", "v4"]
+
+    def test_density_over_all_rows_when_header_false(self):
+        payload = _payload([_row(_num(1)), _row(_num(2)), _row({})])
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A3", header=False)
+        # header=False -> all 3 rows are data; 2 filled -> 0.667.
+        assert out["columns"][0]["density"] == round(2 / 3, 3)
+
+
+# =========================================================================== header extraction
+
+
+class TestHeaderExtraction:
+    def test_header_taken_from_first_row_and_excluded_from_stats(self):
+        payload = _payload(
+            [
+                _row(_text("Score")),
+                _row(_num(10)),
+                _row(_num(20)),
+            ]
+        )
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A3")
+        col = out["columns"][0]
+        assert col["header"] == "Score"
+        assert col["type"] == "number"  # header excluded, so no "text" contamination
+        assert col["density"] == 1.0  # both data rows filled
+
+    def test_no_header_key_when_header_false(self):
+        payload = _payload([_row(_num(10)), _row(_num(20))])
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A2", header=False)
+        assert "header" not in out["columns"][0]
+
+    def test_empty_header_cell_omits_header_key(self):
+        payload = _payload([_row({}), _row(_num(10))])
+        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A2")
+        assert "header" not in out["columns"][0]
+
+
+# =========================================================================== merges
+
+
+class TestDescribeMerges:
+    def test_merges_surfaced_when_present(self):
+        merges = [
+            {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
+             "startColumnIndex": 0, "endColumnIndex": 2}
         ]
-        # attach validation to both cells
-        rowdata[0]["values"][0]["dataValidation"] = v
-        rowdata[0]["values"][1]["dataValidation"] = v
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, rowdata)],
-                }
-            ]
-        }
+        payload = _payload([_row(_text("x"), _text("y"))], merges=merges)
         services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        out = describe(services, SHEET_ID, ["Cliff!A1:B1"])
-        summary = out["regions"][0]["validationSummary"]
-        assert summary["cells"] == 2
-        assert summary["rules"] == ["ONE_OF_LIST(Yes,No)"]
+        out = describe(services, SHEET_ID, "Cliff!A1:B1", header=False)
+        assert out["merges"] == ["Cliff!A1:B1"]
 
-    def test_validation_summary_empty_when_none(self):
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="x")]}])],
-                }
-            ]
-        }
+    def test_merges_key_absent_when_none(self):
+        payload = _payload([_row(_text("x"))])
         services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        out = describe(services, SHEET_ID, ["Cliff!A1"])
-        assert out["regions"][0]["validationSummary"] == {"cells": 0, "rules": []}
+        out = describe(services, SHEET_ID, "Cliff!A1")
+        assert "merges" not in out
 
 
-# =========================================================================== multi-range / sheet
+# =========================================================================== max_cells
 
 
-class TestDescribeMultiRange:
-    def test_multi_range_same_sheet_mapped_by_block_offset(self):
-        # Two ranges on Cliff: A1:A1 (block @0,0) and C3:C3 (block @2,2). Map by start offset.
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [
-                        _block(0, 0, [{"values": [_cell(value="top")]}]),
-                        _block(2, 2, [{"values": [_cell(value="mid")]}]),
-                    ],
-                }
-            ]
-        }
-        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        out = describe(services, SHEET_ID, ["Cliff!A1", "Cliff!C3"])
-        assert [r["range"] for r in out["regions"]] == ["Cliff!A1", "Cliff!C3"]
-        assert out["regions"][0]["cells"] == [{"a1": "A1", "value": "top"}]
-        assert out["regions"][1]["cells"] == [{"a1": "C3", "value": "mid"}]
-
-    def test_multi_sheet_mapped_across_sheets(self):
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="c")]}])],
-                },
-                {
-                    "properties": {"sheetId": 7, "title": "Plan"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="p")]}])],
-                },
-            ]
-        }
-        services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        out = describe(services, SHEET_ID, ["Cliff!A1", "Plan!A1"])
-        assert [r["range"] for r in out["regions"]] == ["Cliff!A1", "Plan!A1"]
-        assert out["regions"][0]["cells"] == [{"a1": "A1", "value": "c"}]
-        assert out["regions"][1]["cells"] == [{"a1": "A1", "value": "p"}]
-        # per-sheet structural features attach to the right sheet's region (empty here).
-        assert out["regions"][1]["sheet"] == "Plan"
-
-
-# =========================================================================== guards
-
-
-class TestDescribeGuards:
-    def test_empty_ranges_raises(self):
-        services, _ = _make_service(sheet_index=_INDEX)
+class TestMaxCells:
+    def test_bounded_range_raises_before_any_data_fetch(self):
+        # A1:C100 = 300 cells > max_cells=2. The profiler must refuse BEFORE the data get: the ONLY
+        # get issued is the sheet-index lookup (for a1_to_gridrange); no profiler data get fires.
+        services, rec = _make_service(data_responses=[], sheet_index=_INDEX)
         with pytest.raises(SheetsError) as ei:
-            describe(services, SHEET_ID, [])
-        assert ei.value.code == "empty_ranges"
-
-    def test_bad_range_raises_before_api(self):
-        services, rec = _make_service(sheet_index=_INDEX)
-        with pytest.raises(SheetsError) as ei:
-            describe(services, SHEET_ID, [""])
-        assert ei.value.code == "bad_range"
+            describe(services, SHEET_ID, "Cliff!A1:C100", max_cells=2)
+        assert ei.value.code == "result_too_large"
+        # No data get was issued (the grid was never fetched).
         assert rec.data_calls == []
 
-    def test_max_cells_exceeded_raises_result_too_large(self):
-        rowdata = [{"values": [_cell(value="a"), _cell(value="b"), _cell(value="c")]}]
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, rowdata)],
-                }
-            ]
-        }
+    def test_bounded_range_under_cap_fetches_and_profiles(self):
+        payload = _payload([_row(_num(1)), _row(_num(2))])
+        services, rec = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        out = describe(services, SHEET_ID, "Cliff!A1:A3", max_cells=10)
+        assert out["ok"] is True
+        assert len(rec.data_calls) == 1
+
+    def test_unbounded_range_guarded_post_fetch(self):
+        # A whole-column range (A:A) can't be sized before the fetch; the guard uses the actual
+        # returned extent (3 rows x 1 col = 3 > 2).
+        payload = _payload([_row(_num(1)), _row(_num(2)), _row(_num(3))])
         services, _ = _make_service(data_responses=[payload], sheet_index=_INDEX)
         with pytest.raises(SheetsError) as ei:
-            describe(services, SHEET_ID, ["Cliff!A1:C1"], max_cells=2)
+            describe(services, SHEET_ID, "Cliff!A:A", max_cells=2)
         assert ei.value.code == "result_too_large"
 
     def test_max_cells_zero_or_negative_raises(self):
         services, _ = _make_service(sheet_index=_INDEX)
         with pytest.raises(SheetsError) as ei:
-            describe(services, SHEET_ID, ["Cliff!A1"], max_cells=0)
+            describe(services, SHEET_ID, "Cliff!A1", max_cells=0)
         assert ei.value.code == "bad_max_cells"
 
-    def test_http_error_classified(self):
-        services, _ = _make_service(sheet_index=_INDEX)
 
+# =========================================================================== guards
+
+
+class TestGuards:
+    def test_bad_range_raises_before_api(self):
+        services, rec = _make_service(sheet_index=_INDEX)
+        with pytest.raises(SheetsError) as ei:
+            describe(services, SHEET_ID, "")
+        assert ei.value.code == "bad_range"
+        assert rec.data_calls == []
+
+    def test_no_data_raises(self):
+        services, _ = _make_service(data_responses=[{"sheets": []}], sheet_index=_INDEX)
+        with pytest.raises(SheetsError) as ei:
+            describe(services, SHEET_ID, "Cliff!A1")
+        assert ei.value.code == "no_data"
+
+    def test_http_error_classified(self):
         def _boom(**kwargs):
             if kwargs.get("fields") == "sheets.properties(sheetId,title,index)":
                 req = MagicMock()
@@ -393,227 +427,61 @@ class TestDescribeGuards:
             req.execute.side_effect = _make_http_error(404)
             return req
 
-        services.sheets.spreadsheets.return_value.get = _boom
+        sheets = MagicMock(name="sheets_v4")
+        sheets.spreadsheets.return_value.get = _boom
+        services = SheetsServices(sheets=sheets, drive=None)
         with pytest.raises(SheetsError) as ei:
-            describe(services, SHEET_ID, ["Cliff!A1"])
+            describe(services, SHEET_ID, "Cliff!A1:B2")
         assert ei.value.code == "google_api_error"
         assert ei.value.status == 404
 
     def test_no_cache_reissues_get_each_call(self):
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="x")]}])],
-                }
-            ]
-        }
-        # Two identical payloads queued: a cache would only consume one.
+        payload = _payload([_row(_text("x"))])
         services, rec = _make_service(
             data_responses=[payload, payload], sheet_index=_INDEX
         )
-        describe(services, SHEET_ID, ["Cliff!A1"])
-        describe(services, SHEET_ID, ["Cliff!A1"])
+        describe(services, SHEET_ID, "Cliff!A1")
+        describe(services, SHEET_ID, "Cliff!A1")
         assert len(rec.data_calls) == 2
+
+    def test_multi_read_issues_one_sheet_index_get(self):
+        # describe opens its own re-entrant sheet_index_cache: the range resolution + each merge's
+        # gridrange_to_a1 share ONE sheet-index get even for a direct core caller.
+        merges = [
+            {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
+             "startColumnIndex": 0, "endColumnIndex": 1},
+            {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2,
+             "startColumnIndex": 0, "endColumnIndex": 1},
+        ]
+        payload = _payload([_row(_num(1)), _row(_num(2))], merges=merges)
+        services, rec = _make_service(data_responses=[payload], sheet_index=_INDEX)
+        describe(services, SHEET_ID, "Cliff!A1:A2")
+        index_gets = [
+            c for c in rec.calls if c.get("fields") == _GetRecorder._SHEET_INDEX_FIELDS
+        ]
+        assert len(index_gets) == 1
+        assert len(rec.data_calls) == 1
 
 
 # =========================================================================== golden master
 
 
-def test_describe_region_golden():
-    """Golden-master (SPEC §3.5): a realistic includeGridData response -> the EXACT region view.
+def test_describe_profile_golden():
+    """Golden-master: a realistic profiler response -> the EXACT compact profile.
 
-    Drives the committed ``describe_region`` fixture (a multi-range, multi-sheet
-    ``spreadsheets.get(includeGridData=True)`` response) through the mocked service and asserts the
-    full ``describe`` output byte-for-byte. Exercises every facet at once: per-cell flatten (formula
-    + effectiveFormat), merges -> A1, range-scoped CF (the col-Z rule is filtered OUT of the col-A:C
-    region), a protected range, and multi-sheet block mapping. Changing any serializer's shape must
-    update this fixture in the same change.
+    Drives the committed ``describe_profile`` fixture (a tight-mask ``spreadsheets.get`` response
+    with a header row and mixed number/date/text/formula columns) through the mocked service and
+    asserts the full ``describe`` output byte-for-byte. Changing the profiler's shape must update
+    this fixture in the same change.
     """
-    golden = load_golden("describe_region")
+    golden = load_golden("describe_profile")
     services, _ = _make_service(
         data_responses=[golden["response"]], sheet_index=golden["sheet_index"]
     )
-    out = describe(services, golden["spreadsheetId"], golden["ranges"])
+    out = describe(
+        services,
+        golden["spreadsheetId"],
+        golden["range"],
+        **golden.get("kwargs", {}),
+    )
     assert out == golden["expected"]
-
-
-# =========================================================================== data_filters (SPEC §6 P2)
-
-
-class _ByDataFilterRecorder:
-    """Records each ``getByDataFilter(**kwargs)`` and returns a queued response on ``.execute()``."""
-
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls: list[dict] = []
-
-    def __call__(self, **kwargs):
-        self.calls.append(kwargs)
-        resp = self._responses.pop(0) if self._responses else {}
-        req = MagicMock(name="request")
-        req.execute.return_value = resp
-        return req
-
-
-def _service_with_data_filter(*, by_filter_responses, sheet_index=None):
-    """A service whose ``.get`` serves the sheet-index lookup and ``.getByDataFilter`` the data."""
-    sheets = MagicMock(name="sheets_v4")
-    # ``.get`` still serves the addressing sheet-index lookups (gridrange_to_a1 needs them).
-    get_rec = _GetRecorder([], sheet_index or _INDEX)
-    sheets.spreadsheets.return_value.get = get_rec
-    by_rec = _ByDataFilterRecorder(by_filter_responses)
-    sheets.spreadsheets.return_value.getByDataFilter = by_rec
-    services = SheetsServices(sheets=sheets, drive=None)
-    return services, by_rec
-
-
-class TestDescribeDataFilters:
-    def test_developer_metadata_lookup_reads_via_get_by_data_filter(self):
-        # SPEC §6 P2: a developerMetadataLookup selector reads via getByDataFilter; the region's
-        # GridRange (and A1 label + CF intersect) is derived from the RETURNED block.
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    # block anchored at A2 (startRow=1), one row, two cols.
-                    "data": [_block(1, 0, [{"values": [_cell(value="10"), _cell(value="hi")]}])],
-                    "conditionalFormats": [_CF_A, _CF_Z],
-                    "tables": [],
-                    "bandedRanges": [],
-                    "protectedRanges": [],
-                }
-            ]
-        }
-        services, by_rec = _service_with_data_filter(by_filter_responses=[payload])
-        out = describe(
-            services,
-            SHEET_ID,
-            data_filters=[{"developerMetadataLookup": {"metadataKey": "block:totals"}}],
-        )
-        # The selector is passed straight through into the request body's dataFilters.
-        assert by_rec.calls[0]["body"]["dataFilters"] == [
-            {"developerMetadataLookup": {"metadataKey": "block:totals"}}
-        ]
-        assert by_rec.calls[0]["body"]["includeGridData"] is True
-        assert "conditionalFormats" in by_rec.calls[0]["fields"]
-
-        assert len(out["regions"]) == 1
-        region = out["regions"][0]
-        # Derived from the returned block: A2:B2 (startRow=1, 1 row, 2 cols).
-        assert region["range"] == "Cliff!A2:B2"
-        assert region["cells"] == [
-            {"a1": "A2", "value": "10"},
-            {"a1": "B2", "value": "hi"},
-        ]
-        # CF intersect uses the derived range: col A (_CF_A, rows 2..100) intersects A2:B2; col Z does not.
-        assert len(region["conditionalFormats"]) == 1
-        assert region["conditionalFormats"][0]["ranges"] == ["Cliff!A2:A100"]
-
-    def test_a1_selector_translated_to_gridrange_filter(self, monkeypatch):
-        from gsheets.core import dataselector
-
-        monkeypatch.setattr(
-            dataselector,
-            "a1_to_gridrange",
-            lambda svc, sid, a1: {
-                "sheetId": 0,
-                "startRowIndex": 0,
-                "endRowIndex": 1,
-                "startColumnIndex": 0,
-                "endColumnIndex": 1,
-            },
-        )
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="x")]}])],
-                }
-            ]
-        }
-        services, by_rec = _service_with_data_filter(by_filter_responses=[payload])
-        describe(services, SHEET_ID, data_filters=[{"a1": "Cliff!A1"}])
-        assert by_rec.calls[0]["body"]["dataFilters"] == [
-            {
-                "gridRange": {
-                    "sheetId": 0,
-                    "startRowIndex": 0,
-                    "endRowIndex": 1,
-                    "startColumnIndex": 0,
-                    "endColumnIndex": 1,
-                }
-            }
-        ]
-
-    def test_ranges_and_data_filters_both_raises_conflicting_args(self):
-        services, _ = _service_with_data_filter(by_filter_responses=[{}])
-        with pytest.raises(SheetsError) as exc:
-            describe(
-                services,
-                SHEET_ID,
-                ["Cliff!A1"],
-                data_filters=[{"a1": "Cliff!A1"}],
-            )
-        assert exc.value.code == "conflicting_args"
-
-    def test_neither_ranges_nor_data_filters_raises_empty_ranges(self):
-        services, _ = _service_with_data_filter(by_filter_responses=[{}])
-        with pytest.raises(SheetsError) as exc:
-            describe(services, SHEET_ID)
-        assert exc.value.code == "empty_ranges"
-
-    def test_max_cells_guard_applies_to_data_filter_path(self):
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "data": [_block(0, 0, [{"values": [_cell(value="a"), _cell(value="b"), _cell(value="c")]}])],
-                }
-            ]
-        }
-        services, _ = _service_with_data_filter(by_filter_responses=[payload])
-        with pytest.raises(SheetsError) as exc:
-            describe(
-                services,
-                SHEET_ID,
-                data_filters=[{"gridRange": {"sheetId": 0}}],
-                max_cells=2,
-            )
-        assert exc.value.code == "result_too_large"
-
-
-class TestDescribeSheetIndexCache:
-    """describe() opens its own re-entrant sheet_index_cache() scope, so resolving N ranges +
-    per-region merges + CF rules issues exactly ONE sheet-index get even when called DIRECTLY (no
-    adapter scope). Guards the N+1 regression where describe lacked the inner scope its siblings
-    (read_conditional_formats, structure) have."""
-
-    def test_multi_region_issues_one_sheet_index_get(self):
-        merges = [
-            {"sheetId": 0, "startRowIndex": 0, "endRowIndex": 1,
-             "startColumnIndex": 0, "endColumnIndex": 2},
-            {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2,
-             "startColumnIndex": 0, "endColumnIndex": 2},
-        ]
-        payload = {
-            "sheets": [
-                {
-                    "properties": {"sheetId": 0, "title": "Cliff"},
-                    "merges": merges,
-                    "conditionalFormats": [_CF_A],
-                    "data": [
-                        _block(0, 0, [{"values": [_cell(value="x"), _cell(value="y")]}]),
-                        _block(1, 0, [{"values": [_cell(value="z")]}]),
-                    ],
-                }
-            ]
-        }
-        services, rec = _make_service(data_responses=[payload], sheet_index=_INDEX)
-        describe(services, SHEET_ID, ["Cliff!A1:B2", "Cliff!A2:A100"])
-        index_gets = [
-            c for c in rec.calls if c.get("fields") == _GetRecorder._SHEET_INDEX_FIELDS
-        ]
-        assert len(index_gets) == 1
-        # the data read itself is the single multi-range get (not multiplied either).
-        assert len(rec.data_calls) == 1

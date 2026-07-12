@@ -8,7 +8,7 @@ literal A1 string that shifts when rows/columns are inserted. The public selecto
 - ``{"developerMetadataLookup": {...}}`` — matches a block previously tagged via ``metadata``
   (the same ``developerMetadataLookup`` shape ``structure.metadata`` already uses for metadata CRUD).
 
-Every reader that accepts ``data_filters`` (``read_values``, ``read_many``, ``describe``) funnels
+Every reader that accepts ``data_filters`` (``read_values``, ``read_many``) funnels
 through :func:`build_data_filter` so the translation lives in ONE place — no duplicated selector
 logic across the readers (the DESIGN "no duplicated logic" rule).
 
