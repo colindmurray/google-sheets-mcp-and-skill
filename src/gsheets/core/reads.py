@@ -849,69 +849,80 @@ def read_conditional_formats(
             "pass EITHER `sheet` OR `range` (a range carries its own sheet), not both",
         )
 
-    # A range scopes the read to its sheet AND filters rules to those intersecting it. Resolve it to
-    # a GridRange up front (validates the A1 and yields the sheetId + bounds for the intersect test).
-    intersecting: dict | None = None
-    scope_sheet_id: object = None
-    if range is not None:
-        intersecting = a1_to_gridrange(services, spreadsheet_id, range)
-        scope_sheet_id = intersecting.get("sheetId")
-
-    # Scope the get to the requested sheet/range. WITHOUT this, a single-sheet CF read makes the
-    # API load EVERY tab's conditional-format model — on a large workbook that is a multi-minute
-    # call (one real sheet: 54 rules took 5m21s unscoped vs 0.74s scoped — ISSUES.md #26). Reading
-    # ALL sheets (sheet and range both None) still needs the unscoped fetch. ``ranges`` filters only
-    # the per-sheet ``sheets[]``; top-level fields are returned regardless.
-    if range is not None:
-        get_kwargs: dict = {"ranges": [range]}  # range's sheet already validated by a1_to_gridrange
-    elif sheet is not None:
-        get_kwargs = {"ranges": [sheet]}
-    else:
-        get_kwargs = {}
-
-    try:
-        resp = (
-            services.sheets.spreadsheets()
-            .get(spreadsheetId=spreadsheet_id, fields=_CF_FIELDS, **get_kwargs)
-            .execute()
-        )
-    except HttpError as exc:
-        # A range-scoped read of a non-existent sheet 400s on the range parse; preserve the friendly
-        # sheet_not_found (with the available list) the unscoped path produced.
-        if sheet is not None:
-            try:
-                titles = sheet_titles(services, spreadsheet_id)
-            except SheetsError:
-                titles = None
-            if titles is not None and sheet not in titles:
-                available = ", ".join(repr(t) for t in titles) or "(none)"
-                raise SheetsError(
-                    "sheet_not_found",
-                    f"sheet {sheet!r} not found in spreadsheet",
-                    hint=f"available sheets: {available}",
-                ) from exc
-        raise classify_google_error(exc, account_email=services.account_email) from exc
-
-    all_sheets = resp.get("sheets") or []
-
-    # Defensive net (a scoped get returns only the matching sheet, so this rarely fires now; it
-    # still covers the mocked-test path, where the canned response ignores ``ranges``).
-    if sheet is not None and not any(
-        ((s or {}).get("properties") or {}).get("title") == sheet for s in all_sheets
-    ):
-        available = ", ".join(
-            repr(((s or {}).get("properties") or {}).get("title")) for s in all_sheets
-        ) or "(none)"
-        raise SheetsError(
-            "sheet_not_found",
-            f"sheet {sheet!r} not found in spreadsheet",
-            hint=f"available sheets: {available}",
-        )
-
-    sheets_out: list[dict] = []
-    # Each rule's gridrange_to_a1 resolves sheetId -> title via _sheet_index; cache it for the whole
-    # serialization so a 50+-rule sheet does ONE sheet-index get, not one per rule (ISSUES.md #26).
+    # Resolve the scope, fetch, and serialize under ONE sheet-index cache: a1_to_gridrange (the
+    # range), the whole-sheet scope title, and every rule's gridrange_to_a1 all share a single
+    # sheet-index get, so a 50+-rule sheet does ONE lookup, not one per rule (ISSUES.md #26). The
+    # scope is re-entrant — a free no-op when the adapter already opened one around dispatch.
     with sheet_index_cache():
+        # A range scopes the read to its sheet AND filters rules to those intersecting it. Resolve
+        # it to a GridRange up front (validates the A1 and yields the sheetId + bounds for the test).
+        intersecting: dict | None = None
+        scope_sheet_id: object = None
+        if range is not None:
+            intersecting = a1_to_gridrange(services, spreadsheet_id, range)
+            scope_sheet_id = intersecting.get("sheetId")
+
+        # Scope the get to the requested sheet/range. WITHOUT this, a single-sheet CF read makes the
+        # API load EVERY tab's conditional-format model — on a large workbook that is a multi-minute
+        # call (one real sheet: 54 rules took 5m21s unscoped vs 0.74s scoped — ISSUES.md #26).
+        # Reading ALL sheets (sheet and range both None) still needs the unscoped fetch. ``ranges``
+        # filters only the per-sheet ``sheets[]``; top-level fields are returned regardless.
+        #
+        # A ``range`` filter scopes to the range's whole SHEET, NOT the narrow range: a narrow-range
+        # get makes Google return a PRE-FILTERED, RE-INDEXED ``conditionalFormats`` array (only the
+        # rules intersecting the range, renumbered from 0), so a surviving rule's positional index
+        # would be a subset position — not its true priority — and editing by it hits the WRONG rule
+        # (ISSUES.md #38, confirmed live). Scoping to the whole sheet returns the FULL array (true
+        # global indices); the client-side ``intersecting`` filter below narrows it while preserving
+        # each rule's original index.
+        if range is not None:
+            scope = gridrange_to_a1(services, spreadsheet_id, {"sheetId": scope_sheet_id})
+            get_kwargs: dict = {"ranges": [scope]}
+        elif sheet is not None:
+            get_kwargs = {"ranges": [sheet]}
+        else:
+            get_kwargs = {}
+
+        try:
+            resp = (
+                services.sheets.spreadsheets()
+                .get(spreadsheetId=spreadsheet_id, fields=_CF_FIELDS, **get_kwargs)
+                .execute()
+            )
+        except HttpError as exc:
+            # A range-scoped read of a non-existent sheet 400s on the range parse; preserve the
+            # friendly sheet_not_found (with the available list) the unscoped path produced.
+            if sheet is not None:
+                try:
+                    titles = sheet_titles(services, spreadsheet_id)
+                except SheetsError:
+                    titles = None
+                if titles is not None and sheet not in titles:
+                    available = ", ".join(repr(t) for t in titles) or "(none)"
+                    raise SheetsError(
+                        "sheet_not_found",
+                        f"sheet {sheet!r} not found in spreadsheet",
+                        hint=f"available sheets: {available}",
+                    ) from exc
+            raise classify_google_error(exc, account_email=services.account_email) from exc
+
+        all_sheets = resp.get("sheets") or []
+
+        # Defensive net (a scoped get returns only the matching sheet, so this rarely fires now; it
+        # still covers the mocked-test path, where the canned response ignores ``ranges``).
+        if sheet is not None and not any(
+            ((s or {}).get("properties") or {}).get("title") == sheet for s in all_sheets
+        ):
+            available = ", ".join(
+                repr(((s or {}).get("properties") or {}).get("title")) for s in all_sheets
+            ) or "(none)"
+            raise SheetsError(
+                "sheet_not_found",
+                f"sheet {sheet!r} not found in spreadsheet",
+                hint=f"available sheets: {available}",
+            )
+
+        sheets_out: list[dict] = []
         for sheet_obj in all_sheets:
             sheet_obj = sheet_obj or {}
             props = sheet_obj.get("properties") or {}

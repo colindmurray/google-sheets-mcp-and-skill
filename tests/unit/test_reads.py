@@ -1221,13 +1221,68 @@ class TestReadConditionalFormats:
         read_conditional_formats(services, SHEET_ID, sheet="Cliff")
         assert rec.data_calls[0]["ranges"] == ["Cliff"]
 
-    def test_scopes_get_to_the_requested_range(self):
+    def test_range_scopes_get_to_the_whole_sheet_not_the_narrow_range(self):
+        # ISSUES.md #38: a narrow-range scoped spreadsheets.get makes GOOGLE return a PRE-FILTERED,
+        # RE-INDEXED conditionalFormats array (only the intersecting rules, renumbered from 0), so
+        # the returned `index` would be a subset position — editing by it hits the WRONG rule. The
+        # read must therefore scope the get to the whole SHEET (full array, true global indices) and
+        # narrow client-side. Confirmed live: scoped `range=C1:C5` returned index 0 for a rule whose
+        # true global index was 2.
         services, rec = _make_service(
             data_responses=[self._cf_payload(_GOOGLE_BOOLEAN_RULE)],
             sheet_index=_CLIFF_INDEX,
         )
         read_conditional_formats(services, SHEET_ID, range="Cliff!A2:A100")
-        assert rec.data_calls[0]["ranges"] == ["Cliff!A2:A100"]
+        assert rec.data_calls[0]["ranges"] == ["Cliff"]
+
+    def test_range_filter_preserves_true_global_index_under_google_prefilter(self):
+        # ISSUES.md #38, the behavioral proof: simulate Google's REAL range pre-filtering. A whole-
+        # sheet scope returns the full 3-rule array; a narrow-range scope returns only the
+        # intersecting rule renumbered to [0]. The col-C rule's true global index is 2; a
+        # range-scoped read of C1:C5 must still report index 2 (not 0). Pre-fix (narrow scope) this
+        # returned 0.
+        def _rule_on_col(c, val):
+            return {
+                "ranges": [{
+                    "sheetId": 0, "startRowIndex": 0, "endRowIndex": 100,
+                    "startColumnIndex": c, "endColumnIndex": c + 1,
+                }],
+                "booleanRule": {
+                    "condition": {"type": "TEXT_EQ", "values": [{"userEnteredValue": val}]},
+                    "format": {"backgroundColorStyle": {"rgbColor": {"red": 1.0}}},
+                },
+            }
+
+        full = [_rule_on_col(0, "a"), _rule_on_col(1, "b"), _rule_on_col(2, "c")]
+
+        class _PrefilterRecorder(_GetRecorder):
+            def __call__(self, **kwargs):
+                self.calls.append(kwargs)
+                if kwargs.get("fields") == self._SHEET_INDEX_FIELDS:
+                    resp = self._sheet_index
+                elif kwargs.get("ranges") == ["Cliff"]:
+                    resp = {"sheets": [{
+                        "properties": {"sheetId": 0, "title": "Cliff"},
+                        "conditionalFormats": list(full),
+                    }]}
+                else:  # a narrow range -> Google returns ONLY the intersecting rule, re-indexed
+                    resp = {"sheets": [{
+                        "properties": {"sheetId": 0, "title": "Cliff"},
+                        "conditionalFormats": [_rule_on_col(2, "c")],
+                    }]}
+                req = MagicMock(name="request")
+                req.execute.return_value = resp
+                return req
+
+        sheets = MagicMock(name="sheets_v4")
+        rec = _PrefilterRecorder([], _CLIFF_INDEX)
+        sheets.spreadsheets.return_value.get = rec
+        services = SheetsServices(sheets=sheets, drive=None)
+
+        out = read_conditional_formats(services, SHEET_ID, range="Cliff!C1:C5")
+        rules = out["sheets"][0]["rules"]
+        assert len(rules) == 1
+        assert rules[0]["index"] == 2  # true global index, NOT the subset position 0
 
     def test_all_sheets_read_is_unscoped(self):
         # Reading EVERY sheet (no sheet/range) legitimately needs the unscoped whole-workbook get.

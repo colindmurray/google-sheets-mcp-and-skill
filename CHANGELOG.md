@@ -10,6 +10,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Nothing yet.
 
+## [0.5.1] - 2026-07-11
+
+A correctness release closing the last open field-report items (ISSUES.md #37–#39, #28) plus one
+out_path parity enhancement (#29). All fixes are shared-core (identical from the MCP server and the
+CLI) and were verified END-TO-END against live throwaway spreadsheets. Full suite stays green.
+
+### Fixed
+- **CF range-scoped reads no longer re-index rules (#38).** `read_conditional_formats(range=…)` (and
+  the MCP/CLI wrappers) scoped the underlying `spreadsheets.get` to the NARROW range, which makes
+  Google return a PRE-FILTERED, RE-INDEXED `conditionalFormats` array — so a surviving rule's `index`
+  was a subset position, not its true priority, and editing "by index" hit the WRONG rule. The read
+  now scopes the get to the range's whole SHEET (full array → true global indices) and narrows
+  client-side via the existing intersect filter, so a range-scoped rule keeps its real index (as the
+  docstring already promised). Confirmed live: `range=C1:C5` now reports index 2, not 0.
+- **Text-valued `NUMBER_EQ` conditional formats round-trip (#39).** A UI-created "text is exactly X"
+  rule reads back as `NUMBER_EQ(X)`, but Google rejects a non-numeric value under `NUMBER_EQ` on
+  every API write — so a faithful read→write 400'd. `set_conditional_format` now coerces a
+  `NUMBER_EQ` condition whose value is a plain non-numeric literal to the semantically-identical
+  `TEXT_EQ` (valid in a conditional format), so the round-trip succeeds. Numeric and `=`-formula
+  values, and the ordered comparisons, are untouched. (`NUMBER_NOT_EQ` is intentionally NOT coerced —
+  its `TEXT_NOT_EQ` counterpart is rejected inside conditional formats.)
+- **`manage_sheets action=duplicate` self-heals the developer-metadata conflict (#37).** When Google's
+  `duplicateSheet` 400s with "Conflicting developer metadata IDs" on a book carrying developer
+  metadata, duplicate now transparently falls back to a metadata-safe `sheets.copyTo` + rename +
+  reorder that yields the same result. (The trigger was not reproducible on 2026-07-11 — Google
+  appears to have fixed it — so this is a defensive path that no-ops on the happy path.)
+
+### Added
+- **`out_path` on `sheets_read_conditional_formats` (#29).** The CF-read MCP tool now accepts
+  `output_format` (text|json|jsonl|markdown) and `out_path`, mirroring the other big reads: a
+  rule-heavy tab whose serialized rules would exceed the in-context token cap can spill to a local
+  file and return a small `{path, bytes, preview, …}` handle instead. (CLI users already redirect
+  stdout; this closes the MCP gap.)
+
+### Investigated (no code change)
+- **#28 wide-batched read row misalignment — not a bug.** Confirmed live that `values.batchGet`
+  preserves leading empty rows and that a range read inside a wide multi-range batch is row-identical
+  to a scoped read (even beside a merge block); the core maps each valueRange 1:1 and pads only
+  columns. Added regressions locking in the row-identity parity. The original report named columns
+  outside the requested range — a caller attribution artifact.
+
 ## [0.5.0] - 2026-06-25
 
 `sheets_dimensions` (CLI `dimensions`) is now a complete, general **row/column sizing toolkit** —

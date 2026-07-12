@@ -546,7 +546,7 @@ The adapters wire it identically: the CLI promotes `--json` to a global `--forma
 read tools take `output_format` (the rectangular-values `read_values` offers every format, the
 structured reads offer `text`/`json`/`jsonl`/`markdown` — markdown's KV form fits any shape, but
 csv/tsv need a grid). For a data format the MCP tool returns the rendered string as a content-only
-`ToolResult` (no `structured_content`). The five `out_path`-capable read tools are registered with
+`ToolResult` (no `structured_content`). The six `out_path`-capable read tools are registered with
 `output_schema=None` precisely so the MCP lowlevel server does **not** require structured output:
 under any non-None schema a content-only result is rejected as "outputSchema defined but no
 structured output returned" (ISSUES.md #19/#21), so suppressing the derived schema is what lets the
@@ -595,8 +595,9 @@ rectangle — the choice is per shape, not global.
 
 The CLI pipes its rendered output (`> file`, `| pandas`); the MCP tool's output lands in the
 agent's context, so for a large read the dominant cost is dumping the grid into the conversation.
-The five read MCP tools that go through `_call_formatted` — `sheets_read_values`, `sheets_inspect`,
-`sheets_describe`, `sheets_formula_patterns`, `sheets_read_many` — take an optional `out_path`. When
+The six read MCP tools that go through `_call_formatted` — `sheets_read_values`, `sheets_inspect`,
+`sheets_describe`, `sheets_formula_patterns`, `sheets_read_many`, `sheets_read_conditional_formats`
+(the last added in v0.5.1, ISSUES.md #29) — take an optional `out_path`. When
 set, the adapter writes `render(result, output_format)` to that local file (utf-8) and returns a
 small **handle** — `{ok, path, format, rows, cols, bytes, preview}`, with `preview` the first ~5 rows
 (csv/tsv) or records (jsonl/json) — *instead of* the payload. It is the same shared `render()` plus a

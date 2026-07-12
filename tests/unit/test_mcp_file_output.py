@@ -63,6 +63,7 @@ def _handle(tool_result: ToolResult) -> dict:
         "sheets_describe",
         "sheets_formula_patterns",
         "sheets_read_many",
+        "sheets_read_conditional_formats",
     ],
 )
 def test_out_path_exposed_optional_default_null(name):
@@ -80,6 +81,7 @@ def test_out_path_exposed_optional_default_null(name):
         "sheets_describe",
         "sheets_formula_patterns",
         "sheets_read_many",
+        "sheets_read_conditional_formats",
     ],
 )
 def test_out_path_tools_stay_read_only(name):
@@ -97,6 +99,7 @@ def test_out_path_tools_stay_read_only(name):
         "sheets_describe",
         "sheets_formula_patterns",
         "sheets_read_many",
+        "sheets_read_conditional_formats",
     ],
 )
 def test_out_path_documented_in_docstring(name):
@@ -110,11 +113,12 @@ def test_export_does_not_gain_out_path():
     assert "out_path" not in props
 
 
-def test_overview_and_cf_have_no_out_path():
-    # SPEC §2.2: out_path is on the BIG reads only — not overview / read_conditional_formats.
-    for name in ("sheets_overview", "sheets_read_conditional_formats"):
-        props = _tools()[name].parameters.get("properties", {})
-        assert "out_path" not in props
+def test_overview_has_no_out_path():
+    # out_path is on the reads that can return a large payload; overview is a tiny fixed summary,
+    # so it stays out_path-free. read_conditional_formats GAINED out_path (ISSUES.md #29 — a
+    # rule-heavy tab can exceed the token cap just like a big value/CF read).
+    props = _tools()["sheets_overview"].parameters.get("properties", {})
+    assert "out_path" not in props
 
 
 # ----------------------------------------------------------- _call_formatted out_path behavior
@@ -365,6 +369,14 @@ def _structured_payload_for(tool_name: str) -> dict:
             "partialFailure": False,
             "results": [{"ok": True, "spreadsheetId": "FAKEID", "ranges": []}],
         }
+    if tool_name == "sheets_read_conditional_formats":
+        return {
+            "ok": True, "spreadsheetId": "FAKEID",
+            "sheets": [{"sheet": "S", "sheetId": 0, "rules": [
+                {"index": 0, "line": "[S!A1] if BLANK -> bg #FFFFFF", "ranges": ["S!A1"],
+                 "kind": "boolean", "condition": {"type": "BLANK", "values": []},
+                 "format": {"bg": "#FFFFFF"}}]}],
+        }
     raise AssertionError(tool_name)
 
 
@@ -382,6 +394,8 @@ def _args_for(tool_name: str, *, output_format: str, out_path=None) -> dict:
         base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
     elif tool_name == "sheets_read_many":
         base |= {"requests": [{"spreadsheetId": "FAKEID", "ranges": ["S!A1:B2"]}]}
+    elif tool_name == "sheets_read_conditional_formats":
+        base |= {"spreadsheet_id": "FAKEID", "sheet": "S"}
     return base
 
 
@@ -391,6 +405,7 @@ _CORE_ATTR = {
     "sheets_describe": "_describe",
     "sheets_formula_patterns": "_formula_patterns",
     "sheets_read_many": "_read_many",
+    "sheets_read_conditional_formats": "_read_conditional_formats",
 }
 
 

@@ -90,6 +90,14 @@ gsheets --json read-conditional-formats <YOUR_SPREADSHEET_ID> --range 'Sheet1!A1
 
 `--range` carries its own sheet, so it is **mutually exclusive with `--sheet`** (both → `conflicting_args`).
 
+A read-heavy tab whose serialized rules would blow the MCP token cap: pass `out_path` (MCP only) to
+spill them to a local file and get back a small handle (the CLI just redirects stdout).
+
+**Round-trip note (text-valued equality rules):** a UI-created "text is exactly X" rule reads back as
+`NUMBER_EQ(X)`, which Google rejects on write — so `set-conditional-format` transparently coerces a
+`NUMBER_EQ` condition with a non-numeric value to the equivalent `TEXT_EQ` (numeric and `=`-formula
+values are left alone). A straight read → edit → write of such a rule just works.
+
 ### `read-many` — cross-file fan-out
 
 Read values or summaries across **many spreadsheets** in one call, capturing each file's failure as

@@ -233,6 +233,44 @@ class TestReadValues:
         assert len(out["ranges"]) == 2
         assert out["ranges"][1]["values"] == [["y"], ["z"]]
 
+    # ---- row-identity alignment (ISSUES.md #28) --------------------------------------------
+    # #28 reported a wide batched render=formula read placing a merged-calendar anchor one row too
+    # high vs a scoped read. It never reproduced: the read path maps each valueRange 1:1 and pads
+    # only COLUMNS (never shifts rows), and Google's batchGet PRESERVES leading empty rows
+    # (confirmed live — a 41-row AH1:AI47 read kept "MON" at 0-based row 40, wide == scoped). These
+    # regressions lock that in so any future row-shifting would be caught.
+
+    def test_leading_empty_rows_are_preserved_not_shifted(self):
+        # A range whose top rows are blank keeps its data at the SAME offset: "MON" after two empty
+        # rows stays at index 2 (empties padded to width, never dropped -> no upward drift).
+        services, _ = _make_service()
+        _wire_values_method(services, "batchGet", [{"valueRanges": [
+            {"range": "Cal!AH1:AI4", "values": [[], [], ["MON", "=SEQUENCE(1,7)"]]}]}])
+        out = read_values(services, SHEET_ID, ["Cal!AH1:AI4"], render="formula")
+        vals = out["ranges"][0]["values"]
+        assert vals == [["", ""], ["", ""], ["MON", "=SEQUENCE(1,7)"]]
+        assert next(i for i, r in enumerate(vals) if r and r[0] == "MON") == 2
+
+    def test_wide_batched_range_is_row_identical_to_scoped_read(self):
+        # Reading a range inside a WIDE multi-range batch is row-identical to reading it ALONE:
+        # the SAME calendar valueRange (2nd of 3) yields the SAME values entry as a lone read.
+        calendar = {"range": "Cal!AH1:AI4", "values": [[], [], ["MON", "=SEQUENCE(1,7)"]]}
+
+        scoped_svc, _ = _make_service()
+        _wire_values_method(scoped_svc, "batchGet", [{"valueRanges": [dict(calendar)]}])
+        scoped = read_values(scoped_svc, SHEET_ID, ["Cal!AH1:AI4"], render="formula")
+
+        wide_svc, _ = _make_service()
+        _wire_values_method(wide_svc, "batchGet", [{"valueRanges": [
+            {"range": "Cal!A1:B2", "values": [["a", "b"]]},
+            dict(calendar),
+            {"range": "Cal!A50:B51", "values": [["z"]]}]}])
+        wide = read_values(
+            wide_svc, SHEET_ID, ["Cal!A1:B2", "Cal!AH1:AI4", "Cal!A50:B51"], render="formula")
+
+        ah = next(e for e in wide["ranges"] if "AH" in (e["range"] or ""))
+        assert ah["values"] == scoped["ranges"][0]["values"]
+
     # ---- major (SPEC §6 P3): majorDimension passthrough ---------------------------------
 
     def test_major_defaults_to_rows_and_is_not_sent(self):

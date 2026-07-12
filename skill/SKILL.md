@@ -66,9 +66,9 @@ Conventions:
   chooses the output serialization; `--json` is a permanent alias for `--format json`. See "Choosing
   an output format" below.
 - Writing a big read straight to a file is MCP-only. The MCP read tools (`read_values`, `inspect`,
-  `describe`, `formula_patterns`, `read_many`) take an `out_path` arg that writes the rendered read
-  to disk and returns a tiny handle instead of the payload. The CLI has no `out_path` — redirect
-  with the shell instead (`gsheets --format csv read-values <ID> <RANGE> > out.csv`).
+  `describe`, `formula_patterns`, `read_many`, `read_conditional_formats`) take an `out_path` arg that
+  writes the rendered read to disk and returns a tiny handle instead of the payload. The CLI has no
+  `out_path` — redirect with the shell instead (`gsheets --format csv read-values <ID> <RANGE> > out.csv`).
 - `gsheets <cmd> --help` is the source of truth for the exact, current flags of any command.
 
 ## Command map (Understand → Change → Escape hatch)

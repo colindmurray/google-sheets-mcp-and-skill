@@ -696,13 +696,53 @@ def _build_boolean_rule(parsed: dict) -> dict:
     return out
 
 
+# ISSUES.md #39: Google's numeric-equality condition types reject a NON-numeric userEnteredValue on
+# EVERY API write ("Invalid ConditionValue.userEnteredValue: Yes for ConditionType: NUMBER_EQ"), yet
+# the UI happily creates "text is exactly Yes" rules that read back as NUMBER_EQ(Yes) — so a faithful
+# read -> write round-trip 400s. ``NUMBER_EQ`` has a semantically-identical text equivalent that IS
+# valid in a conditional format (verified live: TEXT_EQ(Yes) writes fine and matches identically), so
+# on BUILD we coerce a NUMBER_EQ condition whose value is a plain non-numeric literal to TEXT_EQ. We
+# do NOT map NUMBER_NOT_EQ -> TEXT_NOT_EQ: TEXT_NOT_EQ exists in the enum but Google rejects it inside
+# a conditional format ("ConditionType 'TEXT_NOT_EQ' is not supported in conditional formats" —
+# confirmed live), so coercing it would only swap one 400 for another. We also never touch the ORDERED
+# comparisons (NUMBER_GREATER/LESS/BETWEEN) — no text equivalent — nor numeric or formula
+# (``=``-prefixed) values, which Google accepts as-is.
+_NUMERIC_EQ_TO_TEXT = {"NUMBER_EQ": "TEXT_EQ"}
+
+
+def _is_numeric_literal(value: str) -> bool:
+    """True iff ``value`` is a plain finite number literal (what a NUMBER_* condition wants)."""
+    text = value.strip()
+    if not text:
+        return False
+    try:
+        num = float(text)
+    except (TypeError, ValueError):
+        return False
+    return num == num and num not in (float("inf"), float("-inf"))  # reject nan / inf
+
+
+def _effective_condition_type(cond_type: str, values: list) -> str:
+    """Coerce a numeric-equality type to its text equivalent for non-numeric values (#39)."""
+    text_type = _NUMERIC_EQ_TO_TEXT.get(cond_type)
+    if text_type is None or not values:
+        return cond_type
+    # Coerce only when EVERY value is a plain non-numeric literal (not a number, not a ``=`` formula
+    # / relative reference that Google evaluates numerically). Equality types carry a single value.
+    for v in values:
+        s = str(v)
+        if s.startswith("=") or _is_numeric_literal(s):
+            return cond_type
+    return text_type
+
+
 def _build_condition(condition: dict) -> dict:
     """Build a Google ``BooleanCondition`` from ``{type, values}``."""
     cond_type = condition.get("type")
     if not isinstance(cond_type, str) or not cond_type:
         raise SheetsError("bad_rule", "condition requires a type")
-    out: dict[str, object] = {"type": cond_type}
     values = condition.get("values") or []
+    out: dict[str, object] = {"type": _effective_condition_type(cond_type, values)}
     if values:
         out["values"] = [{"userEnteredValue": str(v)} for v in values]
     return out
