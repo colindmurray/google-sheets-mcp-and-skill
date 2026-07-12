@@ -1048,10 +1048,12 @@ class TestWriteValuesByDataFilter:
                     "developerMetadataLookup": {"metadataKey": "block:totals"}
                 },
                 "values": [["x", "y"]],
+                "majorDimension": "ROWS",
             }
         ]
-        # rows is Google's default major dimension -> not emitted.
-        assert "majorDimension" not in body["data"][0]
+        # batchUpdateByDataFilter needs an EXPLICIT majorDimension even for the rows default: an
+        # omitted one becomes DIMENSION_UNSPECIFIED and 400s on non-square payloads (live-verified).
+        assert body["data"][0]["majorDimension"] == "ROWS"
         assert out == {
             "ok": True,
             "spreadsheetId": SHEET_ID,
@@ -1118,6 +1120,24 @@ class TestWriteValuesByDataFilter:
             ],
         )
         assert rec.calls[0]["body"]["data"][0]["majorDimension"] == "COLUMNS"
+
+    def test_non_square_payloads_always_send_rows_major(self):
+        # Regression (live-caught): batchUpdateByDataFilter 400s on a 1xN row or Nx1 column when
+        # majorDimension is omitted (DIMENSION_UNSPECIFIED "cannot fit"). A 2x2 masked it because
+        # it fits either interpretation. The default write MUST send majorDimension=ROWS explicitly.
+        for values in ([["a", "b"]], [["a"], ["b"]], [["a", "b"], ["c", "d"]]):
+            services, _ = _make_service()
+            rec = _wire_values_method(
+                services, "batchUpdateByDataFilter", [{"responses": [{"updatedRange": "S!A1"}]}]
+            )
+            write_values_by_data_filter(
+                services,
+                SHEET_ID,
+                [{"developerMetadataLookup": {"metadataKey": "k"}, "values": values}],
+            )
+            assert rec.calls[0]["body"]["data"][0]["majorDimension"] == "ROWS", (
+                f"non-square payload {values!r} must carry an explicit ROWS majorDimension"
+            )
 
     def test_totals_aggregated_from_responses_when_no_top_level(self):
         services, _ = _make_service()

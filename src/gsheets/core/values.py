@@ -507,9 +507,12 @@ def write_values_by_data_filter(
         # ``values``/``major`` siblings — so the whole item can be passed straight in.
         data_filter = build_data_filter(services, spreadsheet_id, item)
         entry: dict = {"dataFilter": data_filter, "values": item.get("values", [])}
-        major_option = _resolve_major_option(item.get("major", "rows"))
-        if major_option is not None:
-            entry["majorDimension"] = major_option
+        # ``batchUpdateByDataFilter`` needs an EXPLICIT ``majorDimension``. Unlike
+        # ``values.batchUpdate``, it does NOT default an omitted dimension to ROWS — it stays
+        # ``DIMENSION_UNSPECIFIED`` and any NON-SQUARE payload (1xN row or Nx1 column) 400s with
+        # "cannot fit the data" (a 2x2 fits either interpretation, which masked this). Always send
+        # ROWS/COLUMNS explicitly; ``_resolve_major_option`` still validates the token first.
+        entry["majorDimension"] = _resolve_major_option(item.get("major", "rows")) or "ROWS"
         api_data.append(entry)
 
     body = {"valueInputOption": value_input_option, "data": api_data}
