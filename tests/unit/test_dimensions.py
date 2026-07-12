@@ -366,6 +366,42 @@ class TestDelete:
             "end": 4,
         }
 
+    def test_delete_digit_suffixed_non_first_tab_targets_correct_sheet(self):
+        # Regression (ISSUES.md #1): deleting rows on "Sheet2" (a digit-suffixed non-first tab)
+        # must target sheetId 222, not fall through to the first tab (111).
+        services, _, batch_rec = _make_service(
+            sheets_index=[
+                {"properties": {"sheetId": 111, "title": "Sheet1", "index": 0}},
+                {"properties": {"sheetId": 222, "title": "Sheet2", "index": 1}},
+            ]
+        )
+        dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="delete",
+            sheet="Sheet2",
+            params={"dimension": "ROWS", "start": 0, "end": 3},
+        )
+        assert _only_request(batch_rec)["deleteDimension"]["range"]["sheetId"] == 222
+
+    def test_resize_digit_suffixed_non_first_tab_targets_correct_sheet(self):
+        # Same guard for a resize (set_props) write on a digit-suffixed non-first tab.
+        services, _, batch_rec = _make_service(
+            sheets_index=[
+                {"properties": {"sheetId": 111, "title": "Sheet1", "index": 0}},
+                {"properties": {"sheetId": 222, "title": "Sheet2", "index": 1}},
+            ]
+        )
+        dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="set_props",
+            sheet="Sheet2",
+            params={"dimension": "COLUMNS", "start": 0, "end": 2, "pixelSize": 80},
+        )
+        req = _only_request(batch_rec)
+        assert req["updateDimensionProperties"]["range"]["sheetId"] == 222
+
 
 # =========================================================================== move
 
@@ -721,7 +757,11 @@ class TestSetProps:
 
 class TestRead:
     def test_read_mask_and_ranges_are_tight(self):
-        """The read get must request ONLY the hiddenByUser metadata (no grid data) over the sheet."""
+        """The read get must request ONLY the visibility metadata (no grid data) over the sheet.
+
+        The mask carries BOTH independent flags: ``hiddenByUser`` and the read-only
+        ``hiddenByFilter`` (an active filter's concealment).
+        """
         services, get_rec, _ = _make_service(metadata_responses=[{"sheets": []}])
         dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
         meta_calls = get_rec.metadata_calls
@@ -730,8 +770,10 @@ class TestRead:
         assert call["ranges"] == ["Sheet1"]
         assert call["fields"] == (
             "sheets(properties(sheetId,title),"
-            "data(rowMetadata.hiddenByUser,columnMetadata.hiddenByUser,startRow,startColumn))"
+            "data(rowMetadata(hiddenByUser,hiddenByFilter),"
+            "columnMetadata(hiddenByUser,hiddenByFilter),startRow,startColumn))"
         )
+        assert "hiddenByFilter" in call["fields"]
         # Never grid data.
         assert "includeGridData" not in call
 
@@ -774,6 +816,8 @@ class TestRead:
             "sheet": "Sheet1",
             "hiddenRows": [10, 12],
             "hiddenCols": [3],
+            "filteredRows": [],
+            "filteredCols": [],
         }
 
     def test_read_default_origin_is_zero(self):
@@ -883,13 +927,161 @@ class TestRead:
         assert exc.value.status == 404
 
 
+# ================================================================= read (hiddenByFilter)
+
+
+class TestReadHiddenByFilter:
+    """``hiddenByFilter`` (FA2 / audit #21): a row concealed by an ACTIVE filter must surface as
+    ``filteredRows``/``filteredCols`` INDEPENDENTLY of the user-hidden ``hiddenRows``/``hiddenCols``,
+    so an agent can report what a viewer actually sees vs. what the user manually hid."""
+
+    def test_filtered_only_surfaces_alongside_hidden_by_user(self):
+        """Golden master: hiddenByFilter=True,hiddenByUser=False -> filteredRows set, hiddenRows empty.
+
+        Proves the two flags are surfaced INDEPENDENTLY: a filter-hidden row appears in
+        ``filteredRows`` but NOT ``hiddenRows`` (and vice-versa for a user-hidden row).
+        """
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 0,
+                            "startColumn": 0,
+                            "rowMetadata": [
+                                {"hiddenByUser": True},                    # user-hidden row 0
+                                {"hiddenByFilter": True},                  # filter-hidden row 1
+                                {"hiddenByUser": False, "hiddenByFilter": False},  # visible row 2
+                            ],
+                            "columnMetadata": [
+                                {"hiddenByFilter": True},                  # filter-hidden col 0
+                                {},                                        # visible col 1
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SPREADSHEET_ID,
+            "action": "read",
+            "sheet": "Sheet1",
+            "hiddenRows": [0],       # hiddenByUser only
+            "hiddenCols": [],
+            "filteredRows": [1],     # hiddenByFilter only — NOT in hiddenRows
+            "filteredCols": [0],
+        }
+
+    def test_both_flags_on_same_dimension_are_independent(self):
+        """A single row can be BOTH user-hidden AND filter-hidden — it appears in both lists."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 5,
+                            "rowMetadata": [
+                                {"hiddenByUser": True, "hiddenByFilter": True},  # abs row 5, both
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
+        assert out["hiddenRows"] == [5]
+        assert out["filteredRows"] == [5]
+
+    def test_no_filter_yields_empty_filtered_lists(self):
+        """No hiddenByFilter anywhere -> filteredRows/filteredCols are present but empty."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [{"rowMetadata": [{}, {"hiddenByUser": True}], "columnMetadata": [{}]}],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
+        assert out["filteredRows"] == []
+        assert out["filteredCols"] == []
+        assert out["hiddenRows"] == [1]
+
+    def test_filtered_indices_are_absolute_and_sorted(self):
+        """Block startRow origin is applied to filter-hidden indices, same as user-hidden ones."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 100,
+                            "rowMetadata": [
+                                {"hiddenByFilter": True},  # abs row 100
+                                {},
+                                {"hiddenByFilter": True},  # abs row 102
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
+        assert out["filteredRows"] == [100, 102]
+
+    def test_sizes_read_also_surfaces_filtered(self):
+        """The extended (sizes) mask still surfaces filteredRows/filteredCols alongside sizes."""
+        metadata = {
+            "sheets": [
+                {
+                    "properties": {"sheetId": 0, "title": "Sheet1"},
+                    "data": [
+                        {
+                            "startRow": 0,
+                            "startColumn": 0,
+                            "rowMetadata": [
+                                {"pixelSize": 21},
+                                {"pixelSize": 21, "hiddenByFilter": True},  # filter-hidden row 1
+                            ],
+                            "columnMetadata": [
+                                {"pixelSize": 100, "hiddenByFilter": True},  # filter-hidden col 0
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        services, _, _ = _make_service(metadata_responses=[metadata])
+        out = dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="read",
+            sheet="Sheet1",
+            params={"sizes": True},
+        )
+        assert out["filteredRows"] == [1]
+        assert out["filteredCols"] == [0]
+        assert out["hiddenRows"] == []
+        assert out["hiddenCols"] == []
+        assert out["rowHeights"] == [{"start": 0, "end": 2, "pixelSize": 21}]
+
+
 # =========================================================================== read (sizes)
 
-#: The extended read mask used when ``sizes`` is requested (pixelSize alongside hiddenByUser).
+#: The extended read mask used when ``sizes`` is requested (pixelSize alongside BOTH visibility
+#: flags, ``hiddenByUser`` + the read-only ``hiddenByFilter``).
 _SIZES_MASK = (
     "sheets(properties(sheetId,title),"
-    "data(rowMetadata(hiddenByUser,pixelSize),"
-    "columnMetadata(hiddenByUser,pixelSize),startRow,startColumn))"
+    "data(rowMetadata(hiddenByUser,hiddenByFilter,pixelSize),"
+    "columnMetadata(hiddenByUser,hiddenByFilter,pixelSize),startRow,startColumn))"
 )
 
 
@@ -964,7 +1156,8 @@ class TestReadSizes:
         out = dimensions(services, SPREADSHEET_ID, action="read", sheet="Sheet1")
         assert get_rec.metadata_calls[0]["fields"] == (
             "sheets(properties(sheetId,title),"
-            "data(rowMetadata.hiddenByUser,columnMetadata.hiddenByUser,startRow,startColumn))"
+            "data(rowMetadata(hiddenByUser,hiddenByFilter),"
+            "columnMetadata(hiddenByUser,hiddenByFilter),startRow,startColumn))"
         )
         assert "rowHeights" not in out
         assert "colWidths" not in out

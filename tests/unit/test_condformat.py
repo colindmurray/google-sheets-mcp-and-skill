@@ -1479,3 +1479,151 @@ def test_text_eq_comma_value_round_trips_through_line():
     line = serialize_rule(rule)
     assert line == "[S!A1:A1] if TEXT_EQ(Smith, John) -> bold"
     assert parse_rule_line(line)["condition"]["values"] == ["Smith, John"]
+
+
+# ===========================================================================
+# validate_condition — context-aware ConditionType + arg-count validation
+# (T1.5 / audit #5b). Pure; shared by CF, filter/slicer, and data-validation builds.
+# ===========================================================================
+
+
+class TestValidateCondition:
+    def test_blank_legal_in_conditional_format(self):
+        # BLANK/NOT_BLANK are CF/filter-only; both are legal on the CF surface (arg count 0).
+        assert condformat.validate_condition("BLANK", [], "conditional_format") is None
+        assert condformat.validate_condition("NOT_BLANK", [], "conditional_format") is None
+
+    def test_blank_legal_in_filter(self):
+        assert condformat.validate_condition("BLANK", [], "filter") is None
+
+    def test_blank_illegal_in_data_validation(self):
+        # Google documents BLANK/NOT_BLANK as CF/filter-only -> a data-validation write 400s.
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("BLANK", [], "data_validation")
+        assert exc.value.code == "bad_condition"
+        assert "data_validation" in exc.value.message
+
+    def test_not_blank_illegal_in_data_validation(self):
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("NOT_BLANK", [], "data_validation")
+        assert exc.value.code == "bad_condition"
+
+    def test_boolean_legal_in_data_validation_only(self):
+        # BOOLEAN (checkbox) is data-validation-only; at most two values.
+        assert condformat.validate_condition("BOOLEAN", [], "data_validation") is None
+        assert condformat.validate_condition("BOOLEAN", ["Y", "N"], "data_validation") is None
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("BOOLEAN", [], "conditional_format")
+        assert exc.value.code == "bad_condition"
+
+    def test_one_of_range_data_validation_only(self):
+        assert condformat.validate_condition("ONE_OF_RANGE", ["=Z1:Z9"], "data_validation") is None
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("ONE_OF_RANGE", ["=Z1:Z9"], "filter")
+        assert exc.value.code == "bad_condition"
+
+    def test_filter_surface_authoritative_set_accepted(self):
+        # The 19 types Google's BooleanCondition.type annotations mark "Supported by ... filters"
+        # (regular filters, excluding data-source-object filters) must all pass on the filter
+        # surface at their correct arg count.
+        one_arg = [
+            "NUMBER_GREATER", "NUMBER_GREATER_THAN_EQ", "NUMBER_LESS", "NUMBER_LESS_THAN_EQ",
+            "NUMBER_EQ", "NUMBER_NOT_EQ", "TEXT_CONTAINS", "TEXT_NOT_CONTAINS",
+            "TEXT_STARTS_WITH", "TEXT_ENDS_WITH", "TEXT_EQ",
+            "DATE_EQ", "DATE_BEFORE", "DATE_AFTER", "CUSTOM_FORMULA",
+        ]
+        for t in one_arg:
+            assert condformat.validate_condition(t, ["x"], "filter") is None
+        assert condformat.validate_condition("NUMBER_BETWEEN", ["0", "9"], "filter") is None
+        assert condformat.validate_condition("NUMBER_NOT_BETWEEN", ["0", "9"], "filter") is None
+        assert condformat.validate_condition("BLANK", [], "filter") is None
+        assert condformat.validate_condition("NOT_BLANK", [], "filter") is None
+
+    def test_data_validation_only_types_rejected_in_filter(self):
+        # DATE_ON_OR_BEFORE/AFTER, DATE_BETWEEN/NOT_BETWEEN and ONE_OF_LIST are data-validation-only
+        # (never "Supported by ... filters"); a basic filter / filter view / slicer using them must
+        # surface a clear ``bad_condition`` pre-flight rather than reach Google and 400.
+        for t, vals in (
+            ("DATE_ON_OR_BEFORE", ["2024-01-01"]),
+            ("DATE_ON_OR_AFTER", ["2024-01-01"]),
+            ("DATE_BETWEEN", ["2024-01-01", "2024-12-31"]),
+            ("DATE_NOT_BETWEEN", ["2024-01-01", "2024-12-31"]),
+            ("ONE_OF_LIST", ["West", "East"]),
+        ):
+            with pytest.raises(SheetsError) as exc:
+                condformat.validate_condition(t, vals, "filter")
+            assert exc.value.code == "bad_condition"
+            assert "filter" in exc.value.message
+
+    def test_data_source_filter_only_types_rejected_in_regular_filter(self):
+        # TEXT_NOT_EQ and DATE_NOT_EQ are supported only by filters on data-source objects, not
+        # regular filters; the general "filter" surface must reject them.
+        for t in ("TEXT_NOT_EQ", "DATE_NOT_EQ"):
+            with pytest.raises(SheetsError) as exc:
+                condformat.validate_condition(t, ["x"], "filter")
+            assert exc.value.code == "bad_condition"
+
+    def test_number_between_requires_two_values(self):
+        assert condformat.validate_condition("NUMBER_BETWEEN", ["0", "9"], "conditional_format") is None
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("NUMBER_BETWEEN", ["0"], "conditional_format")
+        assert exc.value.code == "bad_condition"
+        assert "2" in exc.value.message
+
+    def test_number_between_too_many_values(self):
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("NUMBER_BETWEEN", ["0", "9", "20"], "conditional_format")
+        assert exc.value.code == "bad_condition"
+
+    def test_one_of_range_requires_exactly_one(self):
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("ONE_OF_RANGE", [], "data_validation")
+        assert exc.value.code == "bad_condition"
+
+    def test_zero_arg_type_rejects_values(self):
+        # BLANK takes no values; passing one is an arg-count violation.
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("BLANK", ["x"], "conditional_format")
+        assert exc.value.code == "bad_condition"
+
+    def test_one_of_list_unbounded(self):
+        assert condformat.validate_condition("ONE_OF_LIST", ["a"], "data_validation") is None
+        assert condformat.validate_condition(
+            "ONE_OF_LIST", ["a", "b", "c", "d"], "data_validation"
+        ) is None
+        with pytest.raises(SheetsError):
+            condformat.validate_condition("ONE_OF_LIST", [], "data_validation")
+
+    def test_unknown_context_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("BLANK", [], "nonsense")
+        assert exc.value.code == "bad_condition"
+
+    def test_unknown_type_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("MADE_UP_TYPE", [], "conditional_format")
+        assert exc.value.code == "bad_condition"
+
+    def test_empty_type_raises(self):
+        with pytest.raises(SheetsError) as exc:
+            condformat.validate_condition("", [], "conditional_format")
+        assert exc.value.code == "bad_condition"
+
+    def test_build_condition_defaults_to_conditional_format(self):
+        # The CF build path validates against the conditional_format surface: BLANK is legal.
+        rule = build_google_rule(
+            {"ranges": ["S!A1"], "kind": "boolean", "condition": {"type": "BLANK"}, "format": {}}
+        )
+        assert rule["booleanRule"]["condition"] == {"type": "BLANK"}
+
+    def test_build_condition_rejects_dv_only_type_in_cf(self):
+        with pytest.raises(SheetsError) as exc:
+            build_google_rule(
+                {
+                    "ranges": ["S!A1"],
+                    "kind": "boolean",
+                    "condition": {"type": "ONE_OF_RANGE", "values": ["=Z1:Z9"]},
+                    "format": {},
+                }
+            )
+        assert exc.value.code == "bad_condition"

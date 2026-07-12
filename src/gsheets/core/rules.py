@@ -14,7 +14,7 @@ from __future__ import annotations
 from googleapiclient.errors import HttpError
 
 from . import condformat
-from .addressing import a1_to_gridrange
+from .addressing import a1_to_gridrange, resolve_sheet_id_by_name
 from .errors import SheetsError, classify_google_error
 from .service import SheetsServices
 
@@ -43,9 +43,10 @@ def set_conditional_format(
     SOLELY from the ``index`` kwarg.
 
     For multiple safe mutations in one shot, pass ``rules`` (a list of
-    ``{"action", "index", "rule"}`` items); core sorts them by ``index`` DESCENDING and emits
-    one ``batchUpdate`` so earlier mutations never shift later targets. Passing both ``rules``
-    and any of ``action``/``index``/``rule`` raises ``SheetsError("conflicting_args")``.
+    ``{"action", "index", "rule"}`` items); core orders them so no mutation shifts the array
+    position of a later target — updates+deletes together DESCENDING by index, then adds
+    ASCENDING — and emits one ``batchUpdate`` (audit #8). Passing both ``rules`` and any of
+    ``action``/``index``/``rule`` raises ``SheetsError("conflicting_args")``.
 
     Args:
         services: The authed handle.
@@ -59,7 +60,7 @@ def set_conditional_format(
     Returns:
         Single form: ``{"ok": True, "spreadsheetId": ..., "action": ..., "sheet": ...,
         "index": ..., "rule": ...}``. Batch form: ``{"ok": True, "spreadsheetId": ...,
-        "results": [...]}`` in applied (high->low) order.
+        "results": [...]}`` in applied order (updates+deletes desc, then adds asc).
     """
     if rules is not None:
         if action is not None or index is not None or rule is not None:
@@ -113,11 +114,14 @@ def _set_conditional_format_batch(
     sheet: str | None,
     rules: list[dict],
 ) -> dict:
-    """Build + apply MANY conditional-format mutations in one batch, sorted high->low.
+    """Build + apply MANY conditional-format mutations in one batch, ordered per action.
 
-    Each item is ``{"action", "index", "rule"}`` (``rule`` omitted for delete). Core sorts
-    by ``index`` DESCENDING so earlier mutations never shift later targets, then emits one
-    ``batchUpdate``. The returned ``results`` are in applied (high->low) order.
+    Each item is ``{"action", "index", "rule"}`` (``rule`` omitted for delete). Core orders the
+    batch so no mutation shifts the array position of a later target: updates+deletes together
+    DESCENDING by index (both address the current array, so a lower-index delete must never run
+    before a higher-index update/delete), then adds ASCENDING (audit #8 — descending adds would
+    wedge an existing rule between two new ones), all in one ``batchUpdate``. The returned
+    ``results`` are in that applied order.
     """
     if not isinstance(rules, list) or not rules:
         raise SheetsError("empty_payload", "`rules` must be a non-empty list of items")
@@ -146,15 +150,31 @@ def _set_conditional_format_batch(
             }
         )
 
-    # Sort by index DESCENDING so each mutation does not shift the array position of a
-    # later (lower-index) target. ``add`` uses its index as an insert position; sorting it
-    # alongside delete/update high->low is still index-shift-safe within one batch.
-    prepared.sort(key=lambda p: p["index"], reverse=True)
+    # Order the batch so no operation shifts the array position of a later target. Google
+    # applies the requests sequentially; each op sees the array as left by the prior ops,
+    # and the three actions have DIFFERENT index-shift behaviour:
+    #   * delete -> removes an element (shifts later, lower-priority elements DOWN).
+    #   * update -> replaces in place (no shift), BUT addresses the CURRENT array by index,
+    #               so a prior delete/insert with a lower index moves update's target out
+    #               from under it (delete@2 before update@4 would leave update@4 hitting the
+    #               old E5). Updates and deletes therefore must be ordered TOGETHER.
+    #   * add    -> inserts an element (shifts later elements UP).
+    # Deletes and updates share the same "operate on the existing array" model, so we sort
+    # them TOGETHER strictly DESCENDING by index: a higher-index op runs before any
+    # lower-index one, so no delete/update ever shifts a still-pending delete/update target.
+    # Adds run LAST, ASCENDING by index, so two adds meant for indices 0 and 1 land as
+    # ``[A, B, E0, E1, ...]`` rather than wedging an existing rule between them (``add@1``
+    # first would give ``[A, E0, B, E1]``) — audit #8.
+    non_adds = [p for p in prepared if p["action"] != "add"]
+    adds = [p for p in prepared if p["action"] == "add"]
+    non_adds.sort(key=lambda p: p["index"], reverse=True)
+    adds.sort(key=lambda p: p["index"])
+    ordered = non_adds + adds
 
-    _execute_batch_update(services, spreadsheet_id, [p["request"] for p in prepared])
+    _execute_batch_update(services, spreadsheet_id, [p["request"] for p in ordered])
 
     results: list[dict] = []
-    for p in prepared:
+    for p in ordered:
         entry: dict = {"action": p["action"], "index": p["index"]}
         if p["rule_line"] is not None:
             entry["rule"] = p["rule_line"]
@@ -248,18 +268,13 @@ def _resolve_sheet_id(
 ) -> int | None:
     """Resolve a sheet NAME to its ``sheetId`` (or ``None`` when no name is given).
 
-    Reuses ``a1_to_gridrange`` (which resolves sheet name -> sheetId via the cached
-    ``spreadsheets.get``) against a bare-sheet A1 reference so this module never duplicates
-    the resolution logic owned by ``core_addressing``.
+    Delegates to the authoritative title-first :func:`resolve_sheet_id_by_name`, which owns the
+    resolution logic (and fixes the digit-suffixed wrong-tab bug, ISSUES.md #1). A ``None`` name
+    stays ``None`` here (the caller then falls back to the rule's own resolved ranges).
     """
     if sheet is None:
         return None
-    # Quote the bare name so addressing treats it as a SHEET reference, not an A1 cell
-    # (e.g. a sheet literally named "Sheet1" must not be parsed as cell Sheet1). A literal
-    # single quote inside the name is doubled per the A1 quoting rules.
-    quoted = "'" + sheet.replace("'", "''") + "'"
-    grid = a1_to_gridrange(services, spreadsheet_id, quoted)
-    return grid.get("sheetId")
+    return resolve_sheet_id_by_name(services, spreadsheet_id, sheet)
 
 
 def _sheet_id_from_resolved_rule(resolved_rule: dict) -> int:
@@ -462,6 +477,12 @@ def rule_to_validation(
 
     condition: dict = {"type": rule_type}
     values = _validation_condition_values(rule, rule_type)
+    # Context-aware ConditionType validation (audit #5b): the ``ConditionType`` enum is shared
+    # across data validation / conditional formatting / filters, but each surface accepts only a
+    # subset (e.g. BLANK/NOT_BLANK are CF/filter-only — Google 400s them in data validation) and
+    # each type has a required arg count. Validate against the ``data_validation`` surface here,
+    # BEFORE dispatch, so a misuse surfaces as a clear ``bad_condition`` instead of an opaque 400.
+    condformat.validate_condition(rule_type, values, "data_validation")
     if values:
         condition["values"] = values
 
@@ -478,6 +499,14 @@ def rule_to_validation(
     google["strict"] = bool(_resolve_flag(strict, rule.get("strict")))
     # Google's field for the in-cell dropdown is ``showCustomUi``.
     google["showCustomUi"] = bool(_resolve_flag(show_dropdown, rule.get("showDropdown")))
+
+    # ``inputMessage`` (audit #22): write the viewer-facing help/error text back when the rule
+    # carries it (a plain string per the discovery ``DataValidationRule.inputMessage``); omit the
+    # field entirely when absent so a rule without help text stays clean. Symmetric with the read
+    # side in :func:`validation_to_rule`, so the text survives a read-modify-write.
+    input_message = rule.get("inputMessage")
+    if isinstance(input_message, str):
+        google["inputMessage"] = input_message
     return google
 
 
@@ -574,6 +603,13 @@ def validation_to_rule(google_validation: dict) -> dict:
     else:
         if extracted:
             out["values"] = extracted
+
+    # ``inputMessage`` (audit #22): the viewer-facing help/error text. Surface it only when the
+    # rule carries one so a read-modify-write preserves it instead of silently erasing it. Omit
+    # the key entirely when absent (kept symmetric with :func:`rule_to_validation`).
+    input_message = google_validation.get("inputMessage")
+    if isinstance(input_message, str):
+        out["inputMessage"] = input_message
 
     # ``strict`` defaults True when Google omits it (Google omits ``strict`` when False on
     # some payloads, but the documented default behaviour for setDataValidation reads back

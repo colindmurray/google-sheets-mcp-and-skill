@@ -19,6 +19,8 @@ Sibling collaborators this unit calls but does NOT own:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,7 +33,15 @@ from gsheets.core.reads import (
     overview,
     read_conditional_formats,
 )
+from gsheets.core.serializers.chips import serialize_chip_runs
 from gsheets.core.service import SheetsServices
+
+GOLDEN_DIR = Path(__file__).parent / "golden"
+
+
+def load_golden(name: str) -> dict:
+    """Load a committed golden fixture (theme / chip-run masters)."""
+    return json.loads((GOLDEN_DIR / name).read_text())
 
 
 # --------------------------------------------------------------------------- helpers
@@ -1569,8 +1579,9 @@ class TestOverviewLocaleTimeZone:
         services, rec = _make_service(data_responses=[{"properties": {"title": "T"}}])
         overview(services, SHEET_ID)
         fields = rec.data_calls[0]["fields"]
-        # The widened properties mask now pulls title + locale + timeZone (§X.12).
-        assert "properties(title,locale,timeZone)" in fields
+        # The widened properties mask now pulls title + locale + timeZone (§X.12) alongside the
+        # theme sub-mask (T2.1), so assert the subfields are present rather than an exact close-paren.
+        assert "properties(title,locale,timeZone," in fields
 
     def test_locale_and_time_zone_surfaced_when_present(self):
         payload = {
@@ -1995,3 +2006,351 @@ class TestReadConditionalFormatsCommaFormula:
         }
         # The human-readable line still renders the formula verbatim.
         assert '=AND($A3<>"", $D3=$G3, $E3=$H3, $C3<>$F3)' in rule["line"]
+
+
+# =========================================================================== T2.1 theme resolver
+
+
+class TestOverviewTheme:
+    """T2.1: overview surfaces a compact ``theme`` map (colorType -> #hex) + ``themeFontFamily`` so
+    an agent can resolve any ``theme:NAME`` it reads elsewhere to the workbook's real color. Omitted
+    gracefully when the workbook carries no theme.
+    """
+
+    def test_overview_mask_requests_spreadsheet_theme(self):
+        services, rec = _make_service(data_responses=[{"properties": {"title": "T"}}])
+        overview(services, SHEET_ID)
+        fields = rec.data_calls[0]["fields"]
+        # The exact ThemeColorPair fields are colorType + color (a ColorStyle), per the discovery
+        # doc — NOT ``colorStyle`` (which does not exist on ThemeColorPair).
+        assert "spreadsheetTheme(primaryFontFamily,themeColors(colorType,color))" in fields
+
+    def test_theme_map_all_slots_resolved_to_hex(self):
+        fix = load_golden("spreadsheet_theme.json")
+        payload = {
+            "properties": {"title": "Themed", "spreadsheetTheme": fix["spreadsheetTheme"]},
+            "sheets": [],
+        }
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        # Every theme slot (TEXT/BACKGROUND/ACCENT1..6/LINK) maps NAME -> concrete hex.
+        assert out["theme"] == fix["expected_theme"]
+        assert out["themeFontFamily"] == fix["expected_theme_font_family"]
+
+    def test_theme_name_to_hex_covers_link_and_text_extremes(self):
+        # Sanity on the two extremes an agent most needs: TEXT (rgbColor {} -> black) and LINK.
+        fix = load_golden("spreadsheet_theme.json")
+        payload = {
+            "properties": {"title": "T", "spreadsheetTheme": fix["spreadsheetTheme"]},
+            "sheets": [],
+        }
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        assert out["theme"]["TEXT"] == "#000000"
+        assert out["theme"]["LINK"] == "#1155CC"
+
+    def test_no_theme_workbook_omits_theme_fields(self):
+        payload = {"properties": {"title": "Plain"}, "sheets": []}
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        assert "theme" not in out
+        assert "themeFontFamily" not in out
+
+    def test_theme_font_family_optional(self):
+        # A theme with colors but no primaryFontFamily surfaces the map, omits the font key.
+        theme = {
+            "themeColors": [
+                {"colorType": "ACCENT1", "color": {"rgbColor": {"red": 1.0}}},
+            ]
+        }
+        payload = {"properties": {"title": "T", "spreadsheetTheme": theme}, "sheets": []}
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        assert out["theme"] == {"ACCENT1": "#FF0000"}
+        assert "themeFontFamily" not in out
+
+    def test_theme_skips_unspecified_and_malformed_pairs(self):
+        theme = {
+            "themeColors": [
+                {"colorType": "THEME_COLOR_TYPE_UNSPECIFIED", "color": {"rgbColor": {}}},
+                {"colorType": "ACCENT2", "color": {"notAColor": True}},
+                {"colorType": "ACCENT1", "color": {"rgbColor": {"blue": 1.0}}},
+            ]
+        }
+        payload = {"properties": {"title": "T", "spreadsheetTheme": theme}, "sheets": []}
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        # Unspecified slot dropped; malformed ACCENT2 skipped (not fatal); ACCENT1 survives.
+        assert out["theme"] == {"ACCENT1": "#0000FF"}
+
+    def test_theme_color_can_be_a_theme_reference(self):
+        # Defensive: a pair whose color is itself a themeColor (rare) flattens via the shared helper.
+        theme = {
+            "themeColors": [
+                {"colorType": "LINK", "color": {"themeColor": "ACCENT1"}},
+            ]
+        }
+        payload = {"properties": {"title": "T", "spreadsheetTheme": theme}, "sheets": []}
+        services, _ = _make_service(data_responses=[payload])
+        out = overview(services, SHEET_ID)
+        assert out["theme"] == {"LINK": "theme:ACCENT1"}
+
+
+# =========================================================================== T2.2 chip serializer
+
+
+class TestChipSerializer:
+    """Golden-master + targeted cases for :func:`serialize_chip_runs` (T2.2). Serviceless: raw
+    Google ``chipRuns`` JSON in, terse ``{start, kind, ...}`` dicts out.
+    """
+
+    def test_chip_runs_golden(self):
+        fix = load_golden("chip_runs.json")
+        assert serialize_chip_runs(fix["chipRuns"]) == fix["expected_chips"]
+
+    def test_person_chip_carries_email_and_display_format(self):
+        runs = [
+            {"chip": {"personProperties": {"email": "a@b.com", "displayFormat": "EMAIL"}}}
+        ]
+        assert serialize_chip_runs(runs) == [
+            {"start": 0, "kind": "person", "email": "a@b.com", "displayFormat": "EMAIL"}
+        ]
+
+    def test_person_chip_omits_unspecified_display_format(self):
+        runs = [
+            {
+                "chip": {
+                    "personProperties": {
+                        "email": "a@b.com",
+                        "displayFormat": "DISPLAY_FORMAT_UNSPECIFIED",
+                    }
+                }
+            }
+        ]
+        out = serialize_chip_runs(runs)
+        assert out == [{"start": 0, "kind": "person", "email": "a@b.com"}]
+
+    def test_file_chip_via_docs_host(self):
+        runs = [
+            {
+                "startIndex": 3,
+                "chip": {
+                    "richLinkProperties": {
+                        "uri": "https://docs.google.com/spreadsheets/d/XYZ/edit",
+                        "mimeType": "application/vnd.google-apps.spreadsheet",
+                    }
+                },
+            }
+        ]
+        assert serialize_chip_runs(runs) == [
+            {
+                "start": 3,
+                "kind": "file",
+                "uri": "https://docs.google.com/spreadsheets/d/XYZ/edit",
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+            }
+        ]
+
+    def test_file_chip_via_mimetype_only(self):
+        # A non-docs host but with an output-only Drive mimeType is still classified ``file``.
+        runs = [
+            {
+                "chip": {
+                    "richLinkProperties": {
+                        "uri": "https://example.org/a",
+                        "mimeType": "application/pdf",
+                    }
+                }
+            }
+        ]
+        out = serialize_chip_runs(runs)
+        assert out[0]["kind"] == "file"
+        assert out[0]["mimeType"] == "application/pdf"
+
+    def test_place_and_finance_hosts(self):
+        runs = [
+            {"chip": {"richLinkProperties": {"uri": "https://www.google.com/maps/place/X"}}},
+            {
+                "startIndex": 5,
+                "chip": {"richLinkProperties": {"uri": "https://www.google.com/finance/quote/GOOG:NASDAQ"}},
+            },
+        ]
+        out = serialize_chip_runs(runs)
+        assert out[0]["kind"] == "place"
+        assert out[1]["kind"] == "finance"
+
+    def test_unknown_rich_link_falls_back_to_richlink(self):
+        runs = [{"chip": {"richLinkProperties": {"uri": "https://acme.example/doc"}}}]
+        out = serialize_chip_runs(runs)
+        assert out == [{"start": 0, "kind": "richlink", "uri": "https://acme.example/doc"}]
+
+    def test_first_run_start_defaults_to_zero(self):
+        runs = [{"chip": {"personProperties": {"email": "x@y.com"}}}]
+        assert serialize_chip_runs(runs)[0]["start"] == 0
+
+    def test_runs_sorted_by_start(self):
+        runs = [
+            {"startIndex": 9, "chip": {"personProperties": {"email": "late@x.com"}}},
+            {"startIndex": 0, "chip": {"personProperties": {"email": "early@x.com"}}},
+        ]
+        out = serialize_chip_runs(runs)
+        assert [c["start"] for c in out] == [0, 9]
+        assert out[0]["email"] == "early@x.com"
+
+    def test_chipless_run_is_skipped(self):
+        # A run with no chip is a plain-text gap — nothing to surface.
+        runs = [
+            {"chip": {"personProperties": {"email": "x@y.com"}}},
+            {"startIndex": 4},
+        ]
+        out = serialize_chip_runs(runs)
+        assert len(out) == 1
+
+    def test_empty_and_none_yield_empty_list(self):
+        assert serialize_chip_runs(None) == []
+        assert serialize_chip_runs([]) == []
+
+    def test_bad_type_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            serialize_chip_runs({"not": "a list"})
+        assert ei.value.code == "bad_chip_runs"
+
+    def test_bad_start_index_raises(self):
+        with pytest.raises(SheetsError) as ei:
+            serialize_chip_runs([{"startIndex": -1, "chip": {"personProperties": {"email": "x"}}}])
+        assert ei.value.code == "bad_chip_runs"
+
+
+# =========================================================================== T2.2 inspect chips
+
+
+def _chip_cell(text, chip_runs):
+    """A Google CellData with a formattedValue + chipRuns."""
+    return {"formattedValue": text, "chipRuns": chip_runs}
+
+
+class TestInspectChips:
+    def test_default_mask_has_no_chip_runs(self):
+        services, rec = _make_service(
+            data_responses=[{"sheets": [{"properties": {"title": "Cliff"}, "data": [{}]}]}],
+            sheet_index=_CLIFF_INDEX,
+        )
+        inspect(services, SHEET_ID, "Cliff!A1:B2")
+        assert "chipRuns" not in rec.data_calls[0]["fields"]
+
+    def test_chips_flag_adds_tight_chip_runs_mask(self):
+        services, rec = _make_service(
+            data_responses=[{"sheets": [{"properties": {"title": "Cliff"}, "data": [{}]}]}],
+            sheet_index=_CLIFF_INDEX,
+        )
+        inspect(services, SHEET_ID, "Cliff!A1:B2", chips=True)
+        fields = rec.data_calls[0]["fields"]
+        # Tight sub-mask, exactly the fields the serializer reads (never the whole chipRuns blob).
+        assert (
+            "chipRuns(startIndex,chip(personProperties(email,displayFormat),"
+            "richLinkProperties(uri,mimeType)))" in fields
+        )
+        assert "includeGridData" not in fields
+
+    def test_person_and_file_chips_rendered_per_cell(self):
+        person = [{"chip": {"personProperties": {"email": "jane@x.com", "displayFormat": "DEFAULT"}}}]
+        drive = [
+            {
+                "chip": {
+                    "richLinkProperties": {
+                        "uri": "https://docs.google.com/document/d/D/edit",
+                        "mimeType": "application/vnd.google-apps.document",
+                    }
+                }
+            }
+        ]
+        rowdata = [
+            {"values": [_chip_cell("Jane Doe", person), _chip_cell("Spec Doc", drive)]}
+        ]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1", chips=True)
+        assert out["cells"][0] == {
+            "a1": "A1",
+            "value": "Jane Doe",
+            "chips": [
+                {"start": 0, "kind": "person", "email": "jane@x.com", "displayFormat": "DEFAULT"}
+            ],
+        }
+        assert out["cells"][1]["chips"] == [
+            {
+                "start": 0,
+                "kind": "file",
+                "uri": "https://docs.google.com/document/d/D/edit",
+                "mimeType": "application/vnd.google-apps.document",
+            }
+        ]
+
+    def test_cell_without_chips_carries_no_chips_key(self):
+        rowdata = [
+            {
+                "values": [
+                    _chip_cell("Jane", [{"chip": {"personProperties": {"email": "j@x.com"}}}]),
+                    _cell(value="plain"),
+                ]
+            }
+        ]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1", chips=True)
+        assert "chips" in out["cells"][0]
+        assert out["cells"][1] == {"a1": "B1", "value": "plain"}
+
+    def test_chips_off_never_reads_chip_runs_even_if_present(self):
+        # Byte-identical default: with chips=False, a cell carrying chipRuns is unchanged.
+        rowdata = [
+            {"values": [_chip_cell("Jane", [{"chip": {"personProperties": {"email": "j@x.com"}}}])]}
+        ]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1")
+        assert out["cells"][0] == {"a1": "A1", "value": "Jane"}
+        assert "chips" not in out["cells"][0]
+
+    def test_differing_chips_never_merge_in_compact(self):
+        a = _chip_cell("x", [{"chip": {"personProperties": {"email": "a@x.com"}}}])
+        b = _chip_cell("x", [{"chip": {"personProperties": {"email": "b@x.com"}}}])
+        rowdata = [{"values": [a, b]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1", compact=True, chips=True)
+        assert len(out["runs"]) == 2
+        assert out["runs"][0]["chips"][0]["email"] == "a@x.com"
+        assert out["runs"][1]["chips"][0]["email"] == "b@x.com"
+
+    def test_identical_chip_cells_merge_and_run_carries_chips(self):
+        chip = [{"chip": {"personProperties": {"email": "same@x.com"}}}]
+        a = _chip_cell("x", chip)
+        b = _chip_cell("x", list(chip))
+        rowdata = [{"values": [a, b]}]
+        payload = {
+            "sheets": [
+                {"properties": {"title": "Cliff"}, "data": [{"rowData": rowdata}]}
+            ]
+        }
+        services, _ = _make_service(data_responses=[payload], sheet_index=_CLIFF_INDEX)
+        out = inspect(services, SHEET_ID, "Cliff!A1:B1", compact=True, chips=True)
+        assert len(out["runs"]) == 1
+        assert out["runs"][0]["a1Range"] == "A1:B1"
+        assert out["runs"][0]["chips"] == [{"start": 0, "kind": "person", "email": "same@x.com"}]

@@ -206,11 +206,9 @@ def _serialize_one_criterion(index: int, crit: dict) -> dict:
     if hidden:
         entry["hidden"] = list(hidden)
 
-    # ``visibleValues`` is the inverse expression — normalize it onto a ``visible`` key so a
-    # read never silently drops it (DESIGN §X.0d: "hiddenValues / visibleValues normalized").
-    visible = crit.get("visibleValues")
-    if visible:
-        entry["visible"] = list(visible)
+    # ``visibleValues`` is NOT a real ``FilterCriteria`` field (Google's FilterCriteria carries
+    # only ``hiddenValues`` + ``condition`` + visible*ColorStyle) — so there is nothing to
+    # normalize on read (audit #4).
 
     condition = crit.get("condition")
     if isinstance(condition, dict) and condition.get("type"):
@@ -277,9 +275,6 @@ def _criterion_segment(crit: dict) -> str:
     hidden = crit.get("hidden")
     if hidden:
         parts.append("hide " + ", ".join(str(v) for v in hidden))
-    visible = crit.get("visible")
-    if visible:
-        parts.append("show " + ", ".join(str(v) for v in visible))
     condition = crit.get("condition")
     if condition:
         parts.append(str(condition))
@@ -305,8 +300,8 @@ def build_set_basic_filter_request(
         spreadsheet_id: Target spreadsheet id (unused; uniform signature).
         grid_range: The basic filter's range as a Google ``GridRange`` (caller resolves A1 ->
             GridRange first).
-        params: ``{"sorted"?: [{"col","order"?}], "criteria"?: [{"col","hidden"?,"condition"?,
-            "visible"?}]}``.
+        params: ``{"sorted"?: [{"col","order"?}], "criteria"?: [{"col","hidden"?,
+            "condition"?}]}``.
 
     Returns:
         ``{"setBasicFilter": {"filter": {BasicFilter}}}``.
@@ -489,11 +484,13 @@ def _build_sort_specs(sorted_in: object) -> list[dict]:
 
 
 def _build_filter_specs(criteria_in: object) -> list[dict]:
-    """Build ``[FilterSpec]`` from ``[{"col","hidden"?,"visible"?,"condition"?}]``.
+    """Build ``[FilterSpec]`` from ``[{"col","hidden"?,"condition"?}]``.
 
     The newer ``filterSpecs`` form is emitted (each ``{columnIndex, filterCriteria}``).
     ``condition`` may be a terse condition string (``NUMBER_GREATER(0)``) — parsed by the SAME
-    condformat condition parser — or an already-structured ``{type, values}`` dict.
+    condformat condition parser — or an already-structured ``{type, values}`` dict. A ``visible``
+    key is REJECTED: ``visibleValues`` is not a real ``FilterCriteria`` field (audit #4), so
+    honoring it would silently drop the filter.
     """
     if criteria_in is None:
         return []
@@ -512,13 +509,18 @@ def _build_filter_specs(criteria_in: object) -> list[dict]:
             raise SheetsError("bad_filter", "a criterion requires a 'col' letter")
         column_index = _col_to_index(col)
 
+        if crit.get("visible"):
+            raise SheetsError(
+                "bad_filter",
+                f"criterion for col {col!r}: 'visible'/visibleValues is not a supported "
+                "FilterCriteria field (Google's FilterCriteria has only hiddenValues + "
+                "condition); express the inverse with 'hidden' (hiddenValues) or a 'condition'",
+            )
+
         filter_criteria: dict = {}
         hidden = crit.get("hidden")
         if hidden:
             filter_criteria["hiddenValues"] = list(hidden)
-        visible = crit.get("visible")
-        if visible:
-            filter_criteria["visibleValues"] = list(visible)
         condition = crit.get("condition")
         if condition is not None:
             filter_criteria["condition"] = _build_condition(condition)
@@ -526,7 +528,7 @@ def _build_filter_specs(criteria_in: object) -> list[dict]:
         if not filter_criteria:
             raise SheetsError(
                 "bad_filter",
-                f"criterion for col {col!r} has no hidden/visible/condition to apply",
+                f"criterion for col {col!r} has no hidden/condition to apply",
             )
         out.append(
             {"columnIndex": column_index, "filterCriteria": filter_criteria}
@@ -549,4 +551,4 @@ def _build_condition(condition: object) -> dict:
             "bad_filter",
             "condition must be a terse string (e.g. 'NUMBER_GREATER(0)') or a {type, values} dict",
         )
-    return condformat._build_condition(structured)
+    return condformat._build_condition(structured, context="filter")

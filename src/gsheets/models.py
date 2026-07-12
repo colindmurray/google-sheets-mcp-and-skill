@@ -118,7 +118,8 @@ class ValidationRule(_Sub):
 
     The SAME dict ``inspect`` surfaces under a cell's ``validationRule`` and that
     ``set_validation(rule=...)`` accepts. ``ok`` is irrelevant here (this is a sub-shape, not a
-    result), so it is left at its inherited default and never rendered.
+    result), so it is left at its inherited default and never rendered. ``inputMessage`` (T2.4) is
+    the viewer-facing help/error text and round-trips read->write when present.
     """
 
     type: Optional[str] = None
@@ -126,6 +127,8 @@ class ValidationRule(_Sub):
     source: Optional[str] = None
     strict: Optional[bool] = None
     showDropdown: Optional[bool] = None
+    # T2.4/#22 viewer-facing help/error text; round-trips read->write when the rule carries it.
+    inputMessage: Optional[str] = None
 
 
 class Cell(_Sub):
@@ -147,6 +150,9 @@ class Cell(_Sub):
     runs: Optional[list[TextRun]] = None
     hyperlink: Optional[str] = None
     pivot: Optional[Pivot] = None
+    # T2.2 smart chips: the serialized ``chipRuns`` list, present ONLY when the cell has chips and
+    # ``chips=True`` was requested.
+    chips: Optional[list[ChipRun]] = None
 
 
 class Run(_Sub):
@@ -168,6 +174,8 @@ class Run(_Sub):
     runs: Optional[list[TextRun]] = None
     hyperlink: Optional[str] = None
     pivot: Optional[Pivot] = None
+    # T2.2 smart chips: a run carries ``chips`` only when all its cells share identical chip runs.
+    chips: Optional[list[ChipRun]] = None
 
 
 class OverviewSheet(_Sub):
@@ -269,38 +277,22 @@ class SheetCFRules(_Sub):
     rules: Optional[list[CFRule]] = None
 
 
-class ValidationSummary(_Sub):
-    """The per-region validation rollup in ``describe`` (SPEC §3.2 ``validationSummary``).
+class DescribeColumn(_Sub):
+    """One column's profile in ``describe`` (T4.1 — the compact per-column profiler).
 
-    Mirrors ``core.reads._validation_summary``: ``cells`` is how many cells in the region carry a
-    data-validation rule; ``rules`` is the DISTINCT terse one-liners present (first-seen order).
-    Token-cheap — the per-cell ``validation``/``validationRule`` keys still ride each cell.
+    Mirrors ``core.reads._profile_block``'s per-column dict: ``col`` is the A1 column letter;
+    ``header`` the header text (header mode only, when the first row's cell is non-empty); ``type``
+    the inferred column type (``number``/``date``/``text``/``bool``/``formula-heavy``/``empty``);
+    ``density`` the non-empty data-cell ratio; ``formulaRatio`` the formula-cell ratio; and
+    ``distinctSample`` up to five distinct display values (omitted when empty).
     """
 
-    cells: Optional[int] = None
-    rules: Optional[list[str]] = None
-
-
-class DescribeRegion(_Sub):
-    """One requested range's merged region view in ``describe`` (SPEC §3.2).
-
-    Mirrors ``core.reads.describe``'s per-region dict — built by REUSING the existing serializers,
-    so each field is the SAME shape the standalone read emits: ``cells`` are :class:`Cell` (inspect's
-    full per-cell flatten), ``conditionalFormats`` are :class:`CFRule` (filtered to rules
-    INTERSECTING this range, each keeping its priority ``index``), ``tables``/``bandedRanges``/
-    ``protectedRanges`` are the structure read shapes, ``merges`` are A1 strings, and
-    ``validationSummary`` is the token-cheap rollup.
-    """
-
-    range: Optional[str] = None
-    sheet: Optional[str] = None
-    cells: Optional[list[Cell]] = None
-    merges: Optional[list[str]] = None
-    conditionalFormats: Optional[list[CFRule]] = None
-    tables: Optional[list["Table"]] = None
-    bandedRanges: Optional[list["Banding"]] = None
-    protectedRanges: Optional[list[ProtectedRange]] = None
-    validationSummary: Optional[ValidationSummary] = None
+    col: Optional[str] = None
+    header: Optional[str] = None
+    type: Optional[str] = None
+    density: Optional[float] = None
+    formulaRatio: Optional[float] = None
+    distinctSample: Optional[list[str]] = None
 
 
 class ValueRange(_Sub):
@@ -397,13 +389,23 @@ class CFMutationResult(_Sub):
 
 
 class NewIds(_Sub):
-    """Captured reply ids from ``batch`` (DESIGN §3.3/§5.4). Every bucket is always a list."""
+    """Captured reply ids from ``batch`` (DESIGN §3.3/§5.4). Every bucket is always a list.
+
+    Mirrors ``core.structure.capture_new_ids``'s nine buckets exactly (T4.2/#31): the original
+    five plus the v0.2 ``tableIds``/``bandedRangeIds``/``filterViewIds``/``slicerIds`` — so the
+    advertised MCP output schema declares every id core can surface from a ``batchUpdate``.
+    """
 
     sheetIds: list[int] = []
     chartIds: list[int] = []
     namedRangeIds: list[str] = []
     protectedRangeIds: list[int] = []
     metadataIds: list[int] = []
+    # T4.2/#31 — v0.2 add-reply ids (tables carry a STRING id; the rest are ints).
+    tableIds: list[str] = []
+    bandedRangeIds: list[int] = []
+    filterViewIds: list[int] = []
+    slicerIds: list[int] = []
 
 
 # --- v0.2 extension sub-models (DESIGN §Extensions / §X.0) ------------------------------
@@ -411,6 +413,25 @@ class NewIds(_Sub):
 # comments). Each serializer emits a flat, omit-when-absent dict that ALSO carries a terse
 # ``line`` (condformat-style) for the human/AI-facing rendering; ``extra="allow"`` tolerates the
 # ``line`` key while the documented structured fields stay pinned + typed for ``outputSchema``.
+
+
+class ChipRun(_Sub):
+    """One smart-chip run in a cell's ``chipRuns`` (T2.2 — read-richness for smart chips).
+
+    Mirrors ``core.serializers.chips.serialize_chip_runs`` per-chip output: ``start`` is the
+    0-based UTF-16 char offset, ``kind`` is the classified chip type
+    (``person``/``file``/``place``/``finance``/``rating``/``richlink``/``unknown``). Person chips
+    carry ``email`` + optional ``displayFormat``; rich-link chips (file/place/finance/…) carry the
+    authoritative ``uri`` + output-only ``mimeType``. Every field beyond ``start``/``kind`` is
+    present only when the chip carries it (omit-when-absent).
+    """
+
+    start: Optional[int] = None
+    kind: Optional[str] = None
+    email: Optional[str] = None
+    displayFormat: Optional[str] = None
+    uri: Optional[str] = None
+    mimeType: Optional[str] = None
 
 
 class TextRun(_Sub):
@@ -490,10 +511,11 @@ class Pivot(_Sub):
 class TableColumn(_Sub):
     """One native-table column (DESIGN §X.0c ``columns`` entry).
 
-    Mirrors ``core.tables.serialize_table``'s per-column dict: ``name``, ``type`` (the
-    ``columnType`` enum TEXT|DOUBLE|CURRENCY|PERCENT|DATE|TIME|DATETIME|DROPDOWN|CHECKBOX|
-    SMART_CHIP|RATING), and ``validation`` (a DROPDOWN column's ``ValidationRule`` one-liner,
-    present only when set).
+    Mirrors ``core.tables.serialize_table``'s per-column dict: ``name``, ``type`` (the live
+    ``columnType`` enum DOUBLE|CURRENCY|PERCENT|DATE|TIME|DATE_TIME|TEXT|BOOLEAN|DROPDOWN|
+    FILES_CHIP|PEOPLE_CHIP|FINANCE_CHIP|PLACE_CHIP|RATINGS_CHIP; on write, legacy
+    DATETIME/CHECKBOX/RATING are accepted as aliases and SMART_CHIP is rejected), and
+    ``validation`` (a DROPDOWN column's ``ValidationRule`` one-liner, present only when set).
     """
 
     name: Optional[str] = None
@@ -501,18 +523,36 @@ class TableColumn(_Sub):
     validation: Optional[str] = None
 
 
+class TableRowsProperties(_Sub):
+    """A native Table's ``rowsProperties`` header/band/footer colors (T2.6 ``rowsProperties``).
+
+    Mirrors ``core.tables._serialize_rows_properties`` / ``_build_rows_properties``: each terse key
+    is a hex (``#RRGGBB``) or ``theme:NAME`` color flattened from / written to the matching Google
+    ``*ColorStyle`` (``headerColorStyle`` / ``firstBandColorStyle`` / ``secondBandColorStyle`` /
+    ``footerColorStyle``). Present only when the table sets that color (omit-when-absent), keyed
+    identically on read and write so the block round-trips.
+    """
+
+    header: Optional[str] = None
+    firstBand: Optional[str] = None
+    secondBand: Optional[str] = None
+    footer: Optional[str] = None
+
+
 class Table(_Sub):
     """A native Table (``Table``) read shape (DESIGN §X.0c).
 
     Mirrors ``core.tables.serialize_table``: ``tableId``/``name``, ``range`` (the table's
-    ``GridRange`` resolved to A1), and a :class:`TableColumn` list. A terse ``line`` rides along
-    (kept by ``extra="allow"``).
+    ``GridRange`` resolved to A1), a :class:`TableColumn` list, and — when the table sets any
+    header/band/footer color — a :class:`TableRowsProperties` ``rowsProperties`` (T2.6). A terse
+    ``line`` rides along (kept by ``extra="allow"``).
     """
 
     tableId: Optional[str] = None
     name: Optional[str] = None
     range: Optional[str] = None
     columns: Optional[list[TableColumn]] = None
+    rowsProperties: Optional[TableRowsProperties] = None
     line: Optional[str] = None
 
 
@@ -661,13 +701,25 @@ class Comment(_Sub):
 
 
 class OverviewResult(_Result):
-    """Mirror of ``core.overview`` (DESIGN §3.3)."""
+    """Mirror of ``core.overview`` (DESIGN §3.3).
+
+    Beyond the per-sheet + named-range picture, surfaces the workbook ``theme`` map
+    (``{colorType: "#RRGGBB"}``, T2.1) and ``themeFontFamily`` when the spreadsheet carries a
+    theme — the resolver an agent uses to turn a ``theme:NAME`` color it reads elsewhere into a
+    concrete hex.
+    """
 
     spreadsheetId: Optional[str] = None
     title: Optional[str] = None
     # v0.2 spreadsheet-level locale/timeZone (DESIGN §X.12); present only when set.
     locale: Optional[str] = None
     timeZone: Optional[str] = None
+    # T2.1 spreadsheet-theme resolver: a compact NAME->hex map of the workbook's theme colors
+    # (TEXT/BACKGROUND/ACCENT1..6/LINK), so an agent can resolve any ``theme:NAME`` it reads
+    # anywhere to the concrete color. ``themeFontFamily`` is the theme's primary font. Both present
+    # only when the workbook carries a theme.
+    theme: Optional[dict[str, str]] = None
+    themeFontFamily: Optional[str] = None
     sheets: list[OverviewSheet] = []
     namedRanges: list[NamedRange] = []
 
@@ -696,7 +748,9 @@ class InspectResult(_Result):
     """Mirror of ``core.inspect`` (DESIGN §3.3).
 
     Carries ``cells`` (non-compact) OR ``runs`` (compact) per the ``compact`` flag; both are
-    optional so the model mirrors whichever the core dict produced.
+    optional so the model mirrors whichever the core dict produced. With ``chips=True`` a cell/run
+    additionally carries its serialized smart-chip ``chips`` list (T2.2), present only on cells that
+    have chip runs.
     """
 
     spreadsheetId: Optional[str] = None
@@ -770,42 +824,35 @@ class ConditionalFormatReport(_Result):
 
 
 class DescribeResult(_Result):
-    """Mirror of ``core.describe`` — one-call merged region view (SPEC §3.2).
+    """Mirror of ``core.describe`` — the compact per-column region PROFILE (T4.1, audit #15).
 
-    ``regions`` is one :class:`DescribeRegion` per requested range (multi-range AND multi-sheet),
-    each merging cells + structure + range-scoped conditional formats from a SINGLE
-    ``spreadsheets.get``. The terse render leads with the range and a compact per-region tally.
+    ``describe`` no longer returns per-cell ``cells`` (BREAKING vs v0.5): it profiles ONE range into
+    ``columns`` (one :class:`DescribeColumn` each), with the region's ``rows``/``cols`` extent and
+    the sheet's ``merges``. For the full per-cell read use ``inspect``. The terse render leads with
+    the range + extent and lists each column's type/density.
     """
 
     spreadsheetId: Optional[str] = None
-    regions: list[DescribeRegion] = []
+    sheet: Optional[str] = None
+    range: Optional[str] = None
+    rows: Optional[int] = None
+    cols: Optional[int] = None
+    columns: list[DescribeColumn] = []
+    merges: Optional[list[str]] = None
 
     @property
     def terse(self) -> str:
-        lines: list[str] = []
-        for region in self.regions:
-            cells = region.cells or []
-            non_empty = sum(
-                1 for c in cells if c.value is not None or c.formula is not None
-            )
-            bits = [f"{non_empty}/{len(cells)} cells"]
-            if region.merges:
-                bits.append(f"{len(region.merges)} merge(s)")
-            if region.conditionalFormats:
-                bits.append(f"{len(region.conditionalFormats)} CF")
-            if region.tables:
-                bits.append(f"{len(region.tables)} table(s)")
-            if region.bandedRanges:
-                bits.append(f"{len(region.bandedRanges)} banding")
-            if region.protectedRanges:
-                bits.append(f"{len(region.protectedRanges)} protected")
-            vs = region.validationSummary
-            if vs and vs.cells:
-                bits.append(f"{vs.cells} validated")
-            lines.append(f"[{region.range}] {', '.join(bits)}")
-            for r in region.conditionalFormats or []:
-                lines.append(f"  CF {r.index}: {r.line}")
-        return "\n".join(lines) if lines else "no regions"
+        head = f"[{self.range}] {self.rows}x{self.cols}"
+        if self.merges:
+            head += f", {len(self.merges)} merge(s)"
+        lines: list[str] = [head]
+        for col in self.columns:
+            name = f"{col.col} ({col.header})" if col.header else (col.col or "?")
+            bits = [f"{col.type}", f"density {col.density}"]
+            if col.formulaRatio:
+                bits.append(f"formula {col.formulaRatio}")
+            lines.append(f"  {name}: {', '.join(bits)}")
+        return "\n".join(lines)
 
 
 class FormulaPatternsResult(_Result):
@@ -890,6 +937,38 @@ class ClearResult(_Result):
         return f"cleared {what} on {', '.join(self.clearedRanges) or '(none)'}"
 
 
+class WriteValuesByDataFilterResult(_Result):
+    """Mirror of ``core.write_values_by_data_filter`` (T2.5).
+
+    Same return shape as :class:`WriteValuesResult` — the DataFilter (insert-proof) write path
+    reports the SAME ``updated*`` totals as the literal-range write.
+    """
+
+    spreadsheetId: Optional[str] = None
+    updatedRanges: list[str] = []
+    updatedCells: Optional[int] = None
+    updatedRows: Optional[int] = None
+    updatedColumns: Optional[int] = None
+
+    @property
+    def terse(self) -> str:
+        return (
+            f"wrote {self.updatedCells} cell(s) across "
+            f"{', '.join(self.updatedRanges) or '(none)'}"
+        )
+
+
+class ClearByDataFilterResult(_Result):
+    """Mirror of ``core.clear_by_data_filter`` (T2.5) — values-only DataFilter clear."""
+
+    spreadsheetId: Optional[str] = None
+    clearedRanges: list[str] = []
+
+    @property
+    def terse(self) -> str:
+        return f"cleared {', '.join(self.clearedRanges) or '(none)'}"
+
+
 class FormatResult(_Result):
     """Mirror of ``core.format`` (DESIGN §3.3)."""
 
@@ -971,6 +1050,12 @@ class StructureResult(_Result):
     end: Optional[int] = None
     # v0.2 §X.16 — slicer write CRUD (add/update/delete) surfaces the captured slicer id.
     slicerId: Optional[int] = None
+    # T4.2/#31 — add/update/delete table/banding/filter-view acks surface the captured id
+    # (``add_*`` from ``capture_new_ids``, ``update_*``/``delete_*`` echoed from params). A
+    # table id is a STRING; banding/filter-view ids are ints.
+    tableId: Optional[str] = None
+    bandedRangeId: Optional[int] = None
+    filterViewId: Optional[int] = None
 
     @property
     def terse(self) -> str:
@@ -1066,6 +1151,14 @@ class BatchResult(_Result):
                 captured.append(f"protected={ids.protectedRangeIds}")
             if ids.metadataIds:
                 captured.append(f"metadata={ids.metadataIds}")
+            if ids.tableIds:
+                captured.append(f"tables={ids.tableIds}")
+            if ids.bandedRangeIds:
+                captured.append(f"banded={ids.bandedRangeIds}")
+            if ids.filterViewIds:
+                captured.append(f"filterViews={ids.filterViewIds}")
+            if ids.slicerIds:
+                captured.append(f"slicers={ids.slicerIds}")
             if captured:
                 new = " | newIds: " + ", ".join(captured)
         return f"batch: {len(self.replies)} reply(ies){new}"
@@ -1137,9 +1230,11 @@ class DimensionsResult(_Result):
     geometry (``dimension``/``start``/``end`` + ``destinationIndex``/``length``/``pixelSize``/
     ``hiddenByUser``) depends on the verb. A bulk ``set_props`` (params ``runs``) returns
     ``runs`` (each echoing its span + ``appliedFields``) and ``count`` instead of a single span.
-    The ``read`` action returns ``hiddenRows``/``hiddenCols`` (absolute 0-based indices), and —
-    when called with ``sizes`` — ``rowHeights``/``colWidths`` as coalesced ``{start,end,pixelSize}``
-    runs. All fields optional so one model mirrors every verb.
+    The ``read`` action returns ``hiddenRows``/``hiddenCols`` (absolute 0-based indices hidden by
+    a USER) and ``filteredRows``/``filteredCols`` (hidden by an ACTIVE filter — read-only; T2.3);
+    the two causes are INDEPENDENT, so a viewer sees a row/col iff it is in NEITHER list. When
+    called with ``sizes`` the read also gains ``rowHeights``/``colWidths`` as coalesced
+    ``{start,end,pixelSize}`` runs. All fields optional so one model mirrors every verb.
     """
 
     spreadsheetId: Optional[str] = None
@@ -1158,6 +1253,10 @@ class DimensionsResult(_Result):
     # read shape
     hiddenRows: Optional[list[int]] = None
     hiddenCols: Optional[list[int]] = None
+    # read shape (T2.3): rows/cols hidden by an ACTIVE filter (read-only), independent of the
+    # user-hidden lists above — a viewer sees a row/col iff it is in NEITHER list.
+    filteredRows: Optional[list[int]] = None
+    filteredCols: Optional[list[int]] = None
     # read shape with sizes=true: coalesced {start,end,pixelSize} runs (absolute, half-open)
     rowHeights: Optional[list[dict]] = None
     colWidths: Optional[list[dict]] = None
@@ -1168,6 +1267,10 @@ class DimensionsResult(_Result):
             nr = len(self.hiddenRows or [])
             nc = len(self.hiddenCols or [])
             base = f"dimensions read [{self.sheet}]: {nr} hidden row(s), {nc} hidden col(s)"
+            fr = len(self.filteredRows or [])
+            fc = len(self.filteredCols or [])
+            if fr or fc:
+                base += f"; {fr} filtered row(s), {fc} filtered col(s)"
             if self.rowHeights is not None or self.colWidths is not None:
                 base += (
                     f"; {len(self.rowHeights or [])} row-size run(s), "
@@ -1350,8 +1453,10 @@ RESULT_MODELS: dict[str, type[_Result]] = {
     "read_values": ReadValuesResult,
     "read_conditional_formats": ConditionalFormatReport,
     "write_values": WriteValuesResult,
+    "write_values_by_data_filter": WriteValuesByDataFilterResult,
     "append_rows": AppendResult,
     "clear": ClearResult,
+    "clear_by_data_filter": ClearByDataFilterResult,
     "format": FormatResult,
     "set_conditional_format": SetConditionalFormatResult,
     "set_validation": SetValidationResult,
@@ -1565,8 +1670,10 @@ __all__ = [
     "ReadValuesResult",
     "ConditionalFormatReport",
     "WriteValuesResult",
+    "WriteValuesByDataFilterResult",
     "AppendResult",
     "ClearResult",
+    "ClearByDataFilterResult",
     "FormatResult",
     "SetConditionalFormatResult",
     "SetValidationResult",
@@ -1595,8 +1702,7 @@ __all__ = [
     "CFCondition",
     "CFRule",
     "SheetCFRules",
-    "ValidationSummary",
-    "DescribeRegion",
+    "DescribeColumn",
     "ValueRange",
     "SheetRef",
     "AppendUpdates",
@@ -1605,6 +1711,8 @@ __all__ = [
     "CFMutationResult",
     "NewIds",
     # v0.2 extension sub-models (DESIGN §X.0)
+    "ChipRun",
+    "TableRowsProperties",
     "TextRun",
     "PivotField",
     "PivotValue",

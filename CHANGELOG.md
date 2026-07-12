@@ -7,8 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-12
+
+### Changed
+- **BREAKING — `describe` is now a compact per-column PROFILER (Tier 4, audit #15, T4.1).**
+  `describe` previously requested `includeGridData=True` and returned full per-cell `regions`/`cells`
+  — duplicating `inspect` while its docs promised a cheap "shape/profile" read. It now issues ONE
+  tight-mask `spreadsheets.get` (`effectiveValue` + `effectiveFormat.numberFormat.type` +
+  `userEnteredValue.formulaValue` + `formattedValue`, plus `merges`), aggregates the grid to
+  per-column statistics, and DISCARDS every per-cell value. The new shape is
+  `{ok, spreadsheetId, sheet, range, rows, cols, columns:[{col, header?, type, density, formulaRatio,
+  distinctSample?}], merges?}`, where per-column `type` is inferred
+  (`number`/`date`/`text`/`bool`/`formula-heavy`/`empty`), `density` is the non-empty ratio, and
+  `formulaRatio` is formula cells / non-empty cells.
+  - **Signature change.** `describe` now profiles a SINGLE `range` (was multi-range `ranges` +
+    symbolic `data_filters`). The MCP tool takes `range` + a `header` bool; the CLI takes one
+    positional `range` + `--no-header`. `header=true` (default) treats the first row as a header
+    (its text becomes each column's `header`, excluded from the stats).
+  - **`max_cells` now refuses UP FRONT.** For a bounded range (e.g. `A1:C100`) `describe` estimates
+    `rows*cols` from the resolved range and raises `result_too_large` BEFORE any grid fetch, rather
+    than fetching then trimming. An unbounded range is still guarded against the actual returned
+    cell count post-fetch.
+  - **Migration:** anything that relied on `describe` returning per-cell `cells` (or multi-range
+    `regions`, or `data_filters` addressing) moves to `inspect` (full per-cell read) or `read_values`
+    (plain grid). `inspect` is unchanged.
+  - Logic lives entirely in `core/reads.py`; the two adapters, the `DescribeResult`/`DescribeColumn`
+    mirror models, the bundled skill, `README.md`, and `docs/` were reconciled to the profile shape.
+
+### Fixed
+- **Tier 1 audit correctness sweep (audit #1–#8).** A batch of shared-core request-builder fixes
+  from the codebase audit (see `AUDIT_REPORT.md` / `AUDIT_TASKS.md`). All fixes live in `core/**`
+  and are identical from the MCP server and the CLI; adapter docstrings, CLI help, the bundled
+  skill, and `docs/ARCHITECTURE.md` were reconciled to match.
+  - **#1 Wrong-tab resolution.** A bare sheet title such as `Sheet2`/`Q1`/`A1` was routed through
+    A1 parsing, which read it as a cell-like reference and could yield the FIRST sheet's `sheetId`
+    (or a wildly out-of-range column). Explicit sheet-name parameters now resolve directly against
+    sheet properties, so every mutation that turns a name into a `sheetId` targets the real tab.
+  - **#2 Absolute sort index.** `SortSpec.dimensionIndex` is a sheet-absolute 0-based column, not
+    an offset into the sort range. Sorting column E of `Data!D2:F20` now emits `4`, not `1`.
+  - **#3 Table column-type enums.** `add_table`/`update_table` now accept the live `ColumnType`
+    discovery enum (`DATE_TIME`, `BOOLEAN`, and the specific `*_CHIP` types) instead of the stale
+    `DATETIME`/`CHECKBOX`/`SMART_CHIP`/`RATING`. Legacy `DATETIME`→`DATE_TIME`,
+    `CHECKBOX`→`BOOLEAN`, `RATING`→`RATINGS_CHIP` still work as aliases; `SMART_CHIP` is rejected
+    (no single target — pick a `*_CHIP`); anything else raises `bad_table` BEFORE the API call.
+  - **#4 `visibleValues` removal.** Filter and slicer criteria no longer emit the unsupported
+    `visibleValues` field (Google's `FilterCriteria` carries only `hiddenValues` + `condition`).
+    A `visible` key on a criterion is now rejected with a clear message rather than silently
+    dropping a filter. (Pivot `PivotFilterCriteria.visibleValues`, a genuine API field, is
+    unaffected.)
+  - **#5 Condition-context validation.** The shared `ConditionType` enum is validated per surface
+    before dispatch: `BLANK`/`NOT_BLANK` are conditional-format / filter only and are now rejected
+    in data validation (Google 400s them); `ONE_OF_LIST`/`ONE_OF_RANGE` are validation-only and
+    rejected on filters/slicers; each type's argument count is checked too — misuse surfaces as a
+    clear `bad_condition` instead of an opaque 400.
+  - **#6 Exhaustive metadata read.** The default developer-metadata read no longer pins
+    `locationType: SPREADSHEET` + `visibility: DOCUMENT`, which excluded row/column/sheet-scoped
+    and `PROJECT`-visible metadata. It now returns everything by default; filters are opt-in.
+  - **#7 Atomic clear.** Clearing values together with formats / validation / notes is now a single
+    `UpdateCells` batch so a mid-operation failure can't leave values erased with formatting intact.
+  - **#8 CF multi-add order.** Conditional-format additions are applied in ascending index order
+    (deletions stay descending) so adds destined for indexes 0 and 1 land adjacently instead of
+    leaving an existing rule wedged between them.
+
 ### Added
-- Nothing yet.
+- **Tier 2 audit — on-thesis visual/formatting read richness (audit #17, #19, #20, #21, #22, #26).**
+  Six read-richness features so an agent can losslessly see what a viewer sees. All logic lives in
+  `core/**` (identical from the MCP server and the CLI); the two adapters, the Pydantic mirror
+  models, the bundled skill, and `docs/` were wired to match.
+  - **#26 Spreadsheet theme resolver (T2.1).** `overview` now returns a compact `theme` map
+    (`{ACCENT1: "#4285F4", TEXT: "#000000", …}`) plus `themeFontFamily` when the workbook carries a
+    theme — the resolver an agent uses to turn any `theme:NAME` color it reads elsewhere into a
+    concrete hex. Omitted when the workbook has no theme.
+  - **#19 Smart-chip reads (T2.2).** `inspect --chips` (MCP `chips=true`) surfaces a cell's
+    `chipRuns` — person/file/place/finance/rating smart chips that otherwise read back as plain text
+    — as terse `{start, kind, email?/uri?/mimeType?}` structs, attached only to cells that carry
+    them (opt-in, zero cost otherwise). New `core/serializers/chips.py` serializer.
+  - **#21 `hiddenByFilter` reads (T2.3).** `dimensions --action read` now also returns
+    `filteredRows`/`filteredCols` (rows/cols hidden by an ACTIVE filter, read-only) alongside the
+    user-hidden `hiddenRows`/`hiddenCols` — the two causes are independent, so an agent can report
+    which rows a viewer actually sees.
+  - **#22 Validation `inputMessage` round-trip (T2.4).** The structured `ValidationRule` now carries
+    the viewer-facing `inputMessage` help/error tooltip on both read (`inspect`) and write
+    (`set-validation`), so it survives a read-modify-write instead of being silently dropped.
+  - **#20 Table `rowsProperties` colors (T2.6).** `structure`'s native-Table read/write now covers
+    the table-level header/band/footer fills (`rowsProperties.{header, firstBand, secondBand,
+    footer}` as hex / `theme:NAME`), keyed identically on read and write for a full round-trip.
+  - **#17 DataFilter value writes/clears (T2.5).** Two new commands/tools —
+    `write-values-by-data-filter` (`sheets_write_values_by_data_filter`) and `clear-by-data-filter`
+    (`sheets_clear_by_data_filter`) — write/clear ranges addressed by a SYMBOLIC `DataFilter` (A1 /
+    gridRange / `developerMetadataLookup`), the insert-proof write twins of `read_values`'s
+    `data_filters` path (via `values.batchUpdateByDataFilter` / `batchClearByDataFilter`). Restores
+    read/write symmetry for durable, metadata-anchored addressing.
 
 ## [0.5.1] - 2026-07-11
 

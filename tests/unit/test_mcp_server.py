@@ -49,9 +49,14 @@ EXPECTED = {
     # one at ``path``), so it must not advertise read-only.
     "sheets_export": (False, True, "write"),
     "sheets_comments": (False, True, "write"),
-    "sheets_write_values": (False, False, "write"),
+    # write_values OVERWRITES the target cells (ISSUES.md #11 / T3.1): the dangerous under-warning
+    # was destructiveHint=False; it must warn destructive like clear/find_replace.
+    "sheets_write_values": (False, True, "write"),
+    # DataFilter (insert-proof) value write/clear twins (T2.5) — both overwrite/clear cells.
+    "sheets_write_values_by_data_filter": (False, True, "write"),
     "sheets_append_rows": (False, False, "write"),
     "sheets_clear": (False, True, "write"),
+    "sheets_clear_by_data_filter": (False, True, "write"),
     "sheets_format": (False, False, "write"),
     "sheets_set_conditional_format": (False, True, "write"),
     # rule=None clears all validation on the range — a destructive path, like clear's.
@@ -73,7 +78,7 @@ def _tools() -> dict:
 def test_all_tools_register():
     tools = _tools()
     assert set(tools) == set(EXPECTED)
-    assert len(tools) == 22
+    assert len(tools) == 24
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))
@@ -159,14 +164,17 @@ def test_read_values_exposes_data_filters_optional_and_ranges_not_required():
     assert "ranges" not in required
 
 
-def test_describe_exposes_data_filters_optional_and_ranges_not_required():
-    # SPEC §6 P2: describe also accepts data_filters (symbolic addressing); ranges optional.
+def test_describe_profiles_a_single_range_with_header_flag():
+    # T4.1: describe is now the compact profiler over a SINGLE range; header is an optional bool.
     tool = _tools()["sheets_describe"]
     props = tool.parameters.get("properties", {})
     required = tool.parameters.get("required", [])
-    assert "data_filters" in props
-    assert "data_filters" not in required
-    assert "ranges" not in required
+    assert "range" in props and "range" in required
+    assert "header" in props
+    assert props["header"].get("default") is True
+    # the old multi-range / symbolic-addressing knobs are gone.
+    assert "ranges" not in props
+    assert "data_filters" not in props
 
 
 def test_read_conditional_formats_exposes_range_optional():
@@ -599,6 +607,85 @@ def test_enabled_tools_allowlist_restricts_registration():
     )
     assert proc.returncode == 0, proc.stderr
     assert "OK" in proc.stdout
+
+
+def test_enabled_tools_valid_subset_registers_exactly_those():
+    # A valid subset registers EXACTLY those tools and nothing else — and startup does not error.
+    code = (
+        "import asyncio, gsheets.mcp_server as s\n"
+        "tools = asyncio.run(s.mcp.get_tools())\n"
+        "assert set(tools) == {'sheets_overview', 'sheets_write_values'}, sorted(tools)\n"
+        "print('OK')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "ENABLED_TOOLS": "sheets_overview,sheets_write_values"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "OK" in proc.stdout
+
+
+def test_enabled_tools_unknown_name_fails_fast_naming_it():
+    # ISSUES.md #33 / T3.5: a typo'd ENABLED_TOOLS entry used to be SILENTLY dropped (a full typo
+    # registered ZERO tools with no signal). It must now fail fast at startup, naming the unknown
+    # entry AND the accepted set. Exercised in a subprocess (ENABLED_TOOLS is read at import).
+    code = "import gsheets.mcp_server\nprint('IMPORTED')\n"
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "ENABLED_TOOLS": "sheets_overview,sheets_typooo"},
+    )
+    assert proc.returncode != 0
+    assert "IMPORTED" not in proc.stdout
+    # The offending name AND the accepted-set hint are surfaced (not a silent no-op).
+    assert "sheets_typooo" in proc.stderr
+    assert "sheets_overview" in proc.stderr  # part of the accepted-set listing
+
+
+def test_validate_enabled_tools_raises_sheets_error_naming_unknown(monkeypatch):
+    # Pure-unit form of the same guard: the validator raises a SheetsError that names the unknown
+    # entry and lists the accepted tool names.
+    monkeypatch.setattr(srv, "ENABLED_TOOLS", {"sheets_overview", "sheets_nope"})
+    with pytest.raises(SheetsError) as ei:
+        srv._validate_enabled_tools()
+    assert ei.value.code == "unknown_enabled_tool"
+    assert "sheets_nope" in ei.value.message  # names the offending entry
+    assert "sheets_overview" in (ei.value.hint or "")  # accepted-set hint lists real names
+
+
+def test_validate_enabled_tools_empty_allowlist_is_ok(monkeypatch):
+    # Empty/unset ENABLED_TOOLS = "all tools" and never errors.
+    monkeypatch.setattr(srv, "ENABLED_TOOLS", set())
+    srv._validate_enabled_tools()  # must not raise
+
+
+def test_validate_enabled_tools_valid_subset_is_ok(monkeypatch):
+    monkeypatch.setattr(srv, "ENABLED_TOOLS", {"sheets_overview", "sheets_inspect"})
+    srv._validate_enabled_tools()  # must not raise
+
+
+def test_all_tool_names_covers_every_registered_tool():
+    # ALL_TOOL_NAMES (recorded at registration, BEFORE the allowlist filter) is the authoritative
+    # accepted set: it must be a superset of every tool that actually registers.
+    assert set(_tools()).issubset(srv.ALL_TOOL_NAMES)
+    assert "sheets_overview" in srv.ALL_TOOL_NAMES
+
+
+def test_retry_param_field_documents_env_inheritance():
+    # ISSUES.md #9 / T3.4: the RetryParam Field text must tell the truth — omitting retry INHERITS
+    # the server's env-configured policy (off unless GSHEETS_BACKOFF_*/GSHEETS_MAX_RETRIES), and
+    # preset:"off" forces fail-fast. (The old text claimed retry was UNCONDITIONALLY off.)
+    desc = srv.RetryParam.__metadata__[0].description
+    low = desc.lower()
+    assert "inherit" in low
+    assert "GSHEETS_BACKOFF_" in desc
+    assert "GSHEETS_MAX_RETRIES" in desc
+    assert '"off"' in desc or "'off'" in desc
 
 
 # ----------------------------------------------------------- ISSUES.md #4/#10 exception-proofing

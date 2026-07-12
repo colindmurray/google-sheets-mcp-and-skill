@@ -1,8 +1,10 @@
 """Value reads/writes and the jagged-array helper (DESIGN §3.3, §5.5).
 
 Houses ``read_values`` / ``write_values`` / ``append_rows`` / ``clear`` plus :func:`pad_jagged`.
-Writes default to ``USER_ENTERED`` (formulas work). ``clear`` routes any
-formats/validation/notes clearing through ``build_fields_mask``.
+Writes default to ``USER_ENTERED`` (formulas work). ``clear`` hand-builds its
+``updateCells`` fields mask directly from the requested clear flags (values/formats/
+validation/notes) — it deliberately does NOT route through ``build_fields_mask``, which
+would discard the empty-dict structural sentinels and silently clear nothing.
 
 PURE core module: imports only stdlib + sibling core modules. It must NEVER import
 ``fastmcp``, ``mcp``, ``argparse``, ``pydantic``, or ``gsheets.models`` (DESIGN §1 boundary).
@@ -14,7 +16,6 @@ from googleapiclient.errors import HttpError
 
 from .addressing import a1_to_gridrange
 from .errors import SheetsError, classify_google_error
-from .fieldsmask import build_fields_mask
 from .service import SheetsServices
 
 # render mode -> Google ``valueRenderOption``.
@@ -423,6 +424,18 @@ def write_values(
     except HttpError as exc:
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
+    return _summarize_value_update(spreadsheet_id, resp)
+
+
+def _summarize_value_update(spreadsheet_id: str, resp: dict) -> dict:
+    """Fold a ``batchUpdate``/``batchUpdateByDataFilter`` response into the standard write dict.
+
+    Both value-write APIs (literal ``batchUpdate`` and the DataFilter-addressed
+    ``batchUpdateByDataFilter``) return the SAME response shape: a ``responses[]`` list of
+    ``UpdateValuesResponse`` (each with ``updatedRange``/``updatedCells``/``updatedRows``/
+    ``updatedColumns``) plus authoritative top-level ``totalUpdated*`` totals. This shared
+    summarizer keeps the two writers' return contracts identical (DESIGN "no duplicated logic").
+    """
     updated_ranges: list[str] = []
     updated_cells = 0
     updated_rows = 0
@@ -444,6 +457,76 @@ def write_values(
         "updatedRows": resp.get("totalUpdatedRows", updated_rows),
         "updatedColumns": resp.get("totalUpdatedColumns", updated_columns),
     }
+
+
+def write_values_by_data_filter(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    data: list[dict],
+    *,
+    input: str = "user_entered",
+) -> dict:
+    """Write/update ranges addressed by SYMBOLIC ``DataFilter`` selectors (insert-proof).
+
+    The DataFilter counterpart of :func:`write_values` — the write-side symmetry for the
+    metadata-addressed *read* path (:func:`read_values` ``data_filters``). Each write item names
+    its target by a stable selector rather than a literal A1 string (which shifts when rows/columns
+    are inserted), then writes via ``values.batchUpdateByDataFilter``. Each ``data`` item carries
+    EXACTLY ONE selector inline — ``{"a1": "Sheet1!A1:B10"}`` | ``{"gridRange": {...}}`` |
+    ``{"developerMetadataLookup": {...}}`` (matches a block previously tagged via ``metadata``) —
+    plus ``values`` and an optional ``major``:
+
+        [{"developerMetadataLookup": {"metadataKey": "block:totals"}, "values": [["x", "y"]]}]
+
+    The selector is translated by the SHARED ``dataselector.build_data_filter`` the read path uses
+    (no duplicated selector logic), and wrapped under each request item's singular ``dataFilter``
+    key. Defaults to ``valueInputOption=USER_ENTERED`` (formulas work). ``major`` is ``"rows"``
+    (Google's default, omitted on the wire) | ``"columns"`` per item.
+
+    Args:
+        services: The authed handle.
+        spreadsheet_id: Target spreadsheet id.
+        data: List of ``{<selector>, "values", "major"?}`` write items (one selector each).
+        input: ``"user_entered"`` (default) | ``"raw"``.
+
+    Returns:
+        ``{"ok": True, "spreadsheetId": ..., "updatedRanges": [...], "updatedCells": ...,
+        "updatedRows": ..., "updatedColumns": ...}`` — same shape as :func:`write_values`.
+    """
+    if not data:
+        raise SheetsError(
+            "empty_payload", "write_values_by_data_filter requires at least one data item"
+        )
+    value_input_option = _resolve_input_option(input)
+
+    from .dataselector import build_data_filter
+
+    api_data: list[dict] = []
+    for item in data:
+        # ``build_data_filter`` reads ONLY the selector key from the item, ignoring the
+        # ``values``/``major`` siblings — so the whole item can be passed straight in.
+        data_filter = build_data_filter(services, spreadsheet_id, item)
+        entry: dict = {"dataFilter": data_filter, "values": item.get("values", [])}
+        # ``batchUpdateByDataFilter`` needs an EXPLICIT ``majorDimension``. Unlike
+        # ``values.batchUpdate``, it does NOT default an omitted dimension to ROWS — it stays
+        # ``DIMENSION_UNSPECIFIED`` and any NON-SQUARE payload (1xN row or Nx1 column) 400s with
+        # "cannot fit the data" (a 2x2 fits either interpretation, which masked this). Always send
+        # ROWS/COLUMNS explicitly; ``_resolve_major_option`` still validates the token first.
+        entry["majorDimension"] = _resolve_major_option(item.get("major", "rows")) or "ROWS"
+        api_data.append(entry)
+
+    body = {"valueInputOption": value_input_option, "data": api_data}
+    try:
+        resp = (
+            services.sheets.spreadsheets()
+            .values()
+            .batchUpdateByDataFilter(spreadsheetId=spreadsheet_id, body=body)
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+    return _summarize_value_update(spreadsheet_id, resp)
 
 
 def append_rows(
@@ -502,13 +585,17 @@ def append_rows(
     }
 
 
-# Mapping from a clear flag to the ``Cell``/``CellData`` payload subfields its
-# ``updateCells`` request must touch. ``formats`` clears the whole format; ``validation``
-# clears the per-cell data validation; ``notes`` clears the cell note.
-_CLEAR_FIELDS: dict[str, dict] = {
-    "formats": {"userEnteredFormat": {}},
-    "validation": {"dataValidation": {}},
-    "notes": {"note": ""},
+# Mapping from a clear flag to the top-level ``CellData`` field-mask token its ``updateCells``
+# request must name. Masking a field with NO ``rows`` in the request clears it: ``userEnteredValue``
+# erases the value, ``userEnteredFormat`` the whole format, ``dataValidation`` the per-cell rule,
+# ``note`` the cell note. The mask is hand-built by joining exactly the requested tokens — it is
+# deliberately NOT routed through ``build_fields_mask``, whose no-op guard discards the empty-dict
+# structural sentinels (``{"userEnteredFormat": {}}`` etc.) and would silently clear nothing.
+_CLEAR_FIELD_TOKENS: dict[str, str] = {
+    "values": "userEnteredValue",
+    "formats": "userEnteredFormat",
+    "validation": "dataValidation",
+    "notes": "note",
 }
 
 
@@ -525,10 +612,12 @@ def clear(
     """Clear values (and optionally formats/validation/notes) from ranges (DESIGN §3.3).
 
     ``values``-only -> ``values.batchClear``. Any of formats/validation/notes ->
-    ``batchUpdate`` with ``updateCells`` + an auto fields mask (via ``build_fields_mask``)
-    covering only the requested subfields over the ``GridRange``. When ``values`` is also
-    requested alongside structural clears, BOTH a ``batchClear`` (values) and a ``batchUpdate``
-    (structural) are issued.
+    ``batchUpdate`` with ``updateCells`` + a fields mask (hand-built by joining the requested
+    ``CellData`` field tokens) covering only the requested subfields over the ``GridRange``.
+    When ``values`` is also requested alongside structural clears, a SINGLE atomic
+    ``updateCells`` ``batchUpdate`` is issued whose fields mask additionally includes
+    ``userEnteredValue`` — so the value clear and the structural clear either both apply or
+    neither does (no two-call window that could erase values and then fail to clear the rest).
 
     Args:
         services: The authed handle.
@@ -550,27 +639,35 @@ def clear(
             "clear must clear at least one of values/formats/validation/notes",
         )
 
-    # Assemble the structural-clear payload (formats/validation/notes) once; the same
-    # subfield set applies to every range. ``build_fields_mask`` turns it into the mask.
-    structural_payload: dict = {}
+    # Hand-build the ``updateCells`` fields mask once (the same token set applies to every
+    # range): join exactly the requested ``CellData`` field tokens, values first so a mixed
+    # clear folds ``userEnteredValue`` into the SAME atomic request. NOT routed through
+    # ``build_fields_mask`` — its no-op guard would drop the empty structural sentinels.
+    structural = formats or validation or notes
+    field_tokens: list[str] = []
+    if values:
+        field_tokens.append(_CLEAR_FIELD_TOKENS["values"])
     if formats:
-        structural_payload.update(_CLEAR_FIELDS["formats"])
+        field_tokens.append(_CLEAR_FIELD_TOKENS["formats"])
     if validation:
-        structural_payload.update(_CLEAR_FIELDS["validation"])
+        field_tokens.append(_CLEAR_FIELD_TOKENS["validation"])
     if notes:
-        structural_payload.update(_CLEAR_FIELDS["notes"])
+        field_tokens.append(_CLEAR_FIELD_TOKENS["notes"])
+    fields = ",".join(field_tokens)
 
     try:
-        if values:
+        if values and not structural:
+            # Values-only: the cheap, targeted values API clears trailing region correctly.
             (
                 services.sheets.spreadsheets()
                 .values()
                 .batchClear(spreadsheetId=spreadsheet_id, body={"ranges": ranges})
                 .execute()
             )
-
-        if structural_payload:
-            fields = build_fields_mask(structural_payload)
+        elif structural:
+            # Structural-only OR mixed (values + structural). One ``updateCells`` batchUpdate.
+            # For the mixed case the value clear rides in the SAME request (atomic) because
+            # ``userEnteredValue`` is already folded into ``fields`` above.
             requests = []
             for a1 in ranges:
                 grid_range = a1_to_gridrange(services, spreadsheet_id, a1)
@@ -603,4 +700,53 @@ def clear(
             "validation": validation,
             "notes": notes,
         },
+    }
+
+
+def clear_by_data_filter(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    data_filters: list[dict],
+) -> dict:
+    """Clear cell VALUES from ranges addressed by SYMBOLIC ``DataFilter`` selectors (insert-proof).
+
+    The DataFilter counterpart of :func:`clear`'s values-only path — the write-side symmetry for the
+    metadata-addressed read path. Each selector names a region by a stable handle rather than a
+    literal A1 (which shifts on row/column inserts), then clears via ``values.batchClearByDataFilter``.
+    ``data_filters`` is the SAME public selector list the read path accepts — each item is one of
+    ``{"a1": "Sheet1!A1:B10"}`` | ``{"gridRange": {...}}`` | ``{"developerMetadataLookup": {...}}`` —
+    translated by the SHARED ``dataselector.build_data_filters`` (no duplicated selector logic; the
+    empty-list guard lives there too). Like ``values.batchClear``, this clears VALUES only, leaving
+    formats/validation/notes intact.
+
+    Args:
+        services: The authed handle.
+        spreadsheet_id: Target spreadsheet id.
+        data_filters: Non-empty list of selector dicts (one selector each).
+
+    Returns:
+        ``{"ok": True, "spreadsheetId": ..., "clearedRanges": [...]}`` — the A1 ranges Google
+        reports as cleared.
+    """
+    from .dataselector import build_data_filters
+
+    google_filters = build_data_filters(services, spreadsheet_id, data_filters)
+
+    try:
+        resp = (
+            services.sheets.spreadsheets()
+            .values()
+            .batchClearByDataFilter(
+                spreadsheetId=spreadsheet_id,
+                body={"dataFilters": google_filters},
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "clearedRanges": resp.get("clearedRanges", []),
     }

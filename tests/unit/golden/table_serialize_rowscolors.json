@@ -1,0 +1,38 @@
+{
+  "_doc": "Golden-master for serialize_table with Table.rowsProperties (T2.6 / audit #20). A Google Table carrying header/band/footer *ColorStyle colors -> exact flattened read shape: each color flattened to hex/theme via colors.color_style_to_hex, plus a terse 'rows:' line segment. Mix of rgbColor and themeColor to exercise both flatten paths. No real IDs/creds.",
+  "table": {
+    "tableId": "clr1",
+    "name": "Palette",
+    "range": {
+      "sheetId": 0,
+      "startRowIndex": 0,
+      "endRowIndex": 100,
+      "startColumnIndex": 0,
+      "endColumnIndex": 3
+    },
+    "columnProperties": [
+      {"columnIndex": 0, "columnName": "Region", "columnType": "TEXT"}
+    ],
+    "rowsProperties": {
+      "headerColorStyle": {"rgbColor": {"red": 1.0, "green": 0.8039215686274510, "blue": 0.8235294117647058}},
+      "firstBandColorStyle": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+      "secondBandColorStyle": {"themeColor": "ACCENT2"},
+      "footerColorStyle": {"rgbColor": {"red": 0.8784313725490196, "green": 0.8784313725490196, "blue": 0.8784313725490196}}
+    }
+  },
+  "expected": {
+    "tableId": "clr1",
+    "name": "Palette",
+    "range": "Sheet1!A1:C100",
+    "columns": [
+      {"name": "Region", "type": "TEXT"}
+    ],
+    "rowsProperties": {
+      "header": "#FFCDD2",
+      "firstBand": "#FFFFFF",
+      "secondBand": "theme:ACCENT2",
+      "footer": "#E0E0E0"
+    },
+    "line": "table \"Palette\" [Sheet1!A1:C100] cols: Region:TEXT rows: header=#FFCDD2, firstBand=#FFFFFF, secondBand=theme:ACCENT2, footer=#E0E0E0"
+  }
+}

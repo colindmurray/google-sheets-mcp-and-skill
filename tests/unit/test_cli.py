@@ -69,7 +69,18 @@ def patched(monkeypatch):
     monkeypatch.setattr(
         cli.core,
         "describe",
-        _make("describe", {"ok": True, "spreadsheetId": "X", "regions": []}),
+        _make(
+            "describe",
+            {
+                "ok": True,
+                "spreadsheetId": "X",
+                "sheet": "S",
+                "range": "A1:B2",
+                "rows": 0,
+                "cols": 0,
+                "columns": [],
+            },
+        ),
     )
     monkeypatch.setattr(
         cli.core,
@@ -141,6 +152,24 @@ def patched(monkeypatch):
                     }
                 ],
             },
+        ),
+    )
+    # T2.5 DataFilter value write/clear twins live on the ``core.values`` submodule (not re-exported
+    # from ``gsheets.core``); the CLI bodies reach them there, so patch them there.
+    monkeypatch.setattr(
+        cli.core.values,
+        "write_values_by_data_filter",
+        _make(
+            "write_values_by_data_filter",
+            {"ok": True, "spreadsheetId": "X", "updatedRanges": ["S!A1:B1"], "updatedCells": 2},
+        ),
+    )
+    monkeypatch.setattr(
+        cli.core.values,
+        "clear_by_data_filter",
+        _make(
+            "clear_by_data_filter",
+            {"ok": True, "spreadsheetId": "X", "clearedRanges": ["S!A1:B10"]},
         ),
     )
     # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two NEW core fns the CLI dispatches.
@@ -451,29 +480,19 @@ def test_inspect_include_flags_map_one_to_one(patched):
     assert kw["include_effective_format"] is True  # untouched default
 
 
-def test_describe_maps_ranges_and_max_cells(patched):
-    _run(["describe", "ID", "Cliff!A1:C2", "Plan!A1", "--max-cells", "500"])
+def test_describe_maps_range_and_max_cells(patched):
+    _run(["describe", "ID", "Cliff!A1:C2", "--max-cells", "500"])
     assert patched["name"] == "describe"
-    # ranges is the first positional core arg after spreadsheet_id; max_cells is a kwarg.
-    assert patched["args"][0] == ["Cliff!A1:C2", "Plan!A1"]
+    # range is the first positional core arg after spreadsheet_id; max_cells/header are kwargs.
+    assert patched["args"][0] == "Cliff!A1:C2"
     assert patched["kwargs"]["max_cells"] == 500
-    assert patched["kwargs"]["data_filters"] is None
+    assert patched["kwargs"]["header"] is True
 
 
-def test_describe_data_filter_json_maps_and_drops_ranges(patched):
-    # SPEC §6 P2: --data-filter-json drives core.describe(data_filters=...); the empty ranges
-    # positional becomes None (core enforces the exactly-one contract).
-    _run([
-        "describe",
-        "ID",
-        "--data-filter-json",
-        '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]',
-    ])
+def test_describe_no_header_flag(patched):
+    _run(["describe", "ID", "Cliff!A1:C2", "--no-header"])
     assert patched["name"] == "describe"
-    assert patched["args"][0] is None
-    assert patched["kwargs"]["data_filters"] == [
-        {"developerMetadataLookup": {"metadataKey": "block:totals"}}
-    ]
+    assert patched["kwargs"]["header"] is False
 
 
 def test_describe_max_cells_defaults_unlimited(patched):
@@ -482,39 +501,45 @@ def test_describe_max_cells_defaults_unlimited(patched):
 
 
 def test_describe_text_render(patched, monkeypatch, capsys):
-    # The text renderer surfaces per-region cells, range-scoped CF (with index), and merges.
+    # The text renderer surfaces the range extent, merges, and one line per column profile.
     monkeypatch.setattr(
         cli.core,
         "describe",
         lambda *a, **k: {
             "ok": True,
             "spreadsheetId": "X",
-            "regions": [
+            "sheet": "Cliff",
+            "range": "Cliff!A1:C2",
+            "rows": 2,
+            "cols": 3,
+            "columns": [
                 {
-                    "range": "Cliff!A1:C2",
-                    "sheet": "Cliff",
-                    "cells": [
-                        {"a1": "A1", "value": "30", "formula": "=SUM(B2:C2)"},
-                    ],
-                    "merges": ["Cliff!B1:C1"],
-                    "conditionalFormats": [
-                        {"index": 0, "line": "[Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9"}
-                    ],
-                    "tables": [],
-                    "bandedRanges": [],
-                    "protectedRanges": [],
-                    "validationSummary": {"cells": 0, "rules": []},
-                }
+                    "col": "A",
+                    "header": "Region",
+                    "type": "text",
+                    "density": 1.0,
+                    "formulaRatio": 0.0,
+                    "distinctSample": ["West", "East"],
+                },
+                {
+                    "col": "C",
+                    "header": "Total",
+                    "type": "formula-heavy",
+                    "density": 1.0,
+                    "formulaRatio": 1.0,
+                },
             ],
+            "merges": ["Cliff!B1:C1"],
         },
     )
     rc = cli.main(["describe", "ID", "Cliff!A1:C2"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "# Cliff!A1:C2" in out
-    assert "=SUM(B2:C2)" in out
-    assert "CF [0]: [Cliff!A1:A100] if NUMBER_GREATER(0) -> bg #C8E6C9" in out
+    assert "# Cliff!A1:C2  2x3" in out
     assert "merge: Cliff!B1:C1" in out
+    assert "A (Region): text, density 1.0" in out
+    assert "e.g. West, East" in out
+    assert "C (Total): formula-heavy, density 1.0, formula 1.0" in out
 
 
 def test_formula_patterns_maps_ranges_and_sample_default(patched):
@@ -623,6 +648,38 @@ def test_write_values_conflicting_forms_error(patched, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "conflicting_args" in err
+
+
+def test_write_values_by_data_filter_dispatches_with_data_and_input(patched):
+    _run(
+        [
+            "write-values-by-data-filter",
+            "ID",
+            "--data-json",
+            '[{"developerMetadataLookup":{"metadataKey":"block:totals"},"values":[["x","y"]]}]',
+            "--input",
+            "raw",
+        ]
+    )
+    assert patched["name"] == "write_values_by_data_filter"
+    assert patched["spreadsheet_id"] == "ID"
+    assert patched["args"][0] == [
+        {"developerMetadataLookup": {"metadataKey": "block:totals"}, "values": [["x", "y"]]}
+    ]
+    assert patched["kwargs"]["input"] == "raw"
+
+
+def test_clear_by_data_filter_dispatches_with_selectors(patched):
+    _run(
+        [
+            "clear-by-data-filter",
+            "ID",
+            "--data-filter-json",
+            '[{"a1":"Sheet1!A1:B10"}]',
+        ]
+    )
+    assert patched["name"] == "clear_by_data_filter"
+    assert patched["args"][0] == [{"a1": "Sheet1!A1:B10"}]
 
 
 def test_format_border_flag_parsed(patched):
@@ -748,7 +805,8 @@ def test_build_parser_registers_every_subcommand():
             break
     expected = {
         "overview", "inspect", "read-values", "read-conditional-formats",
-        "write-values", "append-rows", "clear", "format", "set-conditional-format",
+        "write-values", "write-values-by-data-filter", "append-rows", "clear",
+        "clear-by-data-filter", "format", "set-conditional-format",
         "set-validation", "structure", "manage-sheets", "metadata", "charts",
         "batch", "auth",
         # v0.2 extensions (DESIGN §Extensions): three NEW subcommands.
@@ -796,6 +854,13 @@ def test_inspect_rich_flags_default_false(patched):
     kw = patched["kwargs"]
     assert kw["include_rich_text"] is False
     assert kw["include_pivot"] is False
+    # T2.2: chips is off by default too (zero added mask cost on the base call).
+    assert kw["chips"] is False
+
+
+def test_inspect_chips_flag_maps_to_core(patched):
+    _run(["inspect", "ID", "S!A1:B2", "--chips"])
+    assert patched["kwargs"]["chips"] is True
 
 
 def test_data_ops_dispatches_with_action_and_params(patched):

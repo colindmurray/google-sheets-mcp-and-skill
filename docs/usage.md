@@ -72,18 +72,18 @@ The spreadsheet id is the **first** positional arg of every Sheets subcommand ex
 (whose ids live inside `--requests-json`). Use `<YOUR_SPREADSHEET_ID>` in anything you write down —
 the real id (the token between `/d/` and `/edit` in the URL) comes from the user or the environment.
 
-## The 22 commands at a glance
+## The 24 commands at a glance
 
-`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 22 as tools
+`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 24 as tools
 (`sheets_overview`, `sheets_inspect`, …).
 
 Understand (read-only):
 
 | Command | Purpose |
 |---|---|
-| `overview <ID>` | Cheap orientation: tabs, sizes, frozen panes, CF/protected counts, named ranges. No grid data. Start here. |
-| `inspect <ID> <RANGE>` | Rich per-cell read: values + formulas + both formats + merges + validation. `--compact` collapses repeats into rectangular runs. `--rich-text`/`--pivot` opt in. |
-| `describe <ID> [RANGE...]` | Structured shape/profile read — orient on what's *in* a sheet without pulling every cell. Optional ranges or `--data-filter-json`; `--max-cells N` aborts oversize reads up front. |
+| `overview <ID>` | Cheap orientation: tabs, sizes, frozen panes, CF/protected counts, named ranges, and the workbook `theme` map (`{NAME: hex}`) + `themeFontFamily` — the resolver for `theme:NAME` colors. No grid data. Start here. |
+| `inspect <ID> <RANGE>` | Rich per-cell read: values + formulas + both formats + merges + validation. `--compact` collapses repeats into rectangular runs. `--rich-text`/`--pivot`/`--chips` (smart chips: person/file/place/finance) opt in. |
+| `describe <ID> <RANGE>` | Compact per-column PROFILE of one range — inferred type, fill density, and formula ratio per column, *without* any per-cell data. `--no-header` profiles row 1 too; `--max-cells N` aborts an oversize range up front (bounded ranges refuse before fetch). Use `inspect` for cells. |
 | `formula-patterns <ID> <RANGE...>` | Group a range's formulas into reusable patterns (one entry per distinct relative formula). Column-major; `--no-sample` skips the formatted-sample pass. Ranges required. |
 | `read-values <ID> [RANGE...]` | Values with `--render {plain,unformatted,formula,all}` (`all` = formula + computed side by side). `--major {rows,columns}` picks the major dimension; `--data-filter-json` reads by selector instead of A1; `--diff-only` (with `--render all`) nulls computed cells equal to their value; `--max-cells N` aborts oversize reads. |
 | `read-conditional-formats <ID> [--sheet N \| --range A1]` | CF rules as terse round-trippable lines with positional `index`. Scope by `--sheet` (whole tab) **or** `--range` (the range carries its own sheet) — the two are mutually exclusive. |
@@ -95,16 +95,18 @@ Change (writes):
 | Command | Purpose |
 |---|---|
 | `write-values <ID> ...` | Write/update one or more ranges (`USER_ENTERED` by default). |
+| `write-values-by-data-filter <ID> --data-json ...` | Insert-proof write twin: address each write by a `DataFilter` selector (A1 / gridRange / `developerMetadataLookup`) instead of a literal A1, via `batchUpdateByDataFilter`. |
 | `append-rows <ID> <RANGE> ...` | Append after a table's last row (`INSERT_ROWS`, never overwrites). |
 | `clear <ID> <RANGE...>` | Clear values (and optionally `--formats`/`--validation`/`--notes`). |
+| `clear-by-data-filter <ID> --data-filter-json ...` | Insert-proof clear twin: clear VALUES from ranges addressed by `DataFilter` selectors, via `batchClearByDataFilter`. |
 | `format <ID> <RANGE> ...` | Background, font, number/date pattern, align, wrap, borders, note — one atomic write, auto field-mask. |
 | `set-conditional-format <ID> --action ...` | Add/update/delete a boolean or gradient rule by positional `index`. |
-| `set-validation <ID> <RANGE> ...` | Set or clear data validation (dropdowns, number ranges, custom formulas). |
+| `set-validation <ID> <RANGE> ...` | Set or clear data validation (dropdowns, number ranges, custom formulas); the rule's optional `inputMessage` help/error tooltip round-trips from `inspect`. |
 | `structure <ID> --action ...` | Merges, named/protected ranges, frozen panes, tab color, groups, native tables, banding, filters, **slicers** — read or modify. |
 | `manage-sheets <ID> --action ...` | Add/delete/duplicate/rename/reorder tabs. |
 | `metadata <ID> --action ...` | Developer metadata (durable anchors). |
 | `data-ops <ID> --action ...` | Bulk data verbs: find/replace, dedupe, trim, sort, text-to-columns, fill, copy/cut-paste. |
-| `dimensions <ID> --action ...` | Row/column ops + sizing toolkit: insert/delete/move/append; `auto_resize` (auto-fit) vs `set_props {pixelSize}` (fixed/forced); `set_props {runs:[…]}` bulk-set many row+col sizes; hide/unhide; `read` hidden rows/cols (`{sizes:true}` adds `rowHeights`/`colWidths`). |
+| `dimensions <ID> --action ...` | Row/column ops + sizing toolkit: insert/delete/move/append; `auto_resize` (auto-fit) vs `set_props {pixelSize}` (fixed/forced); `set_props {runs:[…]}` bulk-set many row+col sizes; hide/unhide; `read` hidden rows/cols — user-hidden AND `filteredRows`/`filteredCols` (active-filter, read-only) — (`{sizes:true}` adds `rowHeights`/`colWidths`). |
 | `comments <ID> --action ...` | Drive threaded comments, full CRUD: read/create/reply/resolve/delete. |
 | `charts <ID> --action ...` | Embedded charts (`read` = metadata only). |
 
@@ -129,8 +131,10 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 ```
 
 `describe` is the cheap middle step between `overview` (no grid) and `inspect`/`read-values` (full
-cells): it profiles what a region *contains* — column types, density, formula vs. literal — so you
-know where to drill before paying for cells. `formula-patterns` collapses a column of structurally
+cells): from ONE tight-mask read it profiles what a region *contains* — per-column inferred type,
+fill density, and formula-vs-literal ratio, plus a small sample of distinct values — then discards
+every cell, so you know where to drill before paying for cells. It never returns per-cell data;
+reach for `inspect` when you need the values/formulas/formats themselves. `formula-patterns` collapses a column of structurally
 identical formulas (`=C2*D2`, `=C3*D3`, …) into the single relative pattern they share, so an
 auditor reads one line instead of two hundred.
 
@@ -189,21 +193,31 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action delete_slicer --params-json '{"
 
 ## Reading by selector, by dimension, and to a file
 
-**Read by data filter instead of A1** — `read-values` and `describe` accept `--data-filter-json`
-in place of A1 ranges. Each selector is exactly one of an A1 string, a `gridRange`, or a developer
-metadata lookup. Pass exactly one addressing path — A1 ranges **or** `--data-filter-json`, not both
-(`@file.json` is accepted to read the JSON from a file):
+**Read by data filter instead of A1** — `read-values` accepts `--data-filter-json` in place of A1
+ranges. Each selector is exactly one of an A1 string, a `gridRange`, or a developer metadata lookup.
+Pass exactly one addressing path — A1 ranges **or** `--data-filter-json`, not both (`@file.json` is
+accepted to read the JSON from a file):
 
 ```sh
 gsheets read-values <YOUR_SPREADSHEET_ID> \
   --data-filter-json '[{"a1":"Sheet1!A1:B10"}]'
 gsheets read-values <YOUR_SPREADSHEET_ID> \
   --data-filter-json '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]'  # durable anchor
-gsheets describe <YOUR_SPREADSHEET_ID> --data-filter-json @filters.json
 ```
 
 A developer-metadata selector is the durable way to read a block that rows/cols may shift around —
 pair it with the `metadata` command's anchors. An invalid selector raises `bad_data_filters`.
+
+**The write side is symmetric.** `write-values-by-data-filter --data-json '[...]'` and
+`clear-by-data-filter --data-filter-json '[...]'` take the SAME selectors, so a block tagged once
+with a metadata key can be written or cleared long after inserts shift its A1:
+
+```sh
+gsheets write-values-by-data-filter <YOUR_SPREADSHEET_ID> --data-json \
+  '[{"developerMetadataLookup":{"metadataKey":"block:totals"},"values":[["Q1",1200]]}]'
+gsheets clear-by-data-filter <YOUR_SPREADSHEET_ID> --data-filter-json \
+  '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]'   # values only
+```
 
 **Pick the major dimension** — `read-values --major {rows,columns}` (default `rows`) transposes how
 the grid is laid out in the result; the chosen mode echoes back under the `major` key. (In the MCP
@@ -215,6 +229,8 @@ gsheets --json read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:C3' --major columns
 
 **Cap an oversize read** — `--max-cells N` on `read-values`/`describe` fails fast with
 `result_too_large` *before* fetching a payload that would only blow the token budget downstream.
+For `describe`, a bounded range (e.g. `A1:C100`) is refused up front from its estimated `rows*cols`,
+so no grid is fetched at all.
 
 ## Output format and writing reads to a file
 
@@ -227,13 +243,13 @@ adapters expose output differently:
   with no extra trailing newline, so CLI-piped bytes are byte-for-byte identical to the `out_path`
   file and the MCP no-`out_path` string (the renderer already self-terminates — csv/tsv with `\r\n`,
   jsonl with `\n`). Only the human views `text`/`json` add a friendly trailing newline.
-- **MCP**: a per-tool `output_format` arg, present only on the five read tools that render
+- **MCP**: a per-tool `output_format` arg, present only on the six read tools that render
   (`sheets_read_values`, `sheets_inspect`, `sheets_describe`, `sheets_formula_patterns`,
-  `sheets_read_many`). `sheets_read_values` accepts the full set including `csv`/`tsv`; the
-  structured reads top out at `markdown` (no `csv`/`tsv`). Other tools return their mirror model
-  only and have no `output_format`.
+  `sheets_read_conditional_formats`, `sheets_read_many`). `sheets_read_values` accepts the full set
+  including `csv`/`tsv`; the structured reads top out at `markdown` (no `csv`/`tsv`). Other tools
+  return their mirror model only and have no `output_format`.
 
-**`out_path` (MCP only)** — those same five read tools take an optional `out_path`. When set, the
+**`out_path` (MCP only)** — those same six read tools take an optional `out_path`. When set, the
 rendered read is written to that local file (utf-8) and a small **handle** is returned instead of the
 payload — `{ok, path, format, rows, cols, bytes, preview}` with `preview` capped at the first few
 records. This is an MCP-side escape valve for large reads; it is **not** a CLI flag and **not** a

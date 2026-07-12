@@ -20,7 +20,11 @@ pure packaging metadata) and assert the LOCKED values exactly:
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -224,3 +228,73 @@ def test_wheel_packages_src_gsheets(pyproject: dict) -> None:
 def test_src_gsheets_package_exists_on_disk() -> None:
     pkg = PYPROJECT_PATH.parent / "src" / "gsheets" / "__init__.py"
     assert pkg.is_file()
+
+
+# --------------------------------------------------------------------------- #
+# Bundled skill ships in the wheel (#32 / T4.3) — the distribution is literally
+# named "…-and-skill", so an installed wheel MUST carry SKILL.md + references/.
+# --------------------------------------------------------------------------- #
+
+
+def test_wheel_force_includes_skill_tree(pyproject: dict) -> None:
+    """Config-level guard: the wheel target force-includes skill/ -> gsheets/skill.
+
+    Fast, no build. Asserts the intent is declared so a config regression is
+    caught even if the (slower) build-and-inspect test is skipped.
+    """
+    backend = pyproject["build-system"]["build-backend"]
+    if "hatch" not in backend:
+        pytest.skip("skill force-include contract is hatchling-specific")
+    wheel = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
+    force_include = wheel.get("force-include", {})
+    assert force_include.get("skill") == "gsheets/skill", (
+        "wheel must force-include the skill/ tree as gsheets/skill so the bundled "
+        "skill installs with the package"
+    )
+
+
+def test_built_wheel_contains_skill(tmp_path: Path) -> None:
+    """Build the real wheel and assert it carries the skill as package data.
+
+    Guarded to run once (module-scoped build via a marker file would over-engineer
+    this); a single wheel build is fast enough for CI. Skips gracefully if no
+    build frontend is available in the environment.
+    """
+    repo_root = PYPROJECT_PATH.parent
+
+    # Prefer `uv build`; fall back to `python -m build` if uv is absent.
+    if shutil.which("uv"):
+        cmd = ["uv", "build", "--wheel", "--out-dir", str(tmp_path)]
+    else:
+        try:
+            import build  # noqa: F401
+        except ImportError:
+            pytest.skip("no build frontend (uv / python-build) available")
+        cmd = [sys.executable, "-m", "build", "--wheel", "--outdir", str(tmp_path)]
+
+    result = subprocess.run(
+        cmd,
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"wheel build failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+    wheels = list(tmp_path.glob("*.whl"))
+    assert wheels, f"no wheel produced in {tmp_path}; stdout:\n{result.stdout}"
+    wheel_path = wheels[0]
+
+    with zipfile.ZipFile(wheel_path) as zf:
+        names = zf.namelist()
+
+    # SKILL.md ships under the package as gsheets/skill/SKILL.md.
+    assert "gsheets/skill/SKILL.md" in names, (
+        f"wheel is missing gsheets/skill/SKILL.md; contents:\n" + "\n".join(names)
+    )
+    # At least one reference doc ships too.
+    refs = [n for n in names if n.startswith("gsheets/skill/references/") and n.endswith(".md")]
+    assert refs, (
+        "wheel is missing gsheets/skill/references/*.md; contents:\n" + "\n".join(names)
+    )

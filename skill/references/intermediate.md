@@ -71,8 +71,26 @@ gsheets --json read-values <YOUR_SPREADSHEET_ID> --data-filter-json '[
 
 `ranges` and `--data-filter-json` are the **two mutually exclusive addressing paths** — pass exactly
 one (CLI accepts `@file.json`; MCP arg is `data_filters`). An invalid selector → `bad_data_filters`.
-`describe` takes the same selector grammar; `read-many` accepts per-request `data_filters` in values
-mode. Pair developer-metadata addressing with `metadata` (advanced) to set the keys you look up here.
+`read-many` accepts per-request `data_filters` in values mode. Pair developer-metadata addressing
+with `metadata` (advanced) to set the keys you look up here.
+
+**The write side is symmetric.** `write-values-by-data-filter` and `clear-by-data-filter` take the
+**same selectors**, so a block tagged once with a metadata key can be written or cleared long after
+inserts have shifted its A1 — where a literal range would have moved off-target:
+
+```sh
+# insert-proof WRITE: each item = ONE selector + its values (+ optional "major":"columns")
+gsheets write-values-by-data-filter <YOUR_SPREADSHEET_ID> --data-json '[
+  {"developerMetadataLookup":{"metadataKey":"block:totals"},"values":[["Q1",1200],["Q2",1500]]}
+]'
+# insert-proof CLEAR (values only; formats/validation/notes untouched):
+gsheets clear-by-data-filter <YOUR_SPREADSHEET_ID> --data-filter-json '[
+  {"developerMetadataLookup":{"metadataKey":"block:totals"}}
+]'
+```
+
+The write returns the same `{updatedRanges,updatedCells,…}` shape as `write-values`; the clear
+returns `{clearedRanges}`. USER_ENTERED is the write default (`--input raw` to store verbatim).
 
 `--max-cells N` caps the read up front: it fails with `result_too_large` **before** returning a
 payload, instead of letting an oversized read fail only at the token cap.
@@ -292,7 +310,15 @@ gsheets set-validation <YOUR_SPREADSHEET_ID> 'Sheet1!C2:C100'
 | Checkbox | `{"type":"BOOLEAN"}` |
 | Number range | `{"type":"NUMBER_BETWEEN","values":[0,100]}` |
 | Custom formula | `{"type":"CUSTOM_FORMULA","values":["=ISNUMBER(A1)"]}` |
-| Non-blank / blank | `{"type":"NOT_BLANK"}` / `{"type":"BLANK"}` |
+
+Add an optional `"inputMessage":"help text"` to any rule to set the **viewer-facing help/error
+tooltip**; `inspect` reads it back under `validationRule.inputMessage` and `set-validation` writes it,
+so it survives a read-modify-write (omit it and no tooltip is set).
+
+> `BLANK` / `NOT_BLANK` are **not** valid data-validation condition types — Google's `ConditionType`
+> documents them as conditional-formatting / filter surfaces only, and core now rejects them here
+> pre-flight with `bad_condition`. Use them in `set-conditional-format` or a filter/slicer criterion
+> instead. To require a value, use `CUSTOM_FORMULA` (e.g. `=LEN(A1)>0`).
 
 `strict`/`showDropdown` may also ride inside `--rule-json` (`"strict"`/`"showDropdown"`); the CLI
 flags (`--no-strict`/`--no-dropdown`) win on conflict. Verify with `inspect` and confirm
@@ -406,18 +432,26 @@ are 0-based half-open (`start` inclusive, `end` exclusive). Unknown `params` key
 | `auto_resize` | Auto-FIT to content | `{"dimension", "start"?: int, "end"?: int}` (omit span ⇒ whole sheet) |
 | `set_props` | Set FIXED size / hide — one span | `{"dimension", "start", "end", "pixelSize"?: int, "hiddenByUser"?: bool}` |
 | `set_props` | Set FIXED size / hide — MANY spans | `{"runs": [{"dimension", "start", "end", "pixelSize"?, "hiddenByUser"?}, …]}` (runs may mix ROWS+COLUMNS; mutually exclusive with the single-span keys) |
-| `read` | Report hidden rows/cols | `{"range"?: A1}` (omit ⇒ whole sheet) → `{"hiddenRows":[…], "hiddenCols":[…]}` |
+| `read` | Report hidden rows/cols | `{"range"?: A1}` (omit ⇒ whole sheet) → `{"hiddenRows":[…], "hiddenCols":[…], "filteredRows":[…], "filteredCols":[…]}` |
 | `read` | Report hidden **+ pixel sizes** | `{"range"?: A1, "sizes": true}` → adds `rowHeights`/`colWidths` as coalesced `{start, end, pixelSize}` runs |
+
+`read` surfaces **two independent** causes of a concealed dimension: `hiddenRows`/`hiddenCols` (a
+user explicitly hid them, `hiddenByUser`) and `filteredRows`/`filteredCols` (an **active filter**
+conceals them, `hiddenByFilter` — read-only). A viewer sees a row/col iff it is in **neither** list —
+so to report what a viewer actually sees, check both.
 
 **Fixed vs. auto-fit — the size mode you choose.** There are two kinds of row/column size:
 
 - **Fixed / forced** — `set_props {"pixelSize": N}` PINS the size; the row/col will NOT grow to
-  fit content (the equivalent of Apps Script's `setRowHeightsForced`). This is "auto-resize OFF".
-  Use it for a stable layout that ignores content height.
-- **Auto-fit** — `auto_resize` sizes the row/col to its content. This is "auto-resize ON". Use it
-  to fit-to-content / turn auto-resize back on after a fixed size.
+  fit content (the equivalent of Apps Script's `setRowHeightsForced`). Use it for a stable layout
+  that ignores content height.
+- **Auto-fit** — `auto_resize` does a **one-time** fit of the row/col to its **current** content
+  (Google's `autoResizeDimensions`). It is a single fit, not a persistent mode that keeps tracking
+  future edits — re-run it after the content changes. Use it to fit-to-content, e.g. to undo a
+  previously pinned fixed size.
 
-So the toggle is: `set_props {"pixelSize": N}` = fixed; `auto_resize` = auto-fit.
+So: `set_props {"pixelSize": N}` pins a fixed size; `auto_resize` performs a one-time fit to the
+current content.
 
 **Reading sizes** — `read {"sizes": true}` widens the (still grid-data-free) metadata mask to pull
 `pixelSize` and returns `rowHeights`/`colWidths`: lists of coalesced runs, each

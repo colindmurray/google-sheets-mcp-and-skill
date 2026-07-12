@@ -22,9 +22,11 @@ from gsheets.core.service import SheetsServices
 from gsheets.core.values import (
     append_rows,
     clear,
+    clear_by_data_filter,
     pad_jagged,
     read_values,
     write_values,
+    write_values_by_data_filter,
 )
 
 
@@ -804,9 +806,12 @@ class TestClear:
             },
         }
 
-    def test_formats_routes_through_fields_mask_and_update_cells(self, monkeypatch):
+    def test_formats_only_emits_user_entered_format_mask(self, monkeypatch):
+        # NOTE: build_fields_mask is NOT patched here — the emitted fields mask is the REAL,
+        # hand-built one. (Routing {"userEnteredFormat": {}} through build_fields_mask drops the
+        # empty-dict sentinel and clears nothing; this asserts the mask is API-correct instead.)
         services, _ = _make_service()
-        # Patch the sibling collaborators this unit calls but does not own.
+        # Patch only the addressing collaborator this unit calls but does not own.
         grid = {
             "sheetId": 0,
             "startRowIndex": 1,
@@ -815,20 +820,11 @@ class TestClear:
             "endColumnIndex": 4,
         }
         monkeypatch.setattr(values_mod, "a1_to_gridrange", lambda s, sid, a1: dict(grid))
-        captured_payload = {}
-
-        def fake_mask(payload):
-            captured_payload.update(payload)
-            return "userEnteredFormat"
-
-        monkeypatch.setattr(values_mod, "build_fields_mask", fake_mask)
 
         rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
         # values=False so only the structural path runs.
         out = clear(services, SHEET_ID, ["Cliff!A2:D100"], values=False, formats=True)
 
-        # The payload handed to build_fields_mask must contain ONLY the requested subfield.
-        assert captured_payload == {"userEnteredFormat": {}}
         body = rec.calls[0]["body"]
         assert body == {
             "requests": [
@@ -842,18 +838,23 @@ class TestClear:
             "notes": False,
         }
 
-    def test_validation_and_notes_payload(self, monkeypatch):
+    def test_validation_only_emits_data_validation_mask(self, monkeypatch):
+        # Real mask (build_fields_mask NOT patched): {"dataValidation": {}} would be dropped by
+        # the mask builder's no-op guard, so the hand-built mask must name dataValidation itself.
         services, _ = _make_service()
         monkeypatch.setattr(
             values_mod, "a1_to_gridrange", lambda s, sid, a1: {"sheetId": 1}
         )
-        seen = {}
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
 
-        def fake_mask(payload):
-            seen.update(payload)
-            return "dataValidation,note"
+        clear(services, SHEET_ID, ["S!A1:A9"], values=False, validation=True)
+        assert rec.calls[0]["body"]["requests"][0]["updateCells"]["fields"] == "dataValidation"
 
-        monkeypatch.setattr(values_mod, "build_fields_mask", fake_mask)
+    def test_validation_and_notes_mask(self, monkeypatch):
+        services, _ = _make_service()
+        monkeypatch.setattr(
+            values_mod, "a1_to_gridrange", lambda s, sid, a1: {"sheetId": 1}
+        )
         rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
 
         clear(
@@ -864,23 +865,98 @@ class TestClear:
             validation=True,
             notes=True,
         )
-        # validation -> dataValidation:{}, notes -> note:""
-        assert seen == {"dataValidation": {}, "note": ""}
-        assert rec.calls[0]["body"]["requests"][0]["updateCells"]["fields"] == "dataValidation,note"
+        # Real, hand-built mask names both structural fields in flag order.
+        assert (
+            rec.calls[0]["body"]["requests"][0]["updateCells"]["fields"]
+            == "dataValidation,note"
+        )
 
-    def test_values_plus_structural_issues_both_calls(self, monkeypatch):
+    def test_values_plus_structural_is_one_atomic_batch_update(self, monkeypatch):
+        # Mixed clear (values + a structural subfield) must be a SINGLE atomic updateCells
+        # batchUpdate whose fields mask folds in userEnteredValue — never a batchClear
+        # followed by a separate batchUpdate (the old non-atomic two-call window that could
+        # erase values and then fail to clear the rest).
+        #
+        # build_fields_mask is deliberately NOT patched: this asserts the REAL emitted mask is
+        # API-correct. Under the old code that round-tripped {"userEnteredValue": "",
+        # "userEnteredFormat": {}} through build_fields_mask, the empty-dict sentinel was
+        # discarded and the mask was ONLY "userEnteredValue" — the format was never cleared
+        # while clear() falsely reported cleared={formats: True}. This test would catch that.
         services, _ = _make_service()
         monkeypatch.setattr(
             values_mod, "a1_to_gridrange", lambda s, sid, a1: {"sheetId": 0}
         )
-        monkeypatch.setattr(values_mod, "build_fields_mask", lambda p: "userEnteredFormat")
         bc = _wire_values_method(services, "batchClear", [{}])
         bu = _wire_spreadsheets_method(services, "batchUpdate", [{}])
 
-        clear(services, SHEET_ID, ["S!A1:B2"], values=True, formats=True)
+        out = clear(services, SHEET_ID, ["S!A1:B2"], values=True, formats=True)
 
-        assert len(bc.calls) == 1  # values cleared
-        assert len(bu.calls) == 1  # formats cleared
+        # No separate values.batchClear — the value clear rides in the batchUpdate.
+        assert bc.calls == []
+        # Exactly one batchUpdate carrying one updateCells request.
+        assert len(bu.calls) == 1
+        requests = bu.calls[0]["body"]["requests"]
+        assert len(requests) == 1
+        fields = requests[0]["updateCells"]["fields"]
+        # The single fields mask clears BOTH the values and the format atomically.
+        assert fields == "userEnteredValue,userEnteredFormat"
+        assert "userEnteredValue" in fields
+        assert "userEnteredFormat" in fields
+        assert out["cleared"] == {
+            "values": True,
+            "formats": True,
+            "validation": False,
+            "notes": False,
+        }
+
+    def test_notes_only_emits_note_mask(self, monkeypatch):
+        services, _ = _make_service()
+        monkeypatch.setattr(
+            values_mod, "a1_to_gridrange", lambda s, sid, a1: {"sheetId": 2}
+        )
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        clear(services, SHEET_ID, ["S!A1"], values=False, notes=True)
+        assert rec.calls[0]["body"]["requests"][0]["updateCells"]["fields"] == "note"
+
+    def test_values_plus_validation_folds_value_into_atomic_mask(self, monkeypatch):
+        # Reviewer flagged values+validation as broken under the old build_fields_mask route
+        # (the {"dataValidation": {}} sentinel was dropped -> mask was only userEnteredValue).
+        # The real hand-built mask must name BOTH fields in one atomic updateCells request.
+        services, _ = _make_service()
+        monkeypatch.setattr(
+            values_mod, "a1_to_gridrange", lambda s, sid, a1: {"sheetId": 0}
+        )
+        bc = _wire_values_method(services, "batchClear", [{}])
+        bu = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+
+        clear(services, SHEET_ID, ["S!A1:B2"], values=True, validation=True)
+
+        assert bc.calls == []
+        assert len(bu.calls) == 1
+        fields = bu.calls[0]["body"]["requests"][0]["updateCells"]["fields"]
+        assert fields == "userEnteredValue,dataValidation"
+
+    def test_values_plus_all_structural_folds_every_field(self, monkeypatch):
+        # All four flags -> one atomic updateCells naming every field, values first.
+        services, _ = _make_service()
+        monkeypatch.setattr(
+            values_mod, "a1_to_gridrange", lambda s, sid, a1: {"sheetId": 0}
+        )
+        bc = _wire_values_method(services, "batchClear", [{}])
+        bu = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+
+        clear(
+            services,
+            SHEET_ID,
+            ["S!A1:B2"],
+            values=True,
+            formats=True,
+            validation=True,
+            notes=True,
+        )
+        assert bc.calls == []
+        fields = bu.calls[0]["body"]["requests"][0]["updateCells"]["fields"]
+        assert fields == "userEnteredValue,userEnteredFormat,dataValidation,note"
 
     def test_multi_range_structural_builds_one_request_per_range(self, monkeypatch):
         services, _ = _make_service()
@@ -889,7 +965,6 @@ class TestClear:
             "a1_to_gridrange",
             lambda s, sid, a1: {"sheetId": 0, "tag": a1},
         )
-        monkeypatch.setattr(values_mod, "build_fields_mask", lambda p: "userEnteredFormat")
         rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
 
         clear(services, SHEET_ID, ["S!A1", "S!B1"], values=False, formats=True)
@@ -897,6 +972,9 @@ class TestClear:
         assert len(reqs) == 2
         assert reqs[0]["updateCells"]["range"]["tag"] == "S!A1"
         assert reqs[1]["updateCells"]["range"]["tag"] == "S!B1"
+        # Real hand-built mask on each request.
+        assert reqs[0]["updateCells"]["fields"] == "userEnteredFormat"
+        assert reqs[1]["updateCells"]["fields"] == "userEnteredFormat"
 
     def test_empty_ranges_raises(self):
         services, _ = _make_service()
@@ -926,4 +1004,285 @@ class TestClear:
         values_api.batchClear.return_value = bad
         with pytest.raises(SheetsError) as exc:
             clear(services, SHEET_ID, ["S!A1"])
+        assert exc.value.code == "google_api_error"
+
+
+# =============================================================== write_values_by_data_filter
+
+
+class TestWriteValuesByDataFilter:
+    def test_developer_metadata_write_builds_by_data_filter_body(self):
+        # A symbolic developerMetadataLookup selector writes via values.batchUpdateByDataFilter,
+        # wrapping the built DataFilter under each data item's singular ``dataFilter`` key.
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchUpdateByDataFilter",
+            [
+                {
+                    "spreadsheetId": SHEET_ID,
+                    "totalUpdatedCells": 2,
+                    "totalUpdatedRows": 1,
+                    "totalUpdatedColumns": 2,
+                    "responses": [
+                        {"updatedRange": "S!A1:B1", "updatedCells": 2, "updatedRows": 1, "updatedColumns": 2}
+                    ],
+                }
+            ],
+        )
+        out = write_values_by_data_filter(
+            services,
+            SHEET_ID,
+            [
+                {
+                    "developerMetadataLookup": {"metadataKey": "block:totals"},
+                    "values": [["x", "y"]],
+                }
+            ],
+        )
+        body = rec.calls[0]["body"]
+        assert body["valueInputOption"] == "USER_ENTERED"
+        assert body["data"] == [
+            {
+                "dataFilter": {
+                    "developerMetadataLookup": {"metadataKey": "block:totals"}
+                },
+                "values": [["x", "y"]],
+                "majorDimension": "ROWS",
+            }
+        ]
+        # batchUpdateByDataFilter needs an EXPLICIT majorDimension even for the rows default: an
+        # omitted one becomes DIMENSION_UNSPECIFIED and 400s on non-square payloads (live-verified).
+        assert body["data"][0]["majorDimension"] == "ROWS"
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "updatedRanges": ["S!A1:B1"],
+            "updatedCells": 2,
+            "updatedRows": 1,
+            "updatedColumns": 2,
+        }
+
+    def test_a1_selector_resolved_via_shared_builder(self, monkeypatch):
+        # An {"a1": ...} data item is resolved to a gridRange DataFilter by the SHARED
+        # dataselector.build_data_filter — proving values.py does not reimplement the translation.
+        from gsheets.core import dataselector
+
+        sentinel_filter = {"gridRange": {"sheetId": 7, "startRowIndex": 0}}
+        calls: list = []
+
+        def _fake_build(services, sid, selector):
+            calls.append(selector)
+            return sentinel_filter
+
+        monkeypatch.setattr(dataselector, "build_data_filter", _fake_build)
+
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services, "batchUpdateByDataFilter", [{"responses": [{"updatedRange": "S!A1"}]}]
+        )
+        write_values_by_data_filter(
+            services,
+            SHEET_ID,
+            [{"a1": "S!A1", "values": [["z"]]}],
+        )
+        # The shared builder was called with the item (it reads only the selector key).
+        assert calls == [{"a1": "S!A1", "values": [["z"]]}]
+        assert rec.calls[0]["body"]["data"][0]["dataFilter"] is sentinel_filter
+
+    def test_raw_input_option(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services, "batchUpdateByDataFilter", [{"responses": [{"updatedRange": "S!A1"}]}]
+        )
+        write_values_by_data_filter(
+            services,
+            SHEET_ID,
+            [{"developerMetadataLookup": {"metadataKey": "k"}, "values": [["=SUM(B:B)"]]}],
+            input="raw",
+        )
+        assert rec.calls[0]["body"]["valueInputOption"] == "RAW"
+
+    def test_major_columns_emits_major_dimension(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services, "batchUpdateByDataFilter", [{"responses": [{"updatedRange": "S!A1:A3"}]}]
+        )
+        write_values_by_data_filter(
+            services,
+            SHEET_ID,
+            [
+                {
+                    "developerMetadataLookup": {"metadataKey": "col"},
+                    "values": [["a", "b", "c"]],
+                    "major": "columns",
+                }
+            ],
+        )
+        assert rec.calls[0]["body"]["data"][0]["majorDimension"] == "COLUMNS"
+
+    def test_non_square_payloads_always_send_rows_major(self):
+        # Regression (live-caught): batchUpdateByDataFilter 400s on a 1xN row or Nx1 column when
+        # majorDimension is omitted (DIMENSION_UNSPECIFIED "cannot fit"). A 2x2 masked it because
+        # it fits either interpretation. The default write MUST send majorDimension=ROWS explicitly.
+        for values in ([["a", "b"]], [["a"], ["b"]], [["a", "b"], ["c", "d"]]):
+            services, _ = _make_service()
+            rec = _wire_values_method(
+                services, "batchUpdateByDataFilter", [{"responses": [{"updatedRange": "S!A1"}]}]
+            )
+            write_values_by_data_filter(
+                services,
+                SHEET_ID,
+                [{"developerMetadataLookup": {"metadataKey": "k"}, "values": values}],
+            )
+            assert rec.calls[0]["body"]["data"][0]["majorDimension"] == "ROWS", (
+                f"non-square payload {values!r} must carry an explicit ROWS majorDimension"
+            )
+
+    def test_totals_aggregated_from_responses_when_no_top_level(self):
+        services, _ = _make_service()
+        _wire_values_method(
+            services,
+            "batchUpdateByDataFilter",
+            [
+                {
+                    "responses": [
+                        {"updatedRange": "S!A1", "updatedCells": 1, "updatedRows": 1, "updatedColumns": 1},
+                        {"updatedRange": "S!B1:B2", "updatedCells": 2, "updatedRows": 2, "updatedColumns": 1},
+                    ]
+                }
+            ],
+        )
+        out = write_values_by_data_filter(
+            services,
+            SHEET_ID,
+            [
+                {"developerMetadataLookup": {"metadataKey": "a"}, "values": [["a"]]},
+                {"developerMetadataLookup": {"metadataKey": "b"}, "values": [["b"], ["c"]]},
+            ],
+        )
+        assert out["updatedRanges"] == ["S!A1", "S!B1:B2"]
+        assert out["updatedCells"] == 3
+        assert out["updatedRows"] == 3
+        assert out["updatedColumns"] == 2
+
+    def test_empty_data_raises(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            write_values_by_data_filter(services, SHEET_ID, [])
+        assert exc.value.code == "empty_payload"
+
+    def test_bad_input_raises(self):
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            write_values_by_data_filter(
+                services,
+                SHEET_ID,
+                [{"a1": "S!A1", "values": [["x"]]}],
+                input="weird",
+            )
+        assert exc.value.code == "bad_input"
+
+    def test_bad_selector_raises_via_shared_builder(self):
+        # A data item with no selector key is rejected by the shared builder.
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            write_values_by_data_filter(services, SHEET_ID, [{"values": [["x"]]}])
+        assert exc.value.code == "bad_data_filters"
+
+    def test_http_error_is_classified(self):
+        services, _ = _make_service()
+        values_api = services.sheets.spreadsheets.return_value.values.return_value
+        bad = MagicMock()
+        bad.execute.side_effect = _make_http_error(404)
+        values_api.batchUpdateByDataFilter.return_value = bad
+        with pytest.raises(SheetsError) as exc:
+            write_values_by_data_filter(
+                services,
+                SHEET_ID,
+                [{"developerMetadataLookup": {"metadataKey": "k"}, "values": [["x"]]}],
+            )
+        assert exc.value.status == 404
+
+
+# ================================================================== clear_by_data_filter
+
+
+class TestClearByDataFilter:
+    def test_developer_metadata_clear_builds_by_data_filter_body(self):
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services,
+            "batchClearByDataFilter",
+            [
+                {
+                    "spreadsheetId": SHEET_ID,
+                    "clearedRanges": ["S!A1:B10"],
+                }
+            ],
+        )
+        out = clear_by_data_filter(
+            services,
+            SHEET_ID,
+            [{"developerMetadataLookup": {"metadataKey": "block:totals"}}],
+        )
+        assert rec.calls[0]["body"] == {
+            "dataFilters": [
+                {"developerMetadataLookup": {"metadataKey": "block:totals"}}
+            ]
+        }
+        assert out == {
+            "ok": True,
+            "spreadsheetId": SHEET_ID,
+            "clearedRanges": ["S!A1:B10"],
+        }
+
+    def test_a1_selector_resolved_via_shared_builder(self, monkeypatch):
+        # The A1 form is translated by the SHARED dataselector.build_data_filters — not a
+        # reimplementation inside values.py.
+        from gsheets.core import dataselector
+
+        sentinel = [{"gridRange": {"sheetId": 3}}]
+
+        def _fake_build_list(services, sid, filters):
+            return sentinel
+
+        monkeypatch.setattr(dataselector, "build_data_filters", _fake_build_list)
+
+        services, _ = _make_service()
+        rec = _wire_values_method(
+            services, "batchClearByDataFilter", [{"clearedRanges": ["S!A1:B2"]}]
+        )
+        clear_by_data_filter(services, SHEET_ID, [{"a1": "S!A1:B2"}])
+        assert rec.calls[0]["body"] == {"dataFilters": sentinel}
+
+    def test_empty_data_filters_raises(self):
+        # The shared list builder guards the empty list.
+        services, _ = _make_service()
+        with pytest.raises(SheetsError) as exc:
+            clear_by_data_filter(services, SHEET_ID, [])
+        assert exc.value.code == "bad_data_filters"
+
+    def test_missing_cleared_ranges_degrades_to_empty_list(self):
+        services, _ = _make_service()
+        _wire_values_method(services, "batchClearByDataFilter", [{}])
+        out = clear_by_data_filter(
+            services,
+            SHEET_ID,
+            [{"developerMetadataLookup": {"metadataKey": "k"}}],
+        )
+        assert out["clearedRanges"] == []
+
+    def test_http_error_is_classified(self):
+        services, _ = _make_service()
+        values_api = services.sheets.spreadsheets.return_value.values.return_value
+        bad = MagicMock()
+        bad.execute.side_effect = _make_http_error(403)
+        values_api.batchClearByDataFilter.return_value = bad
+        with pytest.raises(SheetsError) as exc:
+            clear_by_data_filter(
+                services,
+                SHEET_ID,
+                [{"developerMetadataLookup": {"metadataKey": "k"}}],
+            )
         assert exc.value.code == "google_api_error"

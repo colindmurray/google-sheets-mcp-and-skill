@@ -6,8 +6,9 @@ plain params, never a live service):
 * **Serializers** (``serialize_basic_filter`` / ``serialize_filter_view``): GOLDEN-MASTER style —
   representative Sheets-API ``BasicFilter`` / ``FilterView`` JSON in, assert the EXACT flattened
   dict + terse condformat-style ``line`` out. Covers the newer ``filterSpecs`` form, the legacy
-  ``criteria`` map, ``visibleValues`` normalization, sort order words, and absolute column-index
-  -> letter conversion.
+  ``criteria`` map, sort order words, and absolute column-index -> letter conversion.
+  (``visibleValues`` is not a real ``FilterCriteria`` field — audit #4 — so it is neither read
+  nor built; a ``visible`` key on a write is rejected.)
 * **Request builders** (``build_*_request``): assert the EXACT ``batchUpdate`` request body,
   including the AUTO-built ``fields`` mask on ``updateFilterView`` and col-letter -> absolute
   column-index conversion. ``services``/``spreadsheet_id`` are unused by the builders (uniform
@@ -134,11 +135,15 @@ class TestSerializeBasicFilterGolden:
         assert out["sorted"] == [{"col": "B", "order": "DESCENDING"}]
         assert "sort B desc" in out["line"]
 
-    def test_visible_values_normalized(self):
+    def test_visible_values_not_surfaced(self):
+        # ``visibleValues`` is not a real ``FilterCriteria`` field (audit #4). Google never
+        # returns it; even if a stray one appears it is ignored on read (no ``visible``/``show``).
         bf = {"filterSpecs": [{"columnIndex": 1, "filterCriteria": {"visibleValues": ["Open"]}}]}
         out = serialize_basic_filter(bf, "S!A1:F9")
-        assert out["criteria"] == [{"col": "B", "visible": ["Open"]}]
-        assert out["line"] == "basicFilter [S!A1:F9] B: show Open"
+        # The criterion has no real facet, so nothing surfaces for that column.
+        assert out.get("criteria") in (None, [{"col": "B"}])
+        assert "show" not in out["line"]
+        assert "visible" not in json.dumps(out)
 
     def test_filterspecs_win_over_legacy_on_conflict(self):
         bf = {
@@ -536,24 +541,31 @@ class TestBuildFilterSpecsValidation:
             _build_filter_specs([{"hidden": ["x"]}])
         assert exc.value.code == "bad_filter"
 
-    def test_visible_values_built_into_visibleValues(self):
-        # The ``visible`` shorthand maps to Google's ``visibleValues`` (the inverse filter).
-        out = _build_filter_specs([{"col": "B", "visible": ["Open", "Pending"]}])
-        assert out == [
-            {
-                "columnIndex": 1,
-                "filterCriteria": {"visibleValues": ["Open", "Pending"]},
-            }
-        ]
+    def test_visible_key_rejected(self):
+        # ``visibleValues`` is not a real ``FilterCriteria`` field (audit #4). Rather than
+        # silently drop the filter, a ``visible`` key is rejected with a clear message.
+        with pytest.raises(SheetsError) as exc:
+            _build_filter_specs([{"col": "B", "visible": ["Open", "Pending"]}])
+        assert exc.value.code == "bad_filter"
+        assert "visible" in exc.value.message.lower()
 
-    def test_hidden_and_visible_and_condition_combined(self):
+    def test_hidden_and_condition_combined(self):
         out = _build_filter_specs(
-            [{"col": "A", "hidden": ["Closed"], "visible": ["Open"], "condition": "BLANK"}]
+            [{"col": "A", "hidden": ["Closed"], "condition": "BLANK"}]
         )
         crit = out[0]["filterCriteria"]
         assert crit["hiddenValues"] == ["Closed"]
-        assert crit["visibleValues"] == ["Open"]
         assert crit["condition"] == {"type": "BLANK"}
+        assert "visibleValues" not in crit
+
+    def test_visible_rejected_even_alongside_hidden(self):
+        # A ``visible`` key still rejects even when a valid ``hidden`` facet is present, so the
+        # unsupported field is never quietly ignored.
+        with pytest.raises(SheetsError) as exc:
+            _build_filter_specs(
+                [{"col": "A", "hidden": ["Closed"], "visible": ["Open"]}]
+            )
+        assert exc.value.code == "bad_filter"
 
 
 class TestBuildConditionValidation:
@@ -582,3 +594,31 @@ class TestBuildConditionValidation:
         with pytest.raises(SheetsError) as exc:
             _build_condition(None)  # type: ignore[arg-type]
         assert exc.value.code == "bad_filter"
+
+    def test_data_validation_only_type_rejected_in_filter(self):
+        # ``ONE_OF_RANGE`` is data-validation-only; using it on a filter surfaces a clear
+        # ``bad_condition`` pre-flight rather than an opaque Google 400.
+        with pytest.raises(SheetsError) as exc:
+            _build_condition({"type": "ONE_OF_RANGE", "values": ["=Z1:Z9"]})
+        assert exc.value.code == "bad_condition"
+        assert "filter" in exc.value.message
+
+    def test_wrong_arg_count_rejected_in_filter(self):
+        with pytest.raises(SheetsError) as exc:
+            _build_condition("NUMBER_BETWEEN(1)")  # needs 2 values
+        assert exc.value.code == "bad_condition"
+
+    def test_date_between_rejected_in_filter(self):
+        # ``DATE_BETWEEN`` is data-validation-only; regular filters do not support it, so the
+        # build path must reject it pre-flight instead of emitting a payload Google would 400.
+        with pytest.raises(SheetsError) as exc:
+            _build_condition({"type": "DATE_BETWEEN", "values": ["2024-01-01", "2024-12-31"]})
+        assert exc.value.code == "bad_condition"
+        assert "filter" in exc.value.message
+
+    def test_one_of_list_rejected_in_filter(self):
+        # ``ONE_OF_LIST`` is data-validation-only; a regular filter using it 400s at Google, so it
+        # is caught pre-flight here.
+        with pytest.raises(SheetsError) as exc:
+            _build_condition({"type": "ONE_OF_LIST", "values": ["West", "East"]})
+        assert exc.value.code == "bad_condition"

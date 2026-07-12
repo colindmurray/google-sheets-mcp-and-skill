@@ -115,32 +115,30 @@ def test_inspect_compact_runs():
 
 
 def test_describe_result_mirrors_core_dict_and_round_trips():
-    # The DescribeResult mirror validates a describe core dict and (with null pruning) reproduces
-    # it field-for-field — the model is a mechanical mirror, no reshaping (SPEC §3.5 round-trip).
+    # The DescribeResult mirror validates the compact-profiler core dict and (with null pruning)
+    # reproduces it field-for-field — a mechanical mirror, no reshaping (T4.1 round-trip).
     import json
     from pathlib import Path
 
     golden = json.loads(
-        (Path(__file__).parent / "golden" / "describe_region.json").read_text()
+        (Path(__file__).parent / "golden" / "describe_profile.json").read_text()
     )
     core_dict = golden["expected"]
     m = models.DescribeResult.model_validate(core_dict)
-    # The two regions mirror through, typed.
-    assert [r.range for r in m.regions] == ["Cliff!A1:C2", "Plan!A1"]
-    region0 = m.regions[0]
-    assert region0.cells[0].formula == "=SUM(B2:C2)"
-    assert region0.cells[0].effectiveFormat.bold is True
-    assert region0.merges == ["Cliff!B1:C1"]
-    # range-scoped CF: only the intersecting rule survives, keeping its index.
-    assert len(region0.conditionalFormats) == 1
-    assert region0.conditionalFormats[0].index == 0
-    assert region0.protectedRanges[0].protectedRangeId == 5
-    assert region0.validationSummary.cells == 0
+    assert m.range == "Sales!A1:D5"
+    assert m.rows == 5 and m.cols == 4
+    assert [c.col for c in m.columns] == ["A", "B", "C", "D"]
+    # types + header + formula ratio mirror through, typed.
+    assert m.columns[1].type == "date"
+    assert m.columns[1].header == "Date"
+    assert m.columns[3].type == "formula-heavy"
+    assert m.columns[3].formulaRatio == 1.0
+    assert m.merges == ["Sales!A1:D1"]
     # Null-pruned dump reproduces the core dict exactly (mechanical mirror).
     assert m.model_dump() == core_dict
-    # Terse render leads with the range + a compact tally.
-    assert "[Cliff!A1:C2]" in m.terse
-    assert "CF 0:" in m.terse
+    # Terse render leads with the range + extent, one line per column.
+    assert "[Sales!A1:D5] 5x4" in m.terse
+    assert "A (Region): text" in m.terse
 
 
 def test_formula_patterns_result_mirrors_core_dict_and_terse():
@@ -477,6 +475,103 @@ def test_batch_result_new_ids():
     assert "2 reply" in m.terse and "sheets=[7]" in m.terse
 
 
+def test_structure_mutate_ack_add_table_banding_filter_view_ids():
+    # T4.2/#31: StructureResult must DECLARE the ids core returns from add_table /
+    # add_banding / add_filter_view (tableId/bandedRangeId/filterViewId) so the advertised
+    # MCP output schema surfaces them — not just tolerate them via extra="allow".
+    declared = set(models.StructureResult.model_fields)
+    assert {"tableId", "bandedRangeId", "filterViewId"} <= declared
+
+    table = models.StructureResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "action": "add_table",
+            "range": "Sheet1!A1:F500",
+            "tableId": "abc",
+        }
+    )
+    assert table.tableId == "abc"
+
+    banding = models.StructureResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "action": "add_banding",
+            "range": "Sheet1!A1:F500",
+            "bandedRangeId": 7,
+        }
+    )
+    assert banding.bandedRangeId == 7
+
+    fview = models.StructureResult.model_validate(
+        {
+            "ok": True,
+            "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+            "action": "add_filter_view",
+            "range": "Sheet1!A1:F500",
+            "filterViewId": 123,
+        }
+    )
+    assert fview.filterViewId == 123
+
+
+def test_new_ids_declares_all_nine_buckets():
+    # T4.2/#31: NewIds must DECLARE all nine capture_new_ids buckets so the batch output
+    # schema advertises every id core can surface (not only the original five).
+    declared = set(models.NewIds.model_fields)
+    assert {
+        "sheetIds",
+        "chartIds",
+        "namedRangeIds",
+        "protectedRangeIds",
+        "metadataIds",
+        "tableIds",
+        "bandedRangeIds",
+        "filterViewIds",
+        "slicerIds",
+    } == declared
+
+    ids = models.NewIds.model_validate(
+        {
+            "sheetIds": [7],
+            "chartIds": [42],
+            "namedRangeIds": ["nr_abc"],
+            "protectedRangeIds": [3],
+            "metadataIds": [99],
+            "tableIds": ["tbl_1"],
+            "bandedRangeIds": [11],
+            "filterViewIds": [123],
+            "slicerIds": [4],
+        }
+    )
+    assert ids.tableIds == ["tbl_1"]
+    assert ids.bandedRangeIds == [11]
+    assert ids.filterViewIds == [123]
+    assert ids.slicerIds == [4]
+
+
+def test_batch_result_terse_surfaces_new_id_buckets():
+    # T4.2/#31: BatchResult.terse must summarize the four newly-declared buckets too.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "replies": [{}, {}, {}, {}],
+        "newIds": {
+            "tableIds": ["tbl_1"],
+            "bandedRangeIds": [11],
+            "filterViewIds": [123],
+            "slicerIds": [4],
+        },
+    }
+    m = models.BatchResult.model_validate(data)
+    terse = m.terse
+    assert "tables=['tbl_1']" in terse
+    assert "banded=[11]" in terse
+    assert "filterViews=[123]" in terse
+    assert "slicers=[4]" in terse
+
+
 # --------------------------------------------------------------------------------------
 # v0.2 extensions (DESIGN §Extensions): rich reads, new structure keys, new result models.
 # --------------------------------------------------------------------------------------
@@ -650,6 +745,105 @@ def test_overview_gains_locale_and_timezone():
     assert m.locale == "en_US" and m.timeZone == "America/New_York"
 
 
+def test_overview_gains_theme_map_and_font():
+    # T2.1: overview now surfaces a theme NAME->hex resolver + themeFontFamily.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "title": "Budget",
+        "theme": {"ACCENT1": "#4285F4", "TEXT": "#000000"},
+        "themeFontFamily": "Roboto",
+        "sheets": [],
+        "namedRanges": [],
+    }
+    _roundtrips(models.OverviewResult, data)
+    m = models.OverviewResult.model_validate(data)
+    assert m.theme["ACCENT1"] == "#4285F4"
+    assert m.themeFontFamily == "Roboto"
+
+
+def test_inspect_cell_carries_serialized_chips():
+    # T2.2: a cell gains a ``chips`` list only when it has chip runs.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "sheet": "S",
+        "range": "A1:A1",
+        "rows": 1,
+        "cols": 1,
+        "cells": [
+            {
+                "a1": "A1",
+                "value": "Jane",
+                "chips": [{"start": 0, "kind": "person", "email": "jane@x.com"}],
+            }
+        ],
+        "merges": [],
+    }
+    _roundtrips(models.InspectResult, data)
+    m = models.InspectResult.model_validate(data)
+    assert m.cells[0].chips[0].kind == "person"
+    assert m.cells[0].chips[0].email == "jane@x.com"
+
+
+def test_dimensions_read_surfaces_filtered_indices():
+    # T2.3: read returns filteredRows/filteredCols independent of hiddenRows/hiddenCols.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "read",
+        "sheet": "S",
+        "hiddenRows": [2],
+        "hiddenCols": [],
+        "filteredRows": [5, 6],
+        "filteredCols": [],
+    }
+    _roundtrips(models.DimensionsResult, data)
+    m = models.DimensionsResult.model_validate(data)
+    assert m.filteredRows == [5, 6]
+    assert "2 filtered row" in m.terse
+
+
+def test_validation_rule_round_trips_input_message():
+    # T2.4: inputMessage rides on the structured ValidationRule shape.
+    rule = {"type": "ONE_OF_LIST", "values": ["Yes", "No"], "inputMessage": "Pick one"}
+    m = models.ValidationRule.model_validate(rule)
+    assert m.inputMessage == "Pick one"
+
+
+def test_table_carries_rows_properties_colors():
+    # T2.6: a table's header/band/footer colors round-trip under rowsProperties.
+    data = {
+        "tableId": "t1",
+        "name": "Sales",
+        "range": "S!A1:C10",
+        "columns": [{"name": "Region", "type": "TEXT"}],
+        "rowsProperties": {"header": "#FFCDD2", "secondBand": "theme:ACCENT2"},
+        "line": 'table "Sales" [S!A1:C10] cols: Region:TEXT rows: header=#FFCDD2, secondBand=theme:ACCENT2',
+    }
+    m = models.Table.model_validate(data)
+    assert m.rowsProperties.header == "#FFCDD2"
+    assert m.rowsProperties.secondBand == "theme:ACCENT2"
+
+
+def test_write_and_clear_by_data_filter_result_mirrors():
+    # T2.5: the DataFilter value write/clear result models mirror their core dicts.
+    w = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "updatedRanges": ["S!A1:B1"],
+        "updatedCells": 2,
+        "updatedRows": 1,
+        "updatedColumns": 2,
+    }
+    _roundtrips(models.WriteValuesByDataFilterResult, w)
+    assert "wrote 2 cell" in models.WriteValuesByDataFilterResult.model_validate(w).terse
+
+    c = {"ok": True, "spreadsheetId": "<YOUR_SPREADSHEET_ID>", "clearedRanges": ["S!A1:B10"]}
+    _roundtrips(models.ClearByDataFilterResult, c)
+    assert "cleared S!A1:B10" in models.ClearByDataFilterResult.model_validate(c).terse
+
+
 def test_data_ops_find_replace_result():
     data = {
         "ok": True,
@@ -784,8 +978,10 @@ def test_to_model_and_registry_cover_every_core_fn():
         "read_values",
         "read_conditional_formats",
         "write_values",
+        "write_values_by_data_filter",
         "append_rows",
         "clear",
+        "clear_by_data_filter",
         "format",
         "set_conditional_format",
         "set_validation",

@@ -18,6 +18,7 @@ from gsheets.core.addressing import (
     a1_to_gridrange,
     gridrange_to_a1,
     parse_a1,
+    resolve_sheet_id_by_name,
     sheet_index_cache,
 )
 from gsheets.core.errors import SheetsError
@@ -481,6 +482,78 @@ class TestSheetResolutionEdgeCases:
             gridrange_to_a1(services, "SID", gr)
         assert ei.value.code == "sheet_not_found"
         assert "has no title" in str(ei.value)
+
+
+# --------------------------------------------------------------------------------------
+# resolve_sheet_id_by_name — the authoritative title-first resolver (ISSUES.md #1)
+# --------------------------------------------------------------------------------------
+
+
+# A multi-tab workbook whose FIRST tab (sheetId 100) is deliberately NOT the tab most of these
+# tests assert on, so a wrong-tab fallback to the first sheet is caught. Includes digit-suffixed
+# titles ("Sheet2", "Q1", "2024"), a tab literally named "A1", a spaced title, and an apostrophe.
+_RESOLVER_INDEX = [
+    {"title": "Sheet1", "sheetId": 100, "index": 0},
+    {"title": "Sheet2", "sheetId": 200, "index": 1},
+    {"title": "Q1", "sheetId": 300, "index": 2},
+    {"title": "A1", "sheetId": 400, "index": 3},
+    {"title": "2024", "sheetId": 500, "index": 4},
+    {"title": "My Sheet", "sheetId": 600, "index": 5},
+    {"title": "O'Brien", "sheetId": 700, "index": 6},
+]
+
+
+class TestResolveSheetIdByName:
+    def _svc(self):
+        return _make_services(sheets_index=_RESOLVER_INDEX)
+
+    def test_first_tab_by_title(self):
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "Sheet1") == 100
+
+    def test_digit_suffixed_non_first_tab_resolves_correctly(self):
+        # THE headline bug: "Sheet2" was parsed as cell Sheet2 -> first sheet (100). It must
+        # resolve to the actual Sheet2 (200).
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "Sheet2") == 200
+
+    def test_letter_digit_title(self):
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "Q1") == 300
+
+    def test_tab_literally_named_a1(self):
+        # A tab whose title is exactly "A1" must resolve to ITS id via the title-first match,
+        # never be treated as cell A1 on the first sheet.
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "A1") == 400
+
+    def test_all_digit_title(self):
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "2024") == 500
+
+    def test_title_with_spaces(self):
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "My Sheet") == 600
+
+    def test_title_with_apostrophe(self):
+        services, _ = self._svc()
+        assert resolve_sheet_id_by_name(services, "SID", "O'Brien") == 700
+
+    def test_nonexistent_title_raises_sheet_not_found(self):
+        services, _ = self._svc()
+        with pytest.raises(SheetsError) as ei:
+            resolve_sheet_id_by_name(services, "SID", "Nope")
+        assert ei.value.code == "sheet_not_found"
+
+    def test_title_match_missing_sheet_id_raises(self):
+        services, resource = self._svc()
+        resource.spreadsheets.return_value.get.return_value.execute.return_value = {
+            "sheets": [{"properties": {"title": "Sheet2", "index": 0}}]
+        }
+        with pytest.raises(SheetsError) as ei:
+            resolve_sheet_id_by_name(services, "SID", "Sheet2")
+        assert ei.value.code == "sheet_not_found"
+        assert "has no sheetId" in str(ei.value)
 
 
 # --------------------------------------------------------------------------------------

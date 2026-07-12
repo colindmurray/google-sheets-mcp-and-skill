@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from googleapiclient.errors import HttpError
 
-from .addressing import a1_to_gridrange
+from .addressing import resolve_sheet_id_by_name
 from .errors import SheetsError, classify_google_error
 from .fieldsmask import build_fields_mask
 from .service import SheetsServices
@@ -184,8 +184,13 @@ def _require_sheet(action: str, sheet: str | None) -> str:
 
 
 def _sheet_id_for(services: SheetsServices, spreadsheet_id: str, sheet: str) -> int:
-    """Resolve a sheet NAME to its ``sheetId`` (reusing the addressing layer's cache)."""
-    return a1_to_gridrange(services, spreadsheet_id, sheet)["sheetId"]
+    """Resolve a sheet NAME to its ``sheetId`` via the authoritative title-first resolver.
+
+    Delegates to :func:`resolve_sheet_id_by_name` so a digit-suffixed non-first tab (``"Sheet2"``)
+    is never mis-resolved to the first sheet (ISSUES.md #1) — critical for destructive row/column
+    delete and resize actions.
+    """
+    return resolve_sheet_id_by_name(services, spreadsheet_id, sheet)
 
 
 def _require_dimension(action: str, params: dict) -> str:
@@ -605,27 +610,33 @@ def _dim_set_props_bulk(services, spreadsheet_id, sheet, params) -> dict:
 # read (hiddenByUser — the set_props read side)
 # ---------------------------------------------------------------------------------------
 
-#: Tight read mask: only the per-dimension ``hiddenByUser`` flags + the data block origin.
+#: Tight read mask: both per-dimension visibility flags (``hiddenByUser`` = explicitly hidden
+#: by a user, ``hiddenByFilter`` = concealed by an ACTIVE filter — read-only) + the data block
+#: origin. The two flags are INDEPENDENT: a viewer sees a row iff neither is set.
 _READ_FIELDS = (
     "sheets(properties(sheetId,title),"
-    "data(rowMetadata.hiddenByUser,columnMetadata.hiddenByUser,startRow,startColumn))"
+    "data(rowMetadata(hiddenByUser,hiddenByFilter),"
+    "columnMetadata(hiddenByUser,hiddenByFilter),startRow,startColumn))"
 )
 
 #: Extended read mask used when ``sizes`` is requested — adds ``pixelSize`` alongside the
-#: ``hiddenByUser`` flag for both dimensions (still NO grid data).
+#: two visibility flags for both dimensions (still NO grid data).
 _READ_FIELDS_WITH_SIZES = (
     "sheets(properties(sheetId,title),"
-    "data(rowMetadata(hiddenByUser,pixelSize),"
-    "columnMetadata(hiddenByUser,pixelSize),startRow,startColumn))"
+    "data(rowMetadata(hiddenByUser,hiddenByFilter,pixelSize),"
+    "columnMetadata(hiddenByUser,hiddenByFilter,pixelSize),startRow,startColumn))"
 )
 
 
 def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
-    """Read hidden rows/cols (and optionally pixel sizes) over ``range`` (or the whole ``sheet``).
+    """Read hidden/filtered rows/cols (and optionally pixel sizes) over ``range`` (or the ``sheet``).
 
     Pulls a tight ``spreadsheets.get`` over the per-dimension metadata (never grid data) and
-    returns the ABSOLUTE 0-based indices of hidden rows/cols. ``params['range']`` narrows the
-    scan; absent it scans the whole ``sheet``.
+    returns the ABSOLUTE 0-based indices of rows/cols hidden by two INDEPENDENT causes:
+    ``hiddenRows``/``hiddenCols`` (``hiddenByUser`` — a user explicitly hid them) and
+    ``filteredRows``/``filteredCols`` (``hiddenByFilter`` — an ACTIVE filter conceals them,
+    read-only). A viewer sees a row/col iff it is in NEITHER list. ``params['range']`` narrows
+    the scan; absent it scans the whole ``sheet``.
 
     With ``params['sizes']`` truthy the mask widens to also pull ``pixelSize`` and the result
     gains ``rowHeights``/``colWidths``: lists of coalesced ``{start, end, pixelSize}`` runs
@@ -649,7 +660,7 @@ def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
     except HttpError as exc:
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
-    hidden_rows, hidden_cols = _collect_hidden(resp, sheet)
+    hidden_rows, hidden_cols, filtered_rows, filtered_cols = _collect_hidden(resp, sheet)
     out = {
         "ok": True,
         "spreadsheetId": spreadsheet_id,
@@ -657,6 +668,8 @@ def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
         "sheet": sheet,
         "hiddenRows": hidden_rows,
         "hiddenCols": hidden_cols,
+        "filteredRows": filtered_rows,
+        "filteredCols": filtered_cols,
     }
     if want_sizes:
         row_runs, col_runs = _collect_sizes(resp, sheet)
@@ -665,20 +678,30 @@ def _dim_read(services, spreadsheet_id, sheet, params) -> dict:
     return out
 
 
-def _collect_hidden(resp: dict, sheet: str) -> tuple[list[int], list[int]]:
-    """Collect absolute 0-based hidden row/col indices from a metadata ``get`` response.
+def _collect_hidden(
+    resp: dict, sheet: str
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    """Collect absolute 0-based hidden/filtered row/col indices from a metadata ``get`` response.
 
     Each ``data`` block carries a ``startRow``/``startColumn`` origin (absent ⇒ 0) and a
-    ``rowMetadata``/``columnMetadata`` array whose entries are ``DimensionProperties`` (the
-    ``hiddenByUser`` flag is present only on hidden ones). Indices are made ABSOLUTE by adding
-    the block origin, de-duplicated across overlapping blocks, and returned sorted.
+    ``rowMetadata``/``columnMetadata`` array whose entries are ``DimensionProperties``. Two
+    INDEPENDENT flags are surfaced (present only when set): ``hiddenByUser`` (a user explicitly
+    hid the dimension) and ``hiddenByFilter`` (an ACTIVE filter conceals it — read-only). A
+    viewer sees a row/col iff NEITHER is set, so an agent needs both to report what is actually
+    visible vs. what the user manually hid. Indices are made ABSOLUTE by adding the block origin,
+    de-duplicated across overlapping blocks, and returned sorted.
 
     Only the ``data`` blocks of the SHEET that matches ``sheet`` by title are considered (the
     ``get`` was range-scoped to one sheet, but guarding on the title keeps the collector
     robust if the response ever carries more).
+
+    Returns:
+        ``(hidden_rows, hidden_cols, filtered_rows, filtered_cols)`` — four sorted index lists.
     """
     hidden_rows: set[int] = set()
     hidden_cols: set[int] = set()
+    filtered_rows: set[int] = set()
+    filtered_cols: set[int] = set()
     for entry in resp.get("sheets", []) or []:
         props = (entry or {}).get("properties", {}) or {}
         if props.get("title") != sheet:
@@ -687,12 +710,25 @@ def _collect_hidden(resp: dict, sheet: str) -> tuple[list[int], list[int]]:
             start_row = block.get("startRow", 0) or 0
             start_col = block.get("startColumn", 0) or 0
             for offset, meta in enumerate(block.get("rowMetadata", []) or []):
-                if isinstance(meta, dict) and meta.get("hiddenByUser"):
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("hiddenByUser"):
                     hidden_rows.add(start_row + offset)
+                if meta.get("hiddenByFilter"):
+                    filtered_rows.add(start_row + offset)
             for offset, meta in enumerate(block.get("columnMetadata", []) or []):
-                if isinstance(meta, dict) and meta.get("hiddenByUser"):
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("hiddenByUser"):
                     hidden_cols.add(start_col + offset)
-    return sorted(hidden_rows), sorted(hidden_cols)
+                if meta.get("hiddenByFilter"):
+                    filtered_cols.add(start_col + offset)
+    return (
+        sorted(hidden_rows),
+        sorted(hidden_cols),
+        sorted(filtered_rows),
+        sorted(filtered_cols),
+    )
 
 
 def _collect_sizes(resp: dict, sheet: str) -> tuple[list[dict], list[dict]]:

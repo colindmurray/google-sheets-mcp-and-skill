@@ -107,6 +107,105 @@ def test_out_path_documented_in_docstring(name):
     assert "out_path" in desc
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "sheets_read_values",
+        "sheets_inspect",
+        "sheets_describe",
+        "sheets_formula_patterns",
+        "sheets_read_many",
+        "sheets_read_conditional_formats",
+    ],
+)
+def test_overwrite_exposed_optional_default_false(name):
+    # T3.4/#10: the overwrite guard is exposed on every out_path-capable tool, optional, and
+    # NOT required (defaults to False = refuse-if-exists).
+    props = _tools()[name].parameters.get("properties", {})
+    required = _tools()[name].parameters.get("required", [])
+    assert "overwrite" in props
+    assert "overwrite" not in required
+    assert props["overwrite"].get("default") is False
+
+
+def test_out_path_refuses_existing_file_without_overwrite(tmp_path):
+    # Default overwrite=False: an out_path that already exists is refused (out_path_exists), and
+    # the existing content is left intact.
+    payload = _read_values_payload([["a", "b"]])
+    target = tmp_path / "exists.json"
+    target.write_text("PRIOR", encoding="utf-8")
+    with pytest.raises(ToolError) as ei:
+        srv._call_formatted(
+            srv.models.ReadValuesResult,
+            lambda s, sid, rngs, **kw: payload,
+            "json",
+            object(),
+            "<ID>",
+            ["S!A1:B2"],
+            out_path=str(target),
+        )
+    assert "out_path_exists" in str(ei.value)
+    assert target.read_text(encoding="utf-8") == "PRIOR"  # untouched
+
+
+def test_out_path_overwrite_true_replaces_existing_file(tmp_path):
+    # overwrite=True truncates and replaces the existing file.
+    payload = _read_values_payload([["a", "b"]])
+    target = tmp_path / "exists.json"
+    target.write_text("PRIOR", encoding="utf-8")
+    out = srv._call_formatted(
+        srv.models.ReadValuesResult,
+        lambda s, sid, rngs, **kw: payload,
+        "json",
+        object(),
+        "<ID>",
+        ["S!A1:B2"],
+        out_path=str(target),
+        overwrite=True,
+    )
+    assert isinstance(out, ToolResult)
+    from gsheets.core.format import render
+
+    assert target.read_bytes() == render(payload, "json").encode("utf-8")
+
+
+def test_out_path_overwrite_end_to_end(tmp_path, monkeypatch, stub_mcp_credentials):
+    # End-to-end through the REAL FastMCP Client: overwrite=False refuses an existing file,
+    # overwrite=True succeeds.
+    from fastmcp import Client
+    from gsheets.core.format import render
+
+    payload = _read_values_payload([["a", "b"], ["c", "d"]])
+    monkeypatch.setattr(srv, "_read_values", lambda *a, **k: payload)
+    monkeypatch.setattr(srv, "_services", lambda ctx: object())
+    target = tmp_path / "e2e.json"
+    target.write_text("PRIOR", encoding="utf-8")
+
+    async def call(overwrite):
+        args = {
+            "spreadsheet_id": "FAKEID",
+            "ranges": ["S!A1:B2"],
+            "output_format": "json",
+            "out_path": str(target),
+        }
+        if overwrite is not None:
+            args["overwrite"] = overwrite
+        async with Client(srv.mcp) as client:
+            return await client.call_tool("sheets_read_values", args)
+
+    # Default (overwrite omitted) refuses.
+    with pytest.raises(ToolError) as ei:
+        asyncio.run(call(None))
+    assert "out_path_exists" in str(ei.value)
+    assert target.read_text(encoding="utf-8") == "PRIOR"
+
+    # overwrite=True succeeds and replaces the file.
+    r = asyncio.run(call(True))
+    handle = _handle(r)
+    assert handle["ok"] is True
+    assert target.read_bytes() == render(payload, "json").encode("utf-8")
+
+
 def test_export_does_not_gain_out_path():
     # export already writes files via its own ``path`` arg; it must NOT also grow ``out_path``.
     props = _tools()["sheets_export"].parameters.get("properties", {})
@@ -356,7 +455,8 @@ def _structured_payload_for(tool_name: str) -> dict:
     if tool_name == "sheets_describe":
         return {
             "ok": True, "spreadsheetId": "FAKEID", "sheet": "S", "range": "A1:B2",
-            "values": {"ok": True}, "structure": {"ok": True},
+            "rows": 2, "cols": 2,
+            "columns": [{"col": "A", "type": "text", "density": 1.0, "formulaRatio": 0.0}],
         }
     if tool_name == "sheets_formula_patterns":
         return {
@@ -389,7 +489,7 @@ def _args_for(tool_name: str, *, output_format: str, out_path=None) -> dict:
     elif tool_name == "sheets_inspect":
         base |= {"spreadsheet_id": "FAKEID", "range": "S!A1:B2"}
     elif tool_name == "sheets_describe":
-        base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
+        base |= {"spreadsheet_id": "FAKEID", "range": "S!A1:B2"}
     elif tool_name == "sheets_formula_patterns":
         base |= {"spreadsheet_id": "FAKEID", "ranges": ["S!A1:B2"]}
     elif tool_name == "sheets_read_many":

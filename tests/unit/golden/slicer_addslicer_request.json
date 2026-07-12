@@ -1,12 +1,12 @@
 {
-  "_doc": "Golden-master fixture for build_add_slicer_request (DESIGN §X.3/§X.16; analysis #16). Flat public slicer spec in -> exact Google addSlicer batchUpdate request dict out. The slicer points at a data range on 'Data' (sheetId 0) and is anchored on a different tab 'Dash' (sheetId 1); its filterCriteria condition reuses the shared condformat condition builder. The two A1 references (dataRange 'Data!A1:F500', single-cell anchor 'Dash!I1') resolve through the real addressing layer driven by the two-sheet index. No real IDs/creds.",
+  "_doc": "Golden-master fixture for build_add_slicer_request (DESIGN §X.3/§X.16; analysis #16). Flat public slicer spec in -> exact Google addSlicer batchUpdate request dict out. The slicer points at a data range on 'Data' (sheetId 0) and is anchored on a different tab 'Dash' (sheetId 1); its filterCriteria condition reuses the shared condformat condition builder. Slicers share the regular-filter surface, so the condition is a valid regular-filter type (NUMBER_BETWEEN — two userEnteredValue args); data-validation-only types like ONE_OF_LIST are rejected pre-flight (audit #5b). The two A1 references (dataRange 'Data!A1:F500', single-cell anchor 'Dash!I1') resolve through the real addressing layer driven by the two-sheet index. No real IDs/creds.",
   "spec": {
-    "title": "Region",
+    "title": "Score",
     "dataRange": "Data!A1:F500",
     "columnIndex": 0,
     "anchor": "Dash!I1",
     "criteria": {
-      "condition": "ONE_OF_LIST(West,East)"
+      "condition": "NUMBER_BETWEEN(0,100)"
     }
   },
   "sheets_index": [
@@ -24,14 +24,14 @@
             "startColumnIndex": 0,
             "endColumnIndex": 6
           },
-          "title": "Region",
+          "title": "Score",
           "columnIndex": 0,
           "filterCriteria": {
             "condition": {
-              "type": "ONE_OF_LIST",
+              "type": "NUMBER_BETWEEN",
               "values": [
-                {"userEnteredValue": "West"},
-                {"userEnteredValue": "East"}
+                {"userEnteredValue": "0"},
+                {"userEnteredValue": "100"}
               ]
             }
           }

@@ -25,7 +25,14 @@ from .multiread import read_many
 from .reads import describe, inspect, overview, read_conditional_formats
 from .rules import set_conditional_format, set_validation
 from .structure import manage_sheets, metadata, structure
-from .values import append_rows, clear, read_values, write_values
+from .values import (
+    append_rows,
+    clear,
+    clear_by_data_filter,
+    read_values,
+    write_values,
+    write_values_by_data_filter,
+)
 
 __all__ = [
     "overview",
@@ -52,4 +59,8 @@ __all__ = [
     # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two NEW top-level core fns.
     "export",
     "read_many",
+    # Tier 2 audit remediation (T2.5): DataFilter-based value writes/clears — insert-proof
+    # semantic addressing symmetric with the developer-metadata read path.
+    "write_values_by_data_filter",
+    "clear_by_data_filter",
 ]

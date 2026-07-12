@@ -223,6 +223,20 @@ class TestSetConditionalFormatUpdate:
         # Sheet1 -> sheetId 7 in the fixture; inferred from the rule's resolved range.
         assert upd["sheetId"] == 7
 
+    def test_update_explicit_digit_suffixed_non_first_tab_targets_correct_sheet(self):
+        # Regression (ISSUES.md #1): an explicit sheet="Sheet1" (a digit-suffixed tab that is
+        # NOT first — sheetId 7 in the fixture) must resolve to 7 via the title-first resolver,
+        # never fall through to the first tab (Cliff, sheetId 0).
+        services, _get, batch = _make_service()
+        line = "[Sheet1!A2:A100] if NOT_BLANK -> bg #C8E6C9"
+
+        set_conditional_format(
+            services, SHEET_ID, action="update", sheet="Sheet1", index=2, rule=line
+        )
+
+        upd = _last_requests(batch)[0]["updateConditionalFormatRule"]
+        assert upd["sheetId"] == 7
+
 
 class TestSetConditionalFormatDelete:
     def test_delete_requires_index(self):
@@ -338,7 +352,52 @@ class TestSetConditionalFormatBatch:
         assert [r["index"] for r in result["results"]] == [5, 2, 1]
         assert all(r["action"] == "delete" for r in result["results"])
 
-    def test_batch_mixed_actions_high_to_low(self):
+    def test_batch_two_adds_apply_ascending(self):
+        # AUDIT #8: two adds targeting indices 0 and 1 must emit ASCENDING (add@0 then
+        # add@1) so the result is [A, B, E0, E1, ...] — NOT descending, which would wedge
+        # an existing rule between the two new ones ([A, E0, B, E1]).
+        services, _get, batch = _make_service()
+        items = [
+            {"action": "add", "index": 0, "rule": "[Cliff!A2:A100] if BLANK -> bg #ECEFF1"},
+            {"action": "add", "index": 1, "rule": "[Cliff!B2:B100] if NOT_BLANK -> bold"},
+        ]
+
+        result = set_conditional_format(services, SHEET_ID, sheet="Cliff", rules=items)
+
+        assert len(batch.calls) == 1
+        reqs = _last_requests(batch)
+        emitted_indices = [r["addConditionalFormatRule"]["index"] for r in reqs]
+        assert emitted_indices == [0, 1]
+        assert [r["index"] for r in result["results"]] == [0, 1]
+
+    def test_batch_mixed_add_delete_deletes_desc_then_adds_asc(self):
+        # Deletes apply DESCENDING (in place; earlier delete never shifts a later target),
+        # adds apply ASCENDING; deletes precede adds in the emitted batch.
+        services, _get, batch = _make_service()
+        items = [
+            {"action": "add", "index": 0, "rule": "[Cliff!A2:A100] if BLANK -> bg #ECEFF1"},
+            {"action": "add", "index": 1, "rule": "[Cliff!B2:B100] if NOT_BLANK -> bold"},
+            {"action": "delete", "index": 3},
+            {"action": "delete", "index": 5},
+        ]
+
+        set_conditional_format(services, SHEET_ID, sheet="Cliff", rules=items)
+
+        reqs = _last_requests(batch)
+        assert "deleteConditionalFormatRule" in reqs[0]
+        assert reqs[0]["deleteConditionalFormatRule"]["index"] == 5
+        assert "deleteConditionalFormatRule" in reqs[1]
+        assert reqs[1]["deleteConditionalFormatRule"]["index"] == 3
+        assert "addConditionalFormatRule" in reqs[2]
+        assert reqs[2]["addConditionalFormatRule"]["index"] == 0
+        assert "addConditionalFormatRule" in reqs[3]
+        assert reqs[3]["addConditionalFormatRule"]["index"] == 1
+
+    def test_batch_mixed_actions_updates_deletes_desc_then_adds(self):
+        # AUDIT #8 regression guard: updates+deletes are ordered TOGETHER, strictly
+        # DESCENDING by index, because updateConditionalFormatRule addresses the CURRENT
+        # array by index — a lower-index delete emitted first would shift a higher-index
+        # update's target out from under it. Here update@4 MUST precede delete@2.
         services, _get, batch = _make_service()
         items = [
             {"action": "add", "index": 0, "rule": "[Cliff!A2:A100] if BLANK -> bg #ECEFF1"},
@@ -349,18 +408,44 @@ class TestSetConditionalFormatBatch:
         result = set_conditional_format(services, SHEET_ID, sheet="Cliff", rules=items)
 
         reqs = _last_requests(batch)
-        # high->low: delete@2 should not shift update@4; ordering is 4, 2, 0.
+        # Emit order is updates+deletes(desc) + adds(asc): update@4, delete@2, add@0.
         assert [r["index"] for r in result["results"]] == [4, 2, 0]
-        # First emitted request targets index 4 (the update).
         assert "updateConditionalFormatRule" in reqs[0]
         assert reqs[0]["updateConditionalFormatRule"]["index"] == 4
         assert "deleteConditionalFormatRule" in reqs[1]
+        assert reqs[1]["deleteConditionalFormatRule"]["index"] == 2
         assert "addConditionalFormatRule" in reqs[2]
+        assert reqs[2]["addConditionalFormatRule"]["index"] == 0
         # update/add carry serialized rule lines; delete does not.
         by_index = {r["index"]: r for r in result["results"]}
         assert "rule" in by_index[4]
         assert "rule" in by_index[0]
         assert "rule" not in by_index[2]
+
+    def test_batch_delete_before_update_would_corrupt_target(self):
+        # Stronger guard: simulate Google applying the emitted requests sequentially against
+        # a live array (E0..E5) and prove update@4 lands on the INTENDED rule. The buggy
+        # order (delete@2 first) would leave the update replacing E5 instead of E4.
+        services, _get, batch = _make_service()
+        items = [
+            {"action": "update", "index": 4, "rule": "[Cliff!B2:B100] if NOT_BLANK -> bold"},
+            {"action": "delete", "index": 2},
+        ]
+
+        set_conditional_format(services, SHEET_ID, sheet="Cliff", rules=items)
+
+        reqs = _last_requests(batch)
+        # Replay the emitted requests against a mutable array modelling the sheet's rules.
+        array = [f"E{i}" for i in range(6)]  # E0..E5
+        for req in reqs:
+            if "updateConditionalFormatRule" in req:
+                idx = req["updateConditionalFormatRule"]["index"]
+                array[idx] = "UPDATED"  # replace in place (no shift)
+            elif "deleteConditionalFormatRule" in req:
+                idx = req["deleteConditionalFormatRule"]["index"]
+                del array[idx]  # remove (shifts later elements down)
+        # The rule that was E4 must be the one updated; E5 must survive untouched.
+        assert array == ["E0", "E1", "E3", "UPDATED", "E5"]
 
     def test_batch_per_item_sheet_overrides_default(self):
         services, _get, batch = _make_service()
@@ -503,6 +588,21 @@ class TestSetValidation:
             set_validation(services, SHEET_ID, "Cliff!A2", rule="ONE_OF_LIST")
         assert ei.value.code == "bad_validation"
 
+    def test_blank_condition_rejected_for_validation(self):
+        # AUDIT #5b: BLANK/NOT_BLANK are CF/filter-only ConditionTypes; Google 400s them in
+        # data validation. Reject pre-flight with a clear ``bad_condition``.
+        services, _get, _batch = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            set_validation(services, SHEET_ID, "Cliff!A2:A100", rule={"type": "BLANK"})
+        assert ei.value.code == "bad_condition"
+        assert "data_validation" in str(ei.value)
+
+    def test_not_blank_condition_rejected_for_validation(self):
+        services, _get, _batch = _make_service()
+        with pytest.raises(SheetsError) as ei:
+            set_validation(services, SHEET_ID, "Cliff!A2:A100", rule={"type": "NOT_BLANK"})
+        assert ei.value.code == "bad_condition"
+
     def test_http_error_is_classified(self):
         services, _get, _batch = _make_service()
 
@@ -591,6 +691,26 @@ class TestValidationToRule:
         out = validation_to_rule(google)
         assert out["values"] == ["PAST_MONTH"]
 
+    def test_input_message_surfaced_when_present(self):
+        # AUDIT #22 (T2.4): the viewer-facing help/error text must survive a read so a
+        # read-modify-write doesn't silently erase it.
+        google = {
+            "condition": {
+                "type": "ONE_OF_LIST",
+                "values": [{"userEnteredValue": "Yes"}, {"userEnteredValue": "No"}],
+            },
+            "inputMessage": "Pick one of the allowed values",
+            "strict": True,
+            "showCustomUi": True,
+        }
+        out = validation_to_rule(google)
+        assert out["inputMessage"] == "Pick one of the allowed values"
+
+    def test_input_message_omitted_when_absent(self):
+        google = {"condition": {"type": "BOOLEAN"}, "strict": True}
+        out = validation_to_rule(google)
+        assert "inputMessage" not in out
+
     def test_non_dict_raises(self):
         with pytest.raises(SheetsError) as ei:
             validation_to_rule("nope")
@@ -627,6 +747,18 @@ class TestRuleToValidation:
         out = rule_to_validation({"type": "BOOLEAN"})
         assert "values" not in out["condition"]
 
+    def test_blank_type_rejected_as_bad_condition(self):
+        # AUDIT #5b: BLANK is CF/filter-only; rule_to_validation must reject it pre-flight.
+        with pytest.raises(SheetsError) as ei:
+            rule_to_validation({"type": "BLANK"})
+        assert ei.value.code == "bad_condition"
+
+    def test_number_between_wrong_arg_count_rejected(self):
+        # AUDIT #5b: arg-count enforced — NUMBER_BETWEEN needs exactly 2 values.
+        with pytest.raises(SheetsError) as ei:
+            rule_to_validation({"type": "NUMBER_BETWEEN", "values": [5]})
+        assert ei.value.code == "bad_condition"
+
     def test_number_values_stringified(self):
         out = rule_to_validation({"type": "NUMBER_BETWEEN", "values": [0, 100]})
         assert [v["userEnteredValue"] for v in out["condition"]["values"]] == ["0", "100"]
@@ -658,6 +790,17 @@ class TestRuleToValidation:
         out = rule_to_validation({"type": "BOOLEAN", "strict": False, "showDropdown": False})
         assert out["strict"] is False
         assert out["showCustomUi"] is False
+
+    def test_input_message_emitted_when_present(self):
+        # AUDIT #22 (T2.4): a rule carrying the help text writes it back to the Google rule.
+        out = rule_to_validation(
+            {"type": "ONE_OF_LIST", "values": ["Yes"], "inputMessage": "Pick one"}
+        )
+        assert out["inputMessage"] == "Pick one"
+
+    def test_input_message_omitted_when_absent(self):
+        out = rule_to_validation({"type": "BOOLEAN"})
+        assert "inputMessage" not in out
 
 
 class TestValidationRoundTrip:
@@ -702,6 +845,16 @@ class TestValidationRoundTrip:
                 },
                 "strict": True,
                 "showCustomUi": False,
+            },
+            {
+                # AUDIT #22 (T2.4): a rule carrying inputMessage must round-trip byte-identical.
+                "condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": "Yes"}, {"userEnteredValue": "No"}],
+                },
+                "inputMessage": "Choose Yes or No",
+                "strict": True,
+                "showCustomUi": True,
             },
         ],
     )

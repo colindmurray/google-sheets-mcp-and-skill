@@ -481,7 +481,8 @@ class TestSortRange:
                 ],
             },
         )
-        # dimensionIndex is RELATIVE to the sorted range's first column (A => 0).
+        # dimensionIndex is ABSOLUTE 0-based sheet column (B => 1, D => 3), NOT
+        # relative to the sorted range's first column.
         assert _only_request(batch_rec) == {
             "sortRange": {
                 "range": {
@@ -508,8 +509,22 @@ class TestSortRange:
             ],
         }
 
-    def test_sort_range_relative_index_with_offset_start(self):
-        """When the range starts at column C, sorting column C is dimensionIndex 0."""
+    def test_sort_range_absolute_index_with_offset_start(self):
+        """dimensionIndex is the ABSOLUTE sheet column, ignoring the range start.
+
+        For ``Data!D2:F20`` sorting by E the correct index is 4 (E), not 1;
+        for ``C1:E10`` sorting by C it is 2, not 0.
+        """
+        services, _, batch_rec = _make_service()
+        data_ops(
+            services,
+            SPREADSHEET_ID,
+            action="sort_range",
+            params={"range": "Sheet1!D2:F20", "specs": [{"col": "E"}]},
+        )
+        spec = _only_request(batch_rec)["sortRange"]["sortSpecs"][0]
+        assert spec == {"dimensionIndex": 4, "sortOrder": "ASCENDING"}
+
         services, _, batch_rec = _make_service()
         data_ops(
             services,
@@ -518,7 +533,47 @@ class TestSortRange:
             params={"range": "Sheet1!C1:E10", "specs": [{"col": "C"}]},
         )
         spec = _only_request(batch_rec)["sortRange"]["sortSpecs"][0]
-        assert spec == {"dimensionIndex": 0, "sortOrder": "ASCENDING"}
+        assert spec == {"dimensionIndex": 2, "sortOrder": "ASCENDING"}
+
+    def test_sort_range_multi_spec_absolute_indexes(self):
+        """Multiple sort specs each resolve to their own absolute sheet column."""
+        services, _, batch_rec = _make_service()
+        data_ops(
+            services,
+            SPREADSHEET_ID,
+            action="sort_range",
+            params={
+                "range": "Sheet1!D2:G20",
+                "specs": [
+                    {"col": "F", "order": "DESCENDING"},
+                    {"col": "D", "order": "ASCENDING"},
+                ],
+            },
+        )
+        assert _only_request(batch_rec)["sortRange"]["sortSpecs"] == [
+            {"dimensionIndex": 5, "sortOrder": "DESCENDING"},
+            {"dimensionIndex": 3, "sortOrder": "ASCENDING"},
+        ]
+
+    def test_sort_range_accepts_numeric_and_letter_columns(self):
+        """A numeric col is already a 0-based absolute index; a letter resolves the same."""
+        services, _, batch_rec = _make_service()
+        data_ops(
+            services,
+            SPREADSHEET_ID,
+            action="sort_range",
+            params={
+                "range": "Sheet1!D2:F20",
+                "specs": [
+                    {"col": 4},  # numeric 0-based index -> column E
+                    {"col": "E"},  # letter -> also column E (index 4)
+                ],
+            },
+        )
+        assert _only_request(batch_rec)["sortRange"]["sortSpecs"] == [
+            {"dimensionIndex": 4, "sortOrder": "ASCENDING"},
+            {"dimensionIndex": 4, "sortOrder": "ASCENDING"},
+        ]
 
     def test_sort_range_default_order_is_ascending(self):
         services, _, batch_rec = _make_service()
@@ -566,16 +621,22 @@ class TestSortRange:
             )
         assert exc.value.code == "bad_param"
 
-    def test_sort_range_col_outside_range_raises(self):
-        services, _, _ = _make_service()
-        with pytest.raises(SheetsError) as exc:
-            data_ops(
-                services,
-                SPREADSHEET_ID,
-                action="sort_range",
-                params={"range": "Sheet1!C1:E10", "specs": [{"col": "A"}]},
-            )
-        assert exc.value.code == "bad_param"
+    def test_sort_range_col_before_range_is_absolute_not_error(self):
+        """A column before the sorted range is a valid absolute index, not an error.
+
+        Under the corrected absolute semantics, sorting ``C1:E10`` by column A
+        yields dimensionIndex 0 (rather than raising as it did when the index was
+        computed relative to the range start).
+        """
+        services, _, batch_rec = _make_service()
+        data_ops(
+            services,
+            SPREADSHEET_ID,
+            action="sort_range",
+            params={"range": "Sheet1!C1:E10", "specs": [{"col": "A"}]},
+        )
+        spec = _only_request(batch_rec)["sortRange"]["sortSpecs"][0]
+        assert spec == {"dimensionIndex": 0, "sortOrder": "ASCENDING"}
 
 
 # =========================================================================== text_to_columns
