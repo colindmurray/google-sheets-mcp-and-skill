@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-12
+
 ### Changed
 - **BREAKING — `describe` is now a compact per-column PROFILER (Tier 4, audit #15, T4.1).**
   `describe` previously requested `includeGridData=True` and returned full per-cell `regions`/`cells`
