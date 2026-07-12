@@ -58,6 +58,12 @@ from .core import (
 )
 from .core import addressing as addressing_mod
 from .core import retry as retry_mod
+# The two DataFilter value-write core fns (T2.5) are not re-exported from ``gsheets.core``; import
+# them straight from the submodule (same direction as ``.core.format`` / ``.core.paths`` below).
+from .core.values import (
+    clear_by_data_filter as _clear_by_data_filter,
+    write_values_by_data_filter as _write_values_by_data_filter,
+)
 from .core.errors import SheetsError, to_sheets_error
 from .core.format import render as render_format
 from .core.paths import write_file_handle
@@ -537,11 +543,18 @@ def sheets_overview(
     rules, plus all named ranges. It never pulls cell contents, so it is safe to call on a
     huge sheet. Drill in afterward with ``sheets_inspect`` / ``sheets_read_conditional_formats``.
 
+    It also returns the workbook's ``theme`` map — ``{colorType: "#RRGGBB"}`` over
+    TEXT/BACKGROUND/ACCENT1..6/LINK — plus ``themeFontFamily``, when the spreadsheet carries a
+    theme. This is the RESOLVER for the ``theme:NAME`` colors other reads emit (a cell's
+    ``bg: "theme:ACCENT1"`` in ``sheets_inspect`` maps to ``theme["ACCENT1"]`` here), so an agent
+    can turn any themed color into a concrete hex.
+
     Returns:
         ``{ok, spreadsheetId, title, sheets: [{sheetId, title, index, type, rows, cols,
         frozenRows, frozenCols, tabColor, protectedRangeCount, conditionalFormatCount}],
         namedRanges: [{name, range, namedRangeId}]}``, plus top-level ``locale`` / ``timeZone``
-        when the spreadsheet sets them.
+        and — when the workbook sets a theme — ``theme: {ACCENT1: "#4285F4", ...}`` /
+        ``themeFontFamily``.
     """
     return _call(models.OverviewResult, _overview, _services(ctx), spreadsheet_id, retry=retry)
 
@@ -596,6 +609,14 @@ def sheets_inspect(
         bool,
         Field(description="Attach a pivot-table definition to its anchor cell when present."),
     ] = False,
+    chips: Annotated[
+        bool,
+        Field(
+            description="Attach serialized smart chips (person/file/place/finance/rating) to a "
+            "cell only when it carries chip runs — the only way to recover a chip that otherwise "
+            "reads back as plain text."
+        ),
+    ] = False,
     output_format: Annotated[
         StructuredFormat,
         Field(
@@ -623,8 +644,11 @@ def sheets_inspect(
 
     ``effectiveFormat`` shows what actually renders (including the result of conditional
     formatting); ``userEnteredFormat`` shows the author's intent. ``validationRule`` round-trips
-    straight back into ``sheets_set_validation``. Rich-text and pivot reads are opt-in and
-    attach per-cell only when present, so they cost nothing on a plain sheet.
+    straight back into ``sheets_set_validation``. Rich-text, pivot, and smart-chip reads are opt-in
+    and attach per-cell only when present, so they cost nothing on a plain sheet. Set ``chips=True``
+    to recover smart chips (people/files/places/finance) that otherwise read back as plain text;
+    each cell gains a ``chips: [{start, kind, email?/uri?/mimeType?, ...}]`` list only when it
+    carries chip runs.
 
     Setting ``out_path`` writes the rendered read to a LOCAL FILE (utf-8) and returns a small
     handle instead of the payload — an opt-in local side effect; the spreadsheet itself is never
@@ -632,11 +656,12 @@ def sheets_inspect(
 
     Returns:
         ``{ok, spreadsheetId, sheet, range, rows, cols, cells:[{a1,value,formula,
-        userEnteredFormat,effectiveFormat,note,validation,validationRule,runs,hyperlink,pivot}],
-        merges, compact}``. With ``compact=True`` the top-level ``cells`` array is replaced by
-        rectangular ``runs`` blocks; independently of that, the per-cell rich-text ``runs`` /
-        ``hyperlink`` / ``pivot`` keys appear only on cells that carry them. With ``out_path`` set,
-        returns the file handle ``{ok, path, format, rows, cols, bytes, preview}`` instead.
+        userEnteredFormat,effectiveFormat,note,validation,validationRule,runs,hyperlink,pivot,
+        chips}], merges, compact}``. With ``compact=True`` the top-level ``cells`` array is replaced
+        by rectangular ``runs`` blocks; independently of that, the per-cell rich-text ``runs`` /
+        ``hyperlink`` / ``pivot`` / ``chips`` keys appear only on cells that carry them. With
+        ``out_path`` set, returns the file handle ``{ok, path, format, rows, cols, bytes, preview}``
+        instead.
     """
     return _call_formatted(
         models.InspectResult,
@@ -655,6 +680,7 @@ def sheets_inspect(
         include_validation=include_validation,
         include_rich_text=include_rich_text,
         include_pivot=include_pivot,
+        chips=chips,
     )
 
 
@@ -1414,6 +1440,104 @@ def sheets_clear(
 
 @register(
     annotations=ToolAnnotations(
+        title="Write values by data filter",
+        readOnlyHint=False,
+        # OVERWRITES the addressed cells (same honest destructive signal as sheets_write_values).
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+    tags={"write"},
+)
+def sheets_write_values_by_data_filter(
+    spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
+    data: Annotated[
+        list[dict],
+        Field(
+            min_length=1,
+            description="Write items, each carrying EXACTLY ONE symbolic (insert-proof) selector "
+            'plus its values: [{"developerMetadataLookup": {"metadataKey": "block:totals"}, '
+            '"values": [["x", "y"]]}, ...]. The selector is one of {"a1": "Sheet1!A1:B10"} | '
+            '{"gridRange": {...}} | {"developerMetadataLookup": {...}}; add "major": "columns" to '
+            "write column-major. Writes via batchUpdateByDataFilter.",
+        ),
+    ],
+    ctx: Context,
+    input: Annotated[
+        Literal["user_entered", "raw"],
+        Field(description='"user_entered" parses like typing into Sheets; "raw" stores verbatim.'),
+    ] = "user_entered",
+    retry: RetryParam = None,
+) -> models.WriteValuesByDataFilterResult:
+    """Write/update ranges addressed by a SYMBOLIC DataFilter instead of a literal A1 string.
+
+    The write-side twin of ``sheets_read_values``'s ``data_filters`` path: each item names its
+    target by a stable selector — most usefully a ``developerMetadataLookup`` on a block tagged once
+    via ``sheets_metadata`` — so the write still lands correctly after rows/columns shift, where a
+    literal A1 would have moved. USER_ENTERED by default. OVERWRITES the addressed cells.
+
+    Returns:
+        ``{ok, spreadsheetId, updatedRanges, updatedCells, updatedRows, updatedColumns}`` — the
+        same shape as ``sheets_write_values``.
+    """
+    return _call(
+        models.WriteValuesByDataFilterResult,
+        _write_values_by_data_filter,
+        _services(ctx),
+        spreadsheet_id,
+        data,
+        input=input,
+        retry=retry,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
+        title="Clear values by data filter",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+    tags={"write"},
+)
+def sheets_clear_by_data_filter(
+    spreadsheet_id: Annotated[str, Field(description="Spreadsheet ID.")],
+    data_filters: Annotated[
+        list[dict],
+        Field(
+            min_length=1,
+            description="Symbolic (insert-proof) selectors whose VALUES to clear: a list of "
+            '{"a1": "Sheet1!A1:B10"} | {"gridRange": {...}} | '
+            '{"developerMetadataLookup": {"metadataKey": "block:totals"}}. Clears VALUES only '
+            "(formats/validation/notes are left intact), via batchClearByDataFilter.",
+        ),
+    ],
+    ctx: Context,
+    retry: RetryParam = None,
+) -> models.ClearByDataFilterResult:
+    """Clear cell VALUES from ranges addressed by a SYMBOLIC DataFilter (insert-proof).
+
+    The clear-side twin of ``sheets_read_values``'s ``data_filters`` path — names each region by a
+    stable selector (e.g. a ``developerMetadataLookup`` on a tagged block) rather than a literal A1
+    that shifts on inserts. DESTRUCTIVE: wipes the VALUES in the addressed ranges (like
+    ``sheets_clear`` with values only); formats, data-validation, and notes are preserved.
+
+    Returns:
+        ``{ok, spreadsheetId, clearedRanges}`` — the A1 ranges Google reports as cleared.
+    """
+    return _call(
+        models.ClearByDataFilterResult,
+        _clear_by_data_filter,
+        _services(ctx),
+        spreadsheet_id,
+        data_filters,
+        retry=retry,
+    )
+
+
+@register(
+    annotations=ToolAnnotations(
         title="Format a range",
         readOnlyHint=False,
         destructiveHint=False,
@@ -1550,7 +1674,8 @@ def sheets_set_validation(
             description='A ValidationRule, e.g. {"type": "ONE_OF_LIST", "values": ["Yes", "No"]}, '
             '{"type": "ONE_OF_RANGE", "source": "Sheet1!Z1:Z10"}, {"type": "BOOLEAN"}, '
             '{"type": "NUMBER_BETWEEN", "values": [0, 100]}, '
-            '{"type": "CUSTOM_FORMULA", "values": ["=ISNUMBER(A1)"]}. None => CLEAR.'
+            '{"type": "CUSTOM_FORMULA", "values": ["=ISNUMBER(A1)"]}. Add an optional '
+            '"inputMessage": "help text" to set the viewer-facing help/error tooltip. None => CLEAR.'
         ),
     ] = None,
     strict: Annotated[bool, Field(description="Reject invalid input (False = warn only).")] = True,
@@ -1562,8 +1687,9 @@ def sheets_set_validation(
     """Set (or clear) data-validation on a range — dropdowns, number/date/text/formula rules.
 
     Pass the structured ``rule`` shape that ``sheets_inspect`` reads back under each cell's
-    ``validationRule`` (full round-trip). Omitting ``rule`` CLEARS validation on the range —
-    that removal is the destructive path. Idempotent.
+    ``validationRule`` (full round-trip, including an optional ``inputMessage`` help/error tooltip
+    that survives read-modify-write). Omitting ``rule`` CLEARS validation on the range — that
+    removal is the destructive path. Idempotent.
 
     Data-validation condition types are a SUBSET of the shared ``ConditionType`` enum: ``BLANK`` /
     ``NOT_BLANK`` are conditional-format / filter surfaces only and are rejected here pre-flight
@@ -1572,7 +1698,8 @@ def sheets_set_validation(
     dispatch (``NUMBER_BETWEEN`` needs 2, ``ONE_OF_RANGE`` 1, ``BOOLEAN`` 0, …).
 
     Returns:
-        ``{ok, spreadsheetId, range, validation, validationRule}``.
+        ``{ok, spreadsheetId, range, validation, validationRule}`` (``validationRule`` echoes
+        ``inputMessage`` when set).
     """
     return _call(
         models.SetValidationResult,
@@ -1670,15 +1797,18 @@ def sheets_structure(
         merge {"mergeType": "MERGE_ALL"}; add_named {"name": "x"};
         protect {"description", "editors", "warningOnly"}; freeze {"rows": 1, "cols": 2};
         tab_color {"color": "#4285F4"}; group/ungroup {"dimension": "ROWS", "start", "end"};
-        add_table {"name": "Sales", "columns": [{"name", "type", "validation"?}, ...]} — column
-        "type" is a live ColumnType: DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATE_TIME | TEXT |
-        BOOLEAN | DROPDOWN | FILES_CHIP | PEOPLE_CHIP | FINANCE_CHIP | PLACE_CHIP | RATINGS_CHIP
-        (legacy DATETIME/CHECKBOX/RATING still accepted as aliases → DATE_TIME/BOOLEAN/RATINGS_CHIP;
-        SMART_CHIP is rejected — pick the specific *_CHIP type). A DROPDOWN column REQUIRES
-        "validation": {"type": "ONE_OF_LIST", "values": [...]} (the same structured shape
-        ``sheets_set_validation`` takes; the terse one-liner string the read side emits is NOT
-        accepted on write); update_table {"tableId", "name"?, "columns"?,
-        "range"?}; delete_table {"tableId"};
+        add_table {"name": "Sales", "columns": [{"name", "type", "validation"?}, ...],
+        "rowsProperties"?} — column "type" is a live ColumnType: DOUBLE | CURRENCY | PERCENT | DATE
+        | TIME | DATE_TIME | TEXT | BOOLEAN | DROPDOWN | FILES_CHIP | PEOPLE_CHIP | FINANCE_CHIP |
+        PLACE_CHIP | RATINGS_CHIP (legacy DATETIME/CHECKBOX/RATING still accepted as aliases →
+        DATE_TIME/BOOLEAN/RATINGS_CHIP; SMART_CHIP is rejected — pick the specific *_CHIP type). A
+        DROPDOWN column REQUIRES "validation": {"type": "ONE_OF_LIST", "values": [...]} (the same
+        structured shape ``sheets_set_validation`` takes; the terse one-liner string the read side
+        emits is NOT accepted on write). Optional "rowsProperties" sets the table's
+        header/band/footer colors: {"header"?, "firstBand"?, "secondBand"?, "footer"?} of hex or
+        theme:NAME (the SAME terse shape the read side surfaces, T2.6); update_table {"tableId",
+        "name"?, "columns"?, "range"?, "rowsProperties"?} (only the rowsProperties colors you supply
+        are masked — unspecified band colors survive); delete_table {"tableId"};
         add_banding {"rowBanding"?: {"header", "first", "second", "footer"}, "columnBanding"?}
         (hex colors); update_banding {"bandedRangeId", "rowBanding"?, "columnBanding"?,
         "range"?}; delete_banding {"bandedRangeId"};
@@ -1943,7 +2073,9 @@ def sheets_dimensions(
     A complete row/column SIZING toolkit on one tab:
       * READ current sizes — ``read {"sizes": true}`` -> ``rowHeights``/``colWidths`` as
         coalesced ``{start, end, pixelSize}`` runs (absolute 0-based, half-open ``end``),
-        alongside the always-returned ``hiddenRows``/``hiddenCols``.
+        alongside the always-returned ``hiddenRows``/``hiddenCols`` (hidden by a USER) and
+        ``filteredRows``/``filteredCols`` (hidden by an ACTIVE filter — read-only). The two causes
+        are INDEPENDENT: a viewer sees a row/col iff it is in NEITHER list.
       * SET a FIXED/FORCED size — ``set_props {"pixelSize": N}`` PINS the size; the row/col will
         NOT auto-grow to fit content (this is "auto-resize OFF", the equivalent of Apps Script's
         setRowHeightsForced).
@@ -1966,8 +2098,9 @@ def sheets_dimensions(
     Returns:
         single write -> ``{ok, spreadsheetId, action, sheet, ...echoed geometry...}``; bulk
         set_props -> ``{ok, ..., runs:[{dimension,start,end,pixelSize?,hiddenByUser?,
-        appliedFields}], count}``; read -> ``{ok, ..., hiddenRows:[...], hiddenCols:[...]}`` plus,
-        with ``sizes``, ``rowHeights``/``colWidths`` as ``{start, end, pixelSize}`` runs.
+        appliedFields}], count}``; read -> ``{ok, ..., hiddenRows:[...], hiddenCols:[...],
+        filteredRows:[...], filteredCols:[...]}`` plus, with ``sizes``, ``rowHeights``/``colWidths``
+        as ``{start, end, pixelSize}`` runs.
     """
     return _call(
         models.DimensionsResult,

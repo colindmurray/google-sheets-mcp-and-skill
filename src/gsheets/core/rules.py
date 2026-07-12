@@ -499,6 +499,14 @@ def rule_to_validation(
     google["strict"] = bool(_resolve_flag(strict, rule.get("strict")))
     # Google's field for the in-cell dropdown is ``showCustomUi``.
     google["showCustomUi"] = bool(_resolve_flag(show_dropdown, rule.get("showDropdown")))
+
+    # ``inputMessage`` (audit #22): write the viewer-facing help/error text back when the rule
+    # carries it (a plain string per the discovery ``DataValidationRule.inputMessage``); omit the
+    # field entirely when absent so a rule without help text stays clean. Symmetric with the read
+    # side in :func:`validation_to_rule`, so the text survives a read-modify-write.
+    input_message = rule.get("inputMessage")
+    if isinstance(input_message, str):
+        google["inputMessage"] = input_message
     return google
 
 
@@ -595,6 +603,13 @@ def validation_to_rule(google_validation: dict) -> dict:
     else:
         if extracted:
             out["values"] = extracted
+
+    # ``inputMessage`` (audit #22): the viewer-facing help/error text. Surface it only when the
+    # rule carries one so a read-modify-write preserves it instead of silently erasing it. Omit
+    # the key entirely when absent (kept symmetric with :func:`rule_to_validation`).
+    input_message = google_validation.get("inputMessage")
+    if isinstance(input_message, str):
+        out["inputMessage"] = input_message
 
     # ``strict`` defaults True when Google omits it (Google omits ``strict`` when False on
     # some payloads, but the documented default behaviour for setDataValidation reads back

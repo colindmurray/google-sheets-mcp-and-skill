@@ -78,8 +78,11 @@ No flags beyond the positional id. Returns the spreadsheet title; per tab the `s
 index, type, row/column counts, frozen rows/cols, tab color, and the **counts**
 `protectedRangeCount` / `conditionalFormatCount`; plus spreadsheet-level `namedRanges` and the
 spreadsheet `locale` / `timeZone` (e.g. `"en_US"` / `"America/New_York"`, omitted when unset).
-Counts are computed cheaply — overview never pulls full rule bodies, so it stays cheap on any size
-of sheet. Use it to decide which tab/range is worth a closer look.
+When the workbook carries a theme it also returns a `theme` map (`{"ACCENT1":"#4285F4",
+"TEXT":"#000000", …}`) + `themeFontFamily` — the **resolver** that turns any `theme:NAME` color you
+read elsewhere (a cell `bg:"theme:ACCENT1"`) into a concrete hex. Counts are computed cheaply —
+overview never pulls full rule bodies, so it stays cheap on any size of sheet. Use it to decide
+which tab/range is worth a closer look.
 
 ### describe
 
@@ -157,8 +160,8 @@ unset keys are omitted. Trim tokens with the `--no-*` flags when you only need p
 gsheets inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --no-effective --no-user-entered --no-validation
 ```
 
-(`--compact` collapses both horizontal and vertical runs of identical cells; `--rich-text` and
-`--pivot` exist but are advanced — see `advanced.md`.)
+(`--compact` collapses both horizontal and vertical runs of identical cells; `--rich-text`,
+`--pivot`, and `--chips` exist but are advanced — see `advanced.md`.)
 
 ### read-values
 
@@ -238,7 +241,8 @@ fmt_token     := "bg " hex | "fg " hex | "bold" | "italic" | "underline" | "stri
 
 - `COND_TYPE` is the Google `BooleanCondition.type` verbatim (`CUSTOM_FORMULA`, `NUMBER_GREATER`,
   `NUMBER_BETWEEN`, `TEXT_CONTAINS`, `BLANK`, `NOT_BLANK`, …); colors are 6-digit uppercase hex
-  (`#FFCDD2`), theme colors render as `theme:ACCENT1`.
+  (`#FFCDD2`), theme colors render as `theme:ACCENT1` (resolve to a concrete hex via `overview`'s
+  `theme` map).
 - Examples:
   ```
   [Sheet1!A2:A100] if CUSTOM_FORMULA(=$B2>10) -> bg #FFCDD2 bold
@@ -279,7 +283,8 @@ gsheets write-values <YOUR_SPREADSHEET_ID> \
 
 Pass **either** `RANGE` + `--values-json` **or** `--data-json`, never both (→ `conflicting_args`);
 the single-range form needs both halves (→ `missing_args`). `write-values` *overwrites* the target
-— read the range first if it may hold data.
+— read the range first if it may hold data. To write by a durable, insert-proof anchor instead of a
+literal A1, use `write-values-by-data-filter` (see `intermediate.md` → address by data filter).
 
 ### append-rows
 
@@ -319,7 +324,8 @@ gsheets clear <YOUR_SPREADSHEET_ID> 'Sheet1!A2:D100' --no-values --validation # 
 
 Values-only is a fast `values.batchClear`; adding any of formats/validation/notes routes through a
 `batchUpdate` whose fields mask covers exactly the requested subfields. **Destructive** — confirm
-and read the range first.
+and read the range first. To clear values by a durable, insert-proof anchor instead of a literal A1,
+use `clear-by-data-filter` (see `intermediate.md` → address by data filter).
 
 ### format
 

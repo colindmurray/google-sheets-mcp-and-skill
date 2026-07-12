@@ -738,7 +738,219 @@ def test_build_delete_table_request_requires_table_id():
     assert exc.value.code == "missing_param"
 
 
+# ===================================================================== rowsProperties colors
+
+
+def test_serialize_table_rows_properties_golden():
+    """Golden-master: a Table with header/band/footer colors -> exact flattened shape + line."""
+    golden = load_golden("table_serialize_rowscolors")
+    services = _service_with_sheet_index()
+    out = serialize_table(golden["table"], services, SPREADSHEET_ID)
+    assert out == golden["expected"]
+
+
+def test_serialize_table_rows_properties_flattens_rgb_and_theme():
+    """Each *ColorStyle flattens to hex (rgbColor) or theme:NAME (themeColor)."""
+    services = _service_with_sheet_index()
+    table = {
+        "tableId": "t",
+        "name": "T",
+        "rowsProperties": {
+            "headerColorStyle": {"rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}},
+            "secondBandColorStyle": {"themeColor": "ACCENT1"},
+        },
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert out["rowsProperties"] == {"header": "#FF0000", "secondBand": "theme:ACCENT1"}
+    # Only present colors appear in the terse line segment (firstBand/footer absent).
+    assert out["line"].endswith(" rows: header=#FF0000, secondBand=theme:ACCENT1")
+
+
+def test_serialize_table_colorless_table_has_no_rows_properties_key():
+    """A table without rowsProperties omits the key entirely and leaves the line unchanged."""
+    services = _service_with_sheet_index()
+    table = {
+        "tableId": "t",
+        "name": "Sales",
+        "range": {
+            "sheetId": 0,
+            "startRowIndex": 0,
+            "endRowIndex": 500,
+            "startColumnIndex": 0,
+            "endColumnIndex": 6,
+        },
+        "columnProperties": [{"columnName": "Region", "columnType": "TEXT"}],
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert "rowsProperties" not in out
+    # No 'rows:' segment appended — line is byte-for-byte the pre-feature form.
+    assert out["line"] == 'table "Sales" [Sheet1!A1:F500] cols: Region:TEXT'
+    assert " rows: " not in out["line"]
+
+
+def test_serialize_table_empty_rows_properties_omitted():
+    """An empty rowsProperties dict (no colors set) omits the key — nothing to surface."""
+    services = _service_with_sheet_index()
+    out = serialize_table(
+        {"tableId": "t", "name": "T", "rowsProperties": {}}, services, SPREADSHEET_ID
+    )
+    assert "rowsProperties" not in out
+    assert " rows: " not in out["line"]
+
+
+def test_serialize_table_rows_properties_skips_malformed_color():
+    """A malformed *ColorStyle is skipped (not fatal); valid siblings still flatten."""
+    services = _service_with_sheet_index()
+    table = {
+        "tableId": "t",
+        "name": "T",
+        "rowsProperties": {
+            "headerColorStyle": {"nonsense": True},  # neither themeColor nor rgb channels
+            "footerColorStyle": {"rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+        },
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert out["rowsProperties"] == {"footer": "#000000"}
+
+
+def test_build_add_table_request_rows_properties_emits_colorstyle():
+    """add_table with rowsProperties emits Google *ColorStyle fields (hex -> rgbColor)."""
+    services = _service_with_sheet_index()
+    req = build_add_table_request(
+        services,
+        SPREADSHEET_ID,
+        "Sheet1!A1:C100",
+        {
+            "name": "T",
+            "rowsProperties": {"header": "#FF0000", "footer": "theme:ACCENT2"},
+        },
+    )
+    assert req["addTable"]["table"]["rowsProperties"] == {
+        "headerColorStyle": {"rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}},
+        "footerColorStyle": {"themeColor": "ACCENT2"},
+    }
+
+
+def test_build_add_table_request_without_rows_properties_omits_key():
+    """add_table without rowsProperties never attaches the key (colorless table unaffected)."""
+    services = _service_with_sheet_index()
+    req = build_add_table_request(
+        services, SPREADSHEET_ID, "Sheet1!A1:C100", {"name": "T"}
+    )
+    assert "rowsProperties" not in req["addTable"]["table"]
+
+
+def test_build_add_table_request_empty_rows_properties_omits_key():
+    """An empty rowsProperties mapping resolves to nothing and is not attached."""
+    services = _service_with_sheet_index()
+    req = build_add_table_request(
+        services, SPREADSHEET_ID, "Sheet1!A1:C100", {"name": "T", "rowsProperties": {}}
+    )
+    assert "rowsProperties" not in req["addTable"]["table"]
+
+
+def test_build_update_table_request_rows_properties_masks_supplied_colors_only():
+    """update with two band colors masks exactly those two *ColorStyle leaves (group form)."""
+    services = _service_with_sheet_index()
+    req = build_update_table_request(
+        services,
+        SPREADSHEET_ID,
+        {
+            "tableId": "abc",
+            "rowsProperties": {"header": "#FFCDD2", "footer": "#E0E0E0"},
+        },
+    )
+    assert req["updateTable"]["table"]["rowsProperties"] == {
+        "headerColorStyle": {
+            "rgbColor": {"red": 1.0, "green": 205 / 255, "blue": 210 / 255}
+        },
+        "footerColorStyle": {
+            "rgbColor": {"red": 224 / 255, "green": 224 / 255, "blue": 224 / 255}
+        },
+    }
+    assert (
+        req["updateTable"]["fields"]
+        == "rowsProperties(headerColorStyle,footerColorStyle)"
+    )
+
+
+def test_build_update_table_request_single_rows_color_dotted_mask():
+    """update with one band color emits the dotted single-leaf mask (unspecified survive)."""
+    services = _service_with_sheet_index()
+    req = build_update_table_request(
+        services,
+        SPREADSHEET_ID,
+        {"tableId": "abc", "rowsProperties": {"secondBand": "theme:ACCENT3"}},
+    )
+    assert req["updateTable"]["table"]["rowsProperties"] == {
+        "secondBandColorStyle": {"themeColor": "ACCENT3"}
+    }
+    assert req["updateTable"]["fields"] == "rowsProperties.secondBandColorStyle"
+
+
+def test_build_update_table_request_rows_properties_with_other_fields_mask_order():
+    """rowsProperties masks alongside name in payload insertion order."""
+    services = _service_with_sheet_index()
+    req = build_update_table_request(
+        services,
+        SPREADSHEET_ID,
+        {"tableId": "abc", "name": "N", "rowsProperties": {"header": "#000000"}},
+    )
+    assert req["updateTable"]["fields"] == "name,rowsProperties.headerColorStyle"
+
+
+def test_build_update_table_request_empty_rows_properties_is_noop_payload():
+    """tableId + empty rowsProperties contributes no token -> refuse a no-op write."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_update_table_request(
+            services, SPREADSHEET_ID, {"tableId": "abc", "rowsProperties": {}}
+        )
+    assert exc.value.code == "empty_payload"
+
+
+def test_build_rows_properties_rejects_non_dict():
+    with pytest.raises(SheetsError) as exc:
+        tables._build_rows_properties(["#FF0000"])
+    assert exc.value.code == "bad_table"
+
+
+def test_build_rows_properties_rejects_bad_color():
+    with pytest.raises(SheetsError) as exc:
+        tables._build_rows_properties({"header": "not-a-color"})
+    assert exc.value.code == "bad_table"
+    assert "rowsProperties.header" in str(exc.value)
+
+
+def test_build_rows_properties_ignores_unknown_keys():
+    """Only the four recognised colors are honored; stray keys are ignored, not emitted."""
+    out = tables._build_rows_properties({"header": "#FF0000", "bogus": "#00FF00"})
+    assert out == {"headerColorStyle": {"rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}}}
+
+
 # =========================================================================== round-trip
+
+
+def test_round_trip_rows_properties_hex_and_theme():
+    """rowsProperties built via add_table serializes back to the SAME terse colors.
+
+    Closes the CRUD loop for T2.6: terse {header, secondBand} colors -> Google *ColorStyle
+    (write) -> serialize_table reads them back to the identical hex / theme strings.
+    """
+    services = _service_with_sheet_index()
+    req = build_add_table_request(
+        services,
+        SPREADSHEET_ID,
+        "Sheet1!A1:C100",
+        {
+            "name": "T",
+            "rowsProperties": {"header": "#FFCDD2", "secondBand": "theme:ACCENT2"},
+        },
+    )
+    built_table = req["addTable"]["table"]
+    built_table["tableId"] = "rt"
+    out = serialize_table(built_table, services, SPREADSHEET_ID)
+    assert out["rowsProperties"] == {"header": "#FFCDD2", "secondBand": "theme:ACCENT2"}
 
 
 def test_round_trip_serialize_matches_built_dropdown_validation():

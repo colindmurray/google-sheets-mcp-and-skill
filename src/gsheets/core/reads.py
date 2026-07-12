@@ -26,6 +26,7 @@ from .flatten import flatten_cell_format
 from .pivot import serialize_pivot
 from .richtext import serialize_text_runs
 from .rules import validation_to_rule
+from .serializers.chips import serialize_chip_runs
 from .service import SheetsServices
 from .values import pad_jagged
 
@@ -36,7 +37,8 @@ from .values import pad_jagged
 # The NARROW mask: only the cheapest length-yielding subfields of the protectedRanges /
 # conditionalFormats arrays (DESIGN §3.3). MUST NOT widen to whole rule/protected bodies.
 _OVERVIEW_FIELDS = (
-    "properties(title,locale,timeZone),"
+    "properties(title,locale,timeZone,"
+    "spreadsheetTheme(primaryFontFamily,themeColors(colorType,color))),"
     "sheets.properties("
     "sheetId,title,index,sheetType,gridProperties,tabColorStyle"
     "),"
@@ -100,7 +102,59 @@ def overview(services: SheetsServices, spreadsheet_id: str) -> dict:
     if time_zone:
         out["timeZone"] = time_zone
 
+    # Theme-color resolver (T2.1): flatten each themeColors[] pair to a compact NAME->hex map so an
+    # agent can resolve any ``theme:NAME`` it reads elsewhere to the sheet's actual concrete color.
+    # Omitted gracefully when the workbook carries no theme.
+    theme_map = _build_theme_map(props.get("spreadsheetTheme"))
+    if theme_map:
+        out["theme"] = theme_map
+    theme_font = _theme_font_family(props.get("spreadsheetTheme"))
+    if theme_font:
+        out["themeFontFamily"] = theme_font
+
     return out
+
+
+def _build_theme_map(spreadsheet_theme: object) -> dict | None:
+    """Flatten a Google ``SpreadsheetTheme`` to a compact ``{colorType: "#RRGGBB"}`` map (T2.1).
+
+    Each ``ThemeColorPair`` maps a ``colorType`` (``TEXT``/``BACKGROUND``/``ACCENT1..6``/``LINK``)
+    to a concrete ``color`` (a ``ColorStyle``); the pair's color is flattened through the existing
+    :func:`gsheets.core.colors.color_style_to_hex` so an agent can resolve any ``theme:NAME`` it
+    reads anywhere to the workbook's real color. The unspecified sentinel and any pair whose color
+    can't be flattened are skipped. Returns ``None`` when there is no usable theme (caller omits the
+    ``theme`` key entirely — token efficiency).
+    """
+    if not isinstance(spreadsheet_theme, dict) or not spreadsheet_theme:
+        return None
+    from . import colors
+
+    out: dict = {}
+    for pair in spreadsheet_theme.get("themeColors") or []:
+        if not isinstance(pair, dict):
+            continue
+        color_type = pair.get("colorType")
+        if not color_type or color_type == "THEME_COLOR_TYPE_UNSPECIFIED":
+            continue
+        color = pair.get("color")
+        if not isinstance(color, dict) or not color:
+            continue
+        try:
+            out[color_type] = colors.color_style_to_hex(color)
+        except ValueError:
+            # A malformed pair (neither theme nor rgb) is skipped rather than failing overview.
+            continue
+    return out or None
+
+
+def _theme_font_family(spreadsheet_theme: object) -> str | None:
+    """Return the theme's ``primaryFontFamily`` (surfaced as ``themeFontFamily``), or ``None``."""
+    if not isinstance(spreadsheet_theme, dict):
+        return None
+    font = spreadsheet_theme.get("primaryFontFamily")
+    if isinstance(font, str) and font:
+        return font
+    return None
 
 
 def _overview_sheet(entry: dict) -> dict:
@@ -175,6 +229,7 @@ def inspect(
     include_validation: bool = True,
     include_rich_text: bool = False,
     include_pivot: bool = False,
+    chips: bool = False,
 ) -> dict:
     """Flagship rich read: values + formulas + both formats + merges + validation (DESIGN §3.3).
 
@@ -191,8 +246,10 @@ def inspect(
       segment) and/or ``"hyperlink": "https://…"`` ONLY when it carries them.
     - ``include_pivot`` (DESIGN §X.6): adds ``pivotTable`` to the per-cell mask; the
       pivot's anchor (top-left) cell gains ``"pivot": {…}`` ONLY when present.
-    In compact mode, two cells differing in ``runs``/``hyperlink``/``pivot`` never merge into one
-    run (``_run_key`` includes a stable repr of each).
+    - ``chips`` (T2.2): adds ``chipRuns`` to the per-cell mask; a cell gains ``"chips": [ChipRun,
+      …]`` (each smart chip serialized to ``{start, kind, …}``) ONLY when it carries chip runs.
+    In compact mode, two cells differing in ``runs``/``hyperlink``/``pivot``/``chips`` never merge
+    into one run (``_run_key`` includes a stable repr of each).
 
     Args:
         services: The authed handle.
@@ -207,6 +264,8 @@ def inspect(
             ``runs``/``hyperlink`` only when present (§X.1). Default ``False``.
         include_pivot: Add ``pivotTable`` to the mask; attach ``pivot`` to its anchor cell only
             when present (§X.6). Default ``False``.
+        chips: Add ``chipRuns`` to the mask; attach ``chips`` (serialized smart chips) to a cell
+            only when it carries chip runs (T2.2). Default ``False``.
 
     Returns:
         ``{"ok": True, "spreadsheetId": ..., "sheet": ..., "range": ..., "rows": ...,
@@ -223,6 +282,7 @@ def inspect(
         include_validation=include_validation,
         include_rich_text=include_rich_text,
         include_pivot=include_pivot,
+        include_chips=chips,
     )
 
     try:
@@ -257,6 +317,7 @@ def inspect(
         include_validation=include_validation,
         include_rich_text=include_rich_text,
         include_pivot=include_pivot,
+        include_chips=chips,
         services=services,
         spreadsheet_id=spreadsheet_id,
     )
@@ -295,6 +356,7 @@ def _serialize_cells(
     include_validation: bool,
     include_rich_text: bool = False,
     include_pivot: bool = False,
+    include_chips: bool = False,
     services: SheetsServices | None = None,
     spreadsheet_id: str | None = None,
 ) -> dict:
@@ -335,6 +397,7 @@ def _serialize_cells(
         include_validation=include_validation,
         include_rich_text=include_rich_text,
         include_pivot=include_pivot,
+        include_chips=include_chips,
         services=services,
         spreadsheet_id=spreadsheet_id,
     )
@@ -358,6 +421,7 @@ def _inspect_fields(
     include_validation: bool,
     include_rich_text: bool = False,
     include_pivot: bool = False,
+    include_chips: bool = False,
 ) -> str:
     """Build the tight per-cell ``fields`` mask, trimmed by the include_* flags (DESIGN §3.3).
 
@@ -387,6 +451,13 @@ def _inspect_fields(
         cell_fields.append("hyperlink")
     if include_pivot:
         cell_fields.append("pivotTable")
+    if include_chips:
+        # Tight sub-mask matching exactly what the chip serializer reads (T2.2) — never the whole
+        # chipRuns blob.
+        cell_fields.append(
+            "chipRuns(startIndex,chip(personProperties(email,displayFormat),"
+            "richLinkProperties(uri,mimeType)))"
+        )
 
     values_mask = f"values({','.join(cell_fields)})"
     data_mask = f"data(rowData({values_mask}),startRow,startColumn)"
@@ -404,6 +475,7 @@ def _build_cell_grid(
     include_validation: bool,
     include_rich_text: bool = False,
     include_pivot: bool = False,
+    include_chips: bool = False,
     services: SheetsServices | None = None,
     spreadsheet_id: str | None = None,
 ) -> list[list[dict | None]]:
@@ -429,6 +501,7 @@ def _build_cell_grid(
                     include_validation=include_validation,
                     include_rich_text=include_rich_text,
                     include_pivot=include_pivot,
+                    include_chips=include_chips,
                     services=services,
                     spreadsheet_id=spreadsheet_id,
                 )
@@ -446,15 +519,17 @@ def _build_cell(
     include_validation: bool,
     include_rich_text: bool = False,
     include_pivot: bool = False,
+    include_chips: bool = False,
     services: SheetsServices | None = None,
     spreadsheet_id: str | None = None,
 ) -> dict | None:
     """Build one structured cell dict (no ``a1`` yet), or ``None`` if the cell is empty.
 
     A cell is "empty" when it carries no value, no formula, no formatting, no note, no
-    validation, no rich-text runs, no hyperlink, and no pivot under the requested mask — those
-    collapse to ``None`` so compact runs drop them and non-compact reads pad them as blanks. The
-    rich-text/hyperlink/pivot enrichments (§X.1/§X.6) are attached ONLY when present on the cell.
+    validation, no rich-text runs, no hyperlink, no pivot, and no smart chips under the requested
+    mask — those collapse to ``None`` so compact runs drop them and non-compact reads pad them as
+    blanks. The rich-text/hyperlink/pivot/chips enrichments (§X.1/§X.6/T2.2) are attached ONLY when
+    present on the cell.
     """
     out: dict = {}
 
@@ -503,6 +578,12 @@ def _build_cell(
         pivot = cell.get("pivotTable")
         if isinstance(pivot, dict) and pivot:
             out["pivot"] = serialize_pivot(pivot, services, spreadsheet_id)
+
+    if include_chips:
+        # Smart chips (T2.2) — attach ONLY when the cell actually has chipRuns.
+        chips = serialize_chip_runs(cell.get("chipRuns"))
+        if chips:
+            out["chips"] = chips
 
     return out or None
 
@@ -627,10 +708,10 @@ def _run_key(cell: dict | None) -> tuple:
     """A hashable identity key for a cell so two equal cells merge into one run.
 
     Two cells merge iff their ``value``, ``formula``, ``format``, ``note``, ``validationRule``,
-    AND the rich-text ``runs`` / ``hyperlink`` / ``pivot`` enrichments are all identical (DESIGN
-    §3.3, §X.1). ``None`` (empty) cells never merge with a non-empty cell and are dropped
-    entirely from runs. The runs/hyperlink/pivot keys are absent on cells read without those
-    flags, so the key degenerates to the base identity (no behavior change by default).
+    AND the rich-text ``runs`` / ``hyperlink`` / ``pivot`` / ``chips`` enrichments are all identical
+    (DESIGN §3.3, §X.1, T2.2). ``None`` (empty) cells never merge with a non-empty cell and are
+    dropped entirely from runs. The runs/hyperlink/pivot/chips keys are absent on cells read without
+    those flags, so the key degenerates to the base identity (no behavior change by default).
     """
     if cell is None:
         return ("__empty__",)
@@ -643,6 +724,7 @@ def _run_key(cell: dict | None) -> tuple:
         _stable_repr(cell.get("runs")),
         cell.get("hyperlink"),
         _stable_repr(cell.get("pivot")),
+        _stable_repr(cell.get("chips")),
     )
 
 
@@ -751,8 +833,8 @@ def _make_run(
 
     The run carries ``a1Range`` (a bare ``"A1:B2"`` with no sheet prefix), ``value``,
     ``formula`` (``None`` when the cell has none), ``format`` (the §3.3 single format), and —
-    only when set — ``note``, ``validationRule``, and the §X.1/§X.6 enrichments ``runs`` /
-    ``hyperlink`` / ``pivot``.
+    only when set — ``note``, ``validationRule``, and the §X.1/§X.6/T2.2 enrichments ``runs`` /
+    ``hyperlink`` / ``pivot`` / ``chips``.
     """
     # A run is ALWAYS rendered as a "lo:hi" rectangle, even when it is a single cell
     # (DESIGN §3.3: a 1x1 run degenerates to e.g. "D7:D7", not "D7").
@@ -786,6 +868,9 @@ def _make_run(
     pivot = cell.get("pivot")
     if pivot:
         run["pivot"] = pivot
+    chips = cell.get("chips")
+    if chips:
+        run["chips"] = chips
     return run
 
 

@@ -76,8 +76,10 @@ Conventions:
 Understand (read-only):
 
 - `overview <ID>` — cheap orientation: title, tabs, sizes, frozen panes, per-sheet
-  protected/conditional-format counts, named ranges, and the spreadsheet `locale` / `timeZone`
-  (date/number interpretation signal). No grid data. Start here.
+  protected/conditional-format counts, named ranges, the spreadsheet `locale` / `timeZone`
+  (date/number interpretation signal), and — when the workbook has a theme — the `theme` map
+  (`{ACCENT1:"#4285F4", TEXT:"#000000", …}`) + `themeFontFamily`. That map is the RESOLVER for the
+  `theme:NAME` colors every other read emits. No grid data. Start here.
 - `describe <ID> <RANGE...>` — the "understand a region" verb: ONE call returns, per range, the
   cells (values + formulas + both formats + validation), the sheet's merges, the conditional-format
   rules that INTERSECT that range, its tables, banding, and protected ranges, plus a validation
@@ -89,9 +91,11 @@ Understand (read-only):
 - `inspect <ID> <RANGE>` — flagship rich read: per-cell values + formulas + userEntered &
   effective formats + merges + validation. `--compact` collapses repeats into rectangular runs.
   `--rich-text` adds per-run rich text (styled segments + in-cell links) and the cell `hyperlink`;
-  `--pivot` adds pivot-table definitions (both attached only to the cells that have them). Reach for
-  `inspect` when you want one tab/range richly (or the rich-text / pivot / compact-runs facets);
-  `describe` when you want the region's structure + CF scoped alongside the cells.
+  `--pivot` adds pivot-table definitions; `--chips` adds serialized smart chips
+  (person/file/place/finance/rating) — the only way to recover a chip that otherwise reads back as
+  plain text (all three attached only to the cells that have them). Reach for `inspect` when you
+  want one tab/range richly (or the rich-text / pivot / chips / compact-runs facets); `describe`
+  when you want the region's structure + CF scoped alongside the cells.
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
   (`all` returns formulas and computed values side by side). `--major {rows,columns}` (default
   `rows`; MCP `major_dimension`) transposes the read so a column-oriented region comes back keyed by
@@ -119,14 +123,21 @@ Understand (read-only):
 Change (writes):
 
 - `write-values <ID> ...` — write/update one or more ranges (USER_ENTERED by default).
+- `write-values-by-data-filter <ID> --data-json '[...]'` — the insert-proof write twin of
+  `read-values --data-filter-json`: each item carries ONE selector (`{"a1":…}` / `{"gridRange":…}` /
+  `{"developerMetadataLookup":{"metadataKey":…}}`) + its `values` (+ optional `"major":"columns"`),
+  so a write still lands after rows/cols shift. USER_ENTERED by default; overwrites the addressed cells.
 - `append-rows <ID> <RANGE> ...` — append rows after a table's last row (never overwrites).
 - `clear <ID> <RANGE...>` — clear values (and optionally formats/validation/notes).
+- `clear-by-data-filter <ID> --data-filter-json '[...]'` — clear VALUES from ranges addressed by the
+  same insert-proof selectors (values only; formats/validation/notes untouched).
 - `format <ID> <RANGE> ...` — apply background, font/bold/italic/size/color, number/date pattern,
   alignment, wrap, borders, and notes; the field mask is auto-built from what you pass.
 - `set-conditional-format <ID> --action {add,update,delete} ...` — add/update/delete a boolean or
   gradient rule by positional `index` (array order = priority).
 - `set-validation <ID> <RANGE> ...` — set or clear data validation (dropdowns, number ranges,
-  custom formulas).
+  custom formulas). The structured `rule` accepts an optional `inputMessage` (viewer-facing
+  help/error tooltip) that `inspect` reads back and this writes — a full round-trip.
 - `comments <ID> --action {read,create,reply,resolve,delete}` — Drive threaded comments (full
   CRUD). `read` (default) lists author/text/resolved-state/replies/quoted snippet (`--no-resolved`
   omits resolved; `--include-deleted` includes deleted). `create`/`reply` take `--content` (`create`
@@ -145,7 +156,9 @@ Change (writes):
   operations + a full sizing toolkit: insert/delete/move/append rows or columns; `auto_resize`
   (auto-FIT to content) vs `set_props {"pixelSize"}` (FIXED/forced size — won't auto-grow);
   `set_props {"runs":[…]}` to set many sizes (rows+cols) in one call; set/clear hidden; and `read`
-  hidden rows/cols (add `{"sizes":true}` for `rowHeights`/`colWidths` pixel runs). One tab (`--sheet`).
+  hidden rows/cols — `hiddenRows`/`hiddenCols` (user-hidden) AND `filteredRows`/`filteredCols`
+  (hidden by an active filter, read-only; a viewer sees a row iff it is in NEITHER) — add
+  `{"sizes":true}` for `rowHeights`/`colWidths` pixel runs. One tab (`--sheet`).
 - `manage-sheets <ID> --action {add,delete,duplicate,rename,reorder}` — manage tabs.
 - `metadata <ID> --action {read,create,update,delete}` — developer metadata (durable anchors).
 - `charts <ID> --action {create,update,delete,read}` — embedded charts (read = metadata only).
@@ -330,14 +343,17 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   declared it — so a column can report `DOUBLE` while holding text, carry no type at all, or have a
   stray name like `Column 23`. Faithful, but don't auto-generate a schema from `tables[].columns[]
   .type` and trust it; verify against the actual cell values.
-- Theme colors read back as `theme:NAME` (e.g. `theme:ACCENT1`), not a resolved hex. If you compare
-  a read-back color against a literal `#RRGGBB`, a theme-colored cell will not match — that is
-  expected, not a bug.
-- Read by a durable anchor when A1 shifts. `read-values` and `describe` accept `--data-filter-json`
-  (MCP `data_filters`) instead of A1 — each selector is exactly one of `{"a1":...}`,
-  `{"gridRange":...}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`. Pair it with
-  a `metadata --action create` anchor so a region survives inserted rows/cols that would break a
-  hard-coded A1 range. You pass A1 ranges OR a data filter, never both (core enforces exactly one).
+- Theme colors read back as `theme:NAME` (e.g. `theme:ACCENT1`), not a resolved hex. To resolve one
+  to a concrete `#RRGGBB`, look it up in `overview`'s `theme` map (`theme["ACCENT1"]`). If you
+  compare a raw read-back color against a literal `#RRGGBB` WITHOUT resolving, a theme-colored cell
+  will not match — that is expected, not a bug.
+- Read AND write by a durable anchor when A1 shifts. `read-values` and `describe` accept
+  `--data-filter-json` (MCP `data_filters`) instead of A1 — each selector is exactly one of
+  `{"a1":...}`, `{"gridRange":...}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`.
+  The write side is symmetric: `write-values-by-data-filter` / `clear-by-data-filter` take the same
+  selectors. Pair any of them with a `metadata --action create` anchor so a region survives inserted
+  rows/cols that would break a hard-coded A1 range. You pass A1 ranges OR a data filter, never both
+  (core enforces exactly one).
 - Single-quote A1 ranges in the shell. A range like `'WEEK-TEMPLATES!AS$START'` contains `!` and
   `$`, which zsh/bash will history-expand or variable-expand if unquoted, silently corrupting the
   argument. Always wrap A1 ranges in single quotes.

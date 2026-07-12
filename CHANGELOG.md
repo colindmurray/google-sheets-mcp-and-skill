@@ -43,7 +43,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     leaving an existing rule wedged between them.
 
 ### Added
-- Nothing yet.
+- **Tier 2 audit — on-thesis visual/formatting read richness (audit #17, #19, #20, #21, #22, #26).**
+  Six read-richness features so an agent can losslessly see what a viewer sees. All logic lives in
+  `core/**` (identical from the MCP server and the CLI); the two adapters, the Pydantic mirror
+  models, the bundled skill, and `docs/` were wired to match.
+  - **#26 Spreadsheet theme resolver (T2.1).** `overview` now returns a compact `theme` map
+    (`{ACCENT1: "#4285F4", TEXT: "#000000", …}`) plus `themeFontFamily` when the workbook carries a
+    theme — the resolver an agent uses to turn any `theme:NAME` color it reads elsewhere into a
+    concrete hex. Omitted when the workbook has no theme.
+  - **#19 Smart-chip reads (T2.2).** `inspect --chips` (MCP `chips=true`) surfaces a cell's
+    `chipRuns` — person/file/place/finance/rating smart chips that otherwise read back as plain text
+    — as terse `{start, kind, email?/uri?/mimeType?}` structs, attached only to cells that carry
+    them (opt-in, zero cost otherwise). New `core/serializers/chips.py` serializer.
+  - **#21 `hiddenByFilter` reads (T2.3).** `dimensions --action read` now also returns
+    `filteredRows`/`filteredCols` (rows/cols hidden by an ACTIVE filter, read-only) alongside the
+    user-hidden `hiddenRows`/`hiddenCols` — the two causes are independent, so an agent can report
+    which rows a viewer actually sees.
+  - **#22 Validation `inputMessage` round-trip (T2.4).** The structured `ValidationRule` now carries
+    the viewer-facing `inputMessage` help/error tooltip on both read (`inspect`) and write
+    (`set-validation`), so it survives a read-modify-write instead of being silently dropped.
+  - **#20 Table `rowsProperties` colors (T2.6).** `structure`'s native-Table read/write now covers
+    the table-level header/band/footer fills (`rowsProperties.{header, firstBand, secondBand,
+    footer}` as hex / `theme:NAME`), keyed identically on read and write for a full round-trip.
+  - **#17 DataFilter value writes/clears (T2.5).** Two new commands/tools —
+    `write-values-by-data-filter` (`sheets_write_values_by_data_filter`) and `clear-by-data-filter`
+    (`sheets_clear_by_data_filter`) — write/clear ranges addressed by a SYMBOLIC `DataFilter` (A1 /
+    gridRange / `developerMetadataLookup`), the insert-proof write twins of `read_values`'s
+    `data_filters` path (via `values.batchUpdateByDataFilter` / `batchClearByDataFilter`). Restores
+    read/write symmetry for durable, metadata-anchored addressing.
 
 ## [0.5.1] - 2026-07-11
 

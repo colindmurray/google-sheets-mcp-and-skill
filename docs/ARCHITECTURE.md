@@ -52,7 +52,7 @@ Five invariants follow from that thesis and are not negotiable:
                 │  format · paths · retry   +                          │
                 │                          serializers:                │
                 │  richtext · pivot · tables · filters · banding ·     │
-                │  slicers · comments                                  │
+                │  slicers · comments · serializers/chips              │
                 │                                                      │
                 │  ZERO imports of fastmcp / mcp / argparse / pydantic │
                 └───────────────────────┬─────────────────────────────┘
@@ -101,7 +101,8 @@ Helper modules with disjoint responsibilities back the function surface:
 | `paths` | `resolve_out_path()` + `write_file_handle()` — the MCP `out_path` safety check and file-output handle; see below. |
 | `retry` | `RetryPolicy` (the frozen policy dataclass) + `execute_with_retry()` + a `_ACTIVE_POLICY` contextvar with `current_policy()` / `activate()` — the pure retry/backoff mechanism, off by default; see below. |
 
-Seven additional pure serializer modules (added in v0.2) flatten the richer read surface
+Eight additional pure serializer modules (seven added in v0.2, plus `serializers/chips` in the
+audit-remediation tier) flatten the richer read surface
 into the same terse, structured, round-trippable line style. Each takes already-resolved
 A1 strings (the owning read function resolves `GridRange → A1` first, mirroring the
 condformat boundary) and returns plain dicts carrying a `line` field:
@@ -115,6 +116,7 @@ condformat boundary) and returns plain dicts carrying a `line` field:
 | `banding` | `serialize_banding()` + `build_{add,update,delete}_banding_request()` — alternating-color band ranges. |
 | `slicers` | `serialize_slicer()` — slicer read shape — plus `build_{add,update,delete}_slicer_request()` for the slicer write CRUD. |
 | `comments` | `serialize_comment()` — flatten a Drive `Comment` (author, content, replies); the `comments` core function (full CRUD over the Drive API) lives here too. |
+| `serializers/chips` | `serialize_chip_runs()` — render a cell's `chipRuns` (person/file/place/finance smart chips) to terse `{start, kind, email?/uri?/mimeType?}` dicts, attached only to cells that carry chips (T2.2). |
 
 Five additional top-level core functions live in their own modules and stay boundary-pure:
 
@@ -227,7 +229,7 @@ Two write-side subtleties worth knowing:
 
 ## The function surface
 
-Twenty-two core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
+Twenty-four core functions, each exposed as one MCP tool and one CLI subcommand (the CLI adds an
 auth-only `auth` subcommand that has no core function). The understanding path is
 `overview → describe → inspect → read_conditional_formats` (`describe` is the unified one-call
 region read that subsumes the latter three for a single region), with `formula_patterns` as the
@@ -236,24 +238,26 @@ the raw escape hatch is presented last.
 
 | Core fn | What it does | Kind |
 |---|---|---|
-| `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`. No grid data. | read |
-| `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`) and pivot-table definitions (`include_pivot`). | read |
+| `overview` | Cheap orientation snapshot: title, tabs (dimensions, frozen, counts), named ranges, spreadsheet `locale`/`timeZone`, and the workbook `theme` map (`{NAME: hex}`) + `themeFontFamily` (T2.1 — the resolver for `theme:NAME` colors). No grid data. | read |
+| `inspect` | The primary rich read: values + formulas + both formats + merges + validation over a tight `fields` mask; optional compact runs; opt-in rich-text runs + in-cell links (`include_rich_text`), pivot-table definitions (`include_pivot`), and smart chips (`chips` — person/file/place/finance, T2.2), each attached only to cells that carry them. | read |
 | `describe` | The unified "understand a region" read: ONE `spreadsheets.get(includeGridData=True)` over a tight union mask returns, per requested range, the cells (reusing `inspect`'s flatten), the sheet's merges, the conditional-format rules **intersecting** that range (range-scoped CF, via `addressing.gridranges_intersect`), its tables / banding / protected ranges (reusing the `structure` serializers), and a validation summary. Multi-range and multi-sheet; collapses 3-4 reads into one. No cache. | read |
 | `formula_patterns` | Collapse a region's REPEATED formulas to the distinct templates per column: reads only formulas (column-major, no computed bloat), dedupes each column to its templates with relative row refs normalized to `{r}` / `{r±k}`, the row span(s) each covers, and (by default) one sample computed value. A column that does not reduce cleanly is emitted VERBATIM with `reduced=false`; `read_values(render="formula")` stays the lossless ground truth. A bounded / whole-column range returns exactly **one entry per requested column** — trailing all-blank columns (which the API omits) are padded as `{reduced:true, templates:[]}`; only an unbounded-column range (whole-row / whole-sheet) keeps the data-extent count (ISSUES.md #16). Lossy-but-honest, token-cheap on a wide grid. | read |
 | `read_values` | Values for one/more ranges with a render mode (`plain` / `unformatted` / `formula` / `all`). `diff_only` sparsifies the `render="all"` `computed` matrix against `values` (drops static-cell duplication); `max_cells` fails fast with `result_too_large` instead of blowing the caller's token cap. | read |
 | `read_conditional_formats` | Per-sheet conditional-format rules serialized to readable lines (the priority feature). | read |
 | `write_values` | Write/update one or more ranges; `USER_ENTERED` default; multi-range in one call. | write |
+| `write_values_by_data_filter` | Write/update ranges addressed by a SYMBOLIC `DataFilter` (A1 / gridRange / `developerMetadataLookup`) — the insert-proof write twin of `read_values`'s `data_filters` path, via `batchUpdateByDataFilter` (T2.5). | write |
 | `append_rows` | Append after the last row of a table (`INSERT_ROWS`, no overwrite). | write |
 | `clear` | Clear values, and optionally formats / validation / notes, from ranges. | write |
+| `clear_by_data_filter` | Clear cell VALUES from ranges addressed by a SYMBOLIC `DataFilter` — the insert-proof clear twin, via `batchClearByDataFilter` (T2.5). | write |
 | `format` | Apply cell formatting (background, font, number/date pattern, alignment, wrap, padding, borders, note) atomically with an auto fields mask. | write |
 | `set_conditional_format` | Add / update / delete a boolean or gradient rule by positional index; index-shift-safe batch form. | write |
-| `set_validation` | Set / clear data validation on a range (structured rule, round-trips from `inspect`). | write |
-| `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — plus the v0.2 reads (native tables, basic filter, filter views, banding, slicers) and writes (table / banding / filter / slicer CRUD, spreadsheet `title`/`locale`/`timeZone`). One structural interface. | read/write |
+| `set_validation` | Set / clear data validation on a range (structured rule, round-trips from `inspect`, including the viewer-facing `inputMessage` tooltip, T2.4). | write |
+| `structure` | Read or modify merges, named ranges, protected ranges, frozen rows/cols, tab color, dimension groups — plus the v0.2 reads (native tables incl. `rowsProperties` header/band/footer colors (T2.6), basic filter, filter views, banding, slicers) and writes (table / banding / filter / slicer CRUD, spreadsheet `title`/`locale`/`timeZone`). One structural interface. | read/write |
 | `manage_sheets` | Add / delete / duplicate / rename / reorder tabs; returns new ids. | write |
 | `metadata` | Read / write developer metadata for durable row/column/sheet anchors. | read/write |
 | `charts` | Create / update / delete / read embedded charts (read returns metadata only in v1). | read/write |
 | `data_ops` | Single-request data verbs: `find_replace`, `delete_duplicates`, `trim_whitespace`, `sort_range`, `text_to_columns`, `auto_fill`, `copy_paste`, `cut_paste`. | write |
-| `dimensions` | Row/column ops: `insert` / `delete` / `move` / `append`, `auto_resize`, `set_props` (height/width/hide), and `read` (which rows/cols are hidden). | read/write |
+| `dimensions` | Row/column ops: `insert` / `delete` / `move` / `append`, `auto_resize`, `set_props` (height/width/hide), and `read` (which rows/cols are hidden — `hiddenByUser` AND, independently, `hiddenByFilter` via `filteredRows`/`filteredCols`, T2.3). | read/write |
 | `comments` | Drive threaded comments on the spreadsheet file (author, content, replies, resolved state). Full CRUD via an `action` dispatch (`read` / `create` / `reply` / `resolve` / `delete`); uses the Drive API, not the Sheets API. | read/write |
 | `export` | Download the workbook (`pdf` / `xlsx` / `ods`, via Drive `files.export`) or one sheet (`csv` / `tsv`, serialized locally from values) to a local file. | read |
 | `read_many` | Fan a values or summary read across many spreadsheets; a bad id is captured as a per-file `{ok: false, error}` entry instead of failing the batch. | read |
@@ -345,7 +349,7 @@ same discipline: **flattened hex colors**, a terse `[range] kind …` (or `kind 
 `line` for humans/AI, the structured fields alongside the line for round-trip, and
 **omit-when-absent** so a sparse value stays token-cheap. Each serializer takes
 already-resolved A1 strings; the owning read function resolves `GridRange → A1` first.
-Per-cell rich data (runs, hyperlink, pivot) is attached **only to a cell that actually
+Per-cell rich data (runs, hyperlink, pivot, chips) is attached **only to a cell that actually
 carries it** — never emitted as an empty placeholder. The slicer and comment serializers gained
 write builders in v0.2 (`structure` slicer CRUD; `comments` action CRUD). The last two
 subsections (`export`, `read_many`) are not serializers — they are the file-output and

@@ -143,6 +143,24 @@ def patched(monkeypatch):
             },
         ),
     )
+    # T2.5 DataFilter value write/clear twins live on the ``core.values`` submodule (not re-exported
+    # from ``gsheets.core``); the CLI bodies reach them there, so patch them there.
+    monkeypatch.setattr(
+        cli.core.values,
+        "write_values_by_data_filter",
+        _make(
+            "write_values_by_data_filter",
+            {"ok": True, "spreadsheetId": "X", "updatedRanges": ["S!A1:B1"], "updatedCells": 2},
+        ),
+    )
+    monkeypatch.setattr(
+        cli.core.values,
+        "clear_by_data_filter",
+        _make(
+            "clear_by_data_filter",
+            {"ok": True, "spreadsheetId": "X", "clearedRanges": ["S!A1:B10"]},
+        ),
+    )
     # v0.2 cross-file + export extensions (DESIGN §3.x / §3.3): two NEW core fns the CLI dispatches.
     monkeypatch.setattr(
         cli.core,
@@ -625,6 +643,38 @@ def test_write_values_conflicting_forms_error(patched, capsys):
     assert "conflicting_args" in err
 
 
+def test_write_values_by_data_filter_dispatches_with_data_and_input(patched):
+    _run(
+        [
+            "write-values-by-data-filter",
+            "ID",
+            "--data-json",
+            '[{"developerMetadataLookup":{"metadataKey":"block:totals"},"values":[["x","y"]]}]',
+            "--input",
+            "raw",
+        ]
+    )
+    assert patched["name"] == "write_values_by_data_filter"
+    assert patched["spreadsheet_id"] == "ID"
+    assert patched["args"][0] == [
+        {"developerMetadataLookup": {"metadataKey": "block:totals"}, "values": [["x", "y"]]}
+    ]
+    assert patched["kwargs"]["input"] == "raw"
+
+
+def test_clear_by_data_filter_dispatches_with_selectors(patched):
+    _run(
+        [
+            "clear-by-data-filter",
+            "ID",
+            "--data-filter-json",
+            '[{"a1":"Sheet1!A1:B10"}]',
+        ]
+    )
+    assert patched["name"] == "clear_by_data_filter"
+    assert patched["args"][0] == [{"a1": "Sheet1!A1:B10"}]
+
+
 def test_format_border_flag_parsed(patched):
     _run(["format", "ID", "S!A1", "--bg", "#FFCDD2", "--bold", "--border", "top=SOLID:#000000"])
     # core.format(services, spreadsheet_id, range, fmt): range is args[0], fmt is args[1].
@@ -748,7 +798,8 @@ def test_build_parser_registers_every_subcommand():
             break
     expected = {
         "overview", "inspect", "read-values", "read-conditional-formats",
-        "write-values", "append-rows", "clear", "format", "set-conditional-format",
+        "write-values", "write-values-by-data-filter", "append-rows", "clear",
+        "clear-by-data-filter", "format", "set-conditional-format",
         "set-validation", "structure", "manage-sheets", "metadata", "charts",
         "batch", "auth",
         # v0.2 extensions (DESIGN §Extensions): three NEW subcommands.
@@ -796,6 +847,13 @@ def test_inspect_rich_flags_default_false(patched):
     kw = patched["kwargs"]
     assert kw["include_rich_text"] is False
     assert kw["include_pivot"] is False
+    # T2.2: chips is off by default too (zero added mask cost on the base call).
+    assert kw["chips"] is False
+
+
+def test_inspect_chips_flag_maps_to_core(patched):
+    _run(["inspect", "ID", "S!A1:B2", "--chips"])
+    assert patched["kwargs"]["chips"] is True
 
 
 def test_data_ops_dispatches_with_action_and_params(patched):

@@ -691,6 +691,26 @@ class TestValidationToRule:
         out = validation_to_rule(google)
         assert out["values"] == ["PAST_MONTH"]
 
+    def test_input_message_surfaced_when_present(self):
+        # AUDIT #22 (T2.4): the viewer-facing help/error text must survive a read so a
+        # read-modify-write doesn't silently erase it.
+        google = {
+            "condition": {
+                "type": "ONE_OF_LIST",
+                "values": [{"userEnteredValue": "Yes"}, {"userEnteredValue": "No"}],
+            },
+            "inputMessage": "Pick one of the allowed values",
+            "strict": True,
+            "showCustomUi": True,
+        }
+        out = validation_to_rule(google)
+        assert out["inputMessage"] == "Pick one of the allowed values"
+
+    def test_input_message_omitted_when_absent(self):
+        google = {"condition": {"type": "BOOLEAN"}, "strict": True}
+        out = validation_to_rule(google)
+        assert "inputMessage" not in out
+
     def test_non_dict_raises(self):
         with pytest.raises(SheetsError) as ei:
             validation_to_rule("nope")
@@ -771,6 +791,17 @@ class TestRuleToValidation:
         assert out["strict"] is False
         assert out["showCustomUi"] is False
 
+    def test_input_message_emitted_when_present(self):
+        # AUDIT #22 (T2.4): a rule carrying the help text writes it back to the Google rule.
+        out = rule_to_validation(
+            {"type": "ONE_OF_LIST", "values": ["Yes"], "inputMessage": "Pick one"}
+        )
+        assert out["inputMessage"] == "Pick one"
+
+    def test_input_message_omitted_when_absent(self):
+        out = rule_to_validation({"type": "BOOLEAN"})
+        assert "inputMessage" not in out
+
 
 class TestValidationRoundTrip:
     """``validation_to_rule`` -> ``rule_to_validation`` reproduces the Google rule exactly."""
@@ -814,6 +845,16 @@ class TestValidationRoundTrip:
                 },
                 "strict": True,
                 "showCustomUi": False,
+            },
+            {
+                # AUDIT #22 (T2.4): a rule carrying inputMessage must round-trip byte-identical.
+                "condition": {
+                    "type": "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": "Yes"}, {"userEnteredValue": "No"}],
+                },
+                "inputMessage": "Choose Yes or No",
+                "strict": True,
+                "showCustomUi": True,
             },
         ],
     )

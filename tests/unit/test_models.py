@@ -650,6 +650,105 @@ def test_overview_gains_locale_and_timezone():
     assert m.locale == "en_US" and m.timeZone == "America/New_York"
 
 
+def test_overview_gains_theme_map_and_font():
+    # T2.1: overview now surfaces a theme NAME->hex resolver + themeFontFamily.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "title": "Budget",
+        "theme": {"ACCENT1": "#4285F4", "TEXT": "#000000"},
+        "themeFontFamily": "Roboto",
+        "sheets": [],
+        "namedRanges": [],
+    }
+    _roundtrips(models.OverviewResult, data)
+    m = models.OverviewResult.model_validate(data)
+    assert m.theme["ACCENT1"] == "#4285F4"
+    assert m.themeFontFamily == "Roboto"
+
+
+def test_inspect_cell_carries_serialized_chips():
+    # T2.2: a cell gains a ``chips`` list only when it has chip runs.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "sheet": "S",
+        "range": "A1:A1",
+        "rows": 1,
+        "cols": 1,
+        "cells": [
+            {
+                "a1": "A1",
+                "value": "Jane",
+                "chips": [{"start": 0, "kind": "person", "email": "jane@x.com"}],
+            }
+        ],
+        "merges": [],
+    }
+    _roundtrips(models.InspectResult, data)
+    m = models.InspectResult.model_validate(data)
+    assert m.cells[0].chips[0].kind == "person"
+    assert m.cells[0].chips[0].email == "jane@x.com"
+
+
+def test_dimensions_read_surfaces_filtered_indices():
+    # T2.3: read returns filteredRows/filteredCols independent of hiddenRows/hiddenCols.
+    data = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "action": "read",
+        "sheet": "S",
+        "hiddenRows": [2],
+        "hiddenCols": [],
+        "filteredRows": [5, 6],
+        "filteredCols": [],
+    }
+    _roundtrips(models.DimensionsResult, data)
+    m = models.DimensionsResult.model_validate(data)
+    assert m.filteredRows == [5, 6]
+    assert "2 filtered row" in m.terse
+
+
+def test_validation_rule_round_trips_input_message():
+    # T2.4: inputMessage rides on the structured ValidationRule shape.
+    rule = {"type": "ONE_OF_LIST", "values": ["Yes", "No"], "inputMessage": "Pick one"}
+    m = models.ValidationRule.model_validate(rule)
+    assert m.inputMessage == "Pick one"
+
+
+def test_table_carries_rows_properties_colors():
+    # T2.6: a table's header/band/footer colors round-trip under rowsProperties.
+    data = {
+        "tableId": "t1",
+        "name": "Sales",
+        "range": "S!A1:C10",
+        "columns": [{"name": "Region", "type": "TEXT"}],
+        "rowsProperties": {"header": "#FFCDD2", "secondBand": "theme:ACCENT2"},
+        "line": 'table "Sales" [S!A1:C10] cols: Region:TEXT rows: header=#FFCDD2, secondBand=theme:ACCENT2',
+    }
+    m = models.Table.model_validate(data)
+    assert m.rowsProperties.header == "#FFCDD2"
+    assert m.rowsProperties.secondBand == "theme:ACCENT2"
+
+
+def test_write_and_clear_by_data_filter_result_mirrors():
+    # T2.5: the DataFilter value write/clear result models mirror their core dicts.
+    w = {
+        "ok": True,
+        "spreadsheetId": "<YOUR_SPREADSHEET_ID>",
+        "updatedRanges": ["S!A1:B1"],
+        "updatedCells": 2,
+        "updatedRows": 1,
+        "updatedColumns": 2,
+    }
+    _roundtrips(models.WriteValuesByDataFilterResult, w)
+    assert "wrote 2 cell" in models.WriteValuesByDataFilterResult.model_validate(w).terse
+
+    c = {"ok": True, "spreadsheetId": "<YOUR_SPREADSHEET_ID>", "clearedRanges": ["S!A1:B10"]}
+    _roundtrips(models.ClearByDataFilterResult, c)
+    assert "cleared S!A1:B10" in models.ClearByDataFilterResult.model_validate(c).terse
+
+
 def test_data_ops_find_replace_result():
     data = {
         "ok": True,
@@ -784,8 +883,10 @@ def test_to_model_and_registry_cover_every_core_fn():
         "read_values",
         "read_conditional_formats",
         "write_values",
+        "write_values_by_data_filter",
         "append_rows",
         "clear",
+        "clear_by_data_filter",
         "format",
         "set_conditional_format",
         "set_validation",

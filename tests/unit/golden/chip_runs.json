@@ -1,0 +1,74 @@
+{
+  "chipRuns": [
+    {
+      "chip": {
+        "personProperties": {
+          "email": "johndoe@gmail.com",
+          "displayFormat": "DEFAULT"
+        }
+      }
+    },
+    {
+      "startIndex": 18,
+      "chip": {
+        "richLinkProperties": {
+          "uri": "https://docs.google.com/document/d/ABC123/edit",
+          "mimeType": "application/vnd.google-apps.document"
+        }
+      }
+    },
+    {
+      "startIndex": 40,
+      "chip": {
+        "richLinkProperties": {
+          "uri": "https://www.google.com/maps/place/Googleplex/@37.4,-122.0,17z"
+        }
+      }
+    },
+    {
+      "startIndex": 55,
+      "chip": {
+        "richLinkProperties": {
+          "uri": "https://www.google.com/finance/quote/GOOG:NASDAQ"
+        }
+      }
+    },
+    {
+      "startIndex": 70,
+      "chip": {
+        "richLinkProperties": {
+          "uri": "https://example.com/some/other/resource"
+        }
+      }
+    }
+  ],
+  "expected_chips": [
+    {
+      "start": 0,
+      "kind": "person",
+      "email": "johndoe@gmail.com",
+      "displayFormat": "DEFAULT"
+    },
+    {
+      "start": 18,
+      "kind": "file",
+      "uri": "https://docs.google.com/document/d/ABC123/edit",
+      "mimeType": "application/vnd.google-apps.document"
+    },
+    {
+      "start": 40,
+      "kind": "place",
+      "uri": "https://www.google.com/maps/place/Googleplex/@37.4,-122.0,17z"
+    },
+    {
+      "start": 55,
+      "kind": "finance",
+      "uri": "https://www.google.com/finance/quote/GOOG:NASDAQ"
+    },
+    {
+      "start": 70,
+      "kind": "richlink",
+      "uri": "https://example.com/some/other/resource"
+    }
+  ]
+}

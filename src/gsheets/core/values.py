@@ -424,6 +424,18 @@ def write_values(
     except HttpError as exc:
         raise classify_google_error(exc, account_email=services.account_email) from exc
 
+    return _summarize_value_update(spreadsheet_id, resp)
+
+
+def _summarize_value_update(spreadsheet_id: str, resp: dict) -> dict:
+    """Fold a ``batchUpdate``/``batchUpdateByDataFilter`` response into the standard write dict.
+
+    Both value-write APIs (literal ``batchUpdate`` and the DataFilter-addressed
+    ``batchUpdateByDataFilter``) return the SAME response shape: a ``responses[]`` list of
+    ``UpdateValuesResponse`` (each with ``updatedRange``/``updatedCells``/``updatedRows``/
+    ``updatedColumns``) plus authoritative top-level ``totalUpdated*`` totals. This shared
+    summarizer keeps the two writers' return contracts identical (DESIGN "no duplicated logic").
+    """
     updated_ranges: list[str] = []
     updated_cells = 0
     updated_rows = 0
@@ -445,6 +457,73 @@ def write_values(
         "updatedRows": resp.get("totalUpdatedRows", updated_rows),
         "updatedColumns": resp.get("totalUpdatedColumns", updated_columns),
     }
+
+
+def write_values_by_data_filter(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    data: list[dict],
+    *,
+    input: str = "user_entered",
+) -> dict:
+    """Write/update ranges addressed by SYMBOLIC ``DataFilter`` selectors (insert-proof).
+
+    The DataFilter counterpart of :func:`write_values` — the write-side symmetry for the
+    metadata-addressed *read* path (:func:`read_values` ``data_filters``). Each write item names
+    its target by a stable selector rather than a literal A1 string (which shifts when rows/columns
+    are inserted), then writes via ``values.batchUpdateByDataFilter``. Each ``data`` item carries
+    EXACTLY ONE selector inline — ``{"a1": "Sheet1!A1:B10"}`` | ``{"gridRange": {...}}`` |
+    ``{"developerMetadataLookup": {...}}`` (matches a block previously tagged via ``metadata``) —
+    plus ``values`` and an optional ``major``:
+
+        [{"developerMetadataLookup": {"metadataKey": "block:totals"}, "values": [["x", "y"]]}]
+
+    The selector is translated by the SHARED ``dataselector.build_data_filter`` the read path uses
+    (no duplicated selector logic), and wrapped under each request item's singular ``dataFilter``
+    key. Defaults to ``valueInputOption=USER_ENTERED`` (formulas work). ``major`` is ``"rows"``
+    (Google's default, omitted on the wire) | ``"columns"`` per item.
+
+    Args:
+        services: The authed handle.
+        spreadsheet_id: Target spreadsheet id.
+        data: List of ``{<selector>, "values", "major"?}`` write items (one selector each).
+        input: ``"user_entered"`` (default) | ``"raw"``.
+
+    Returns:
+        ``{"ok": True, "spreadsheetId": ..., "updatedRanges": [...], "updatedCells": ...,
+        "updatedRows": ..., "updatedColumns": ...}`` — same shape as :func:`write_values`.
+    """
+    if not data:
+        raise SheetsError(
+            "empty_payload", "write_values_by_data_filter requires at least one data item"
+        )
+    value_input_option = _resolve_input_option(input)
+
+    from .dataselector import build_data_filter
+
+    api_data: list[dict] = []
+    for item in data:
+        # ``build_data_filter`` reads ONLY the selector key from the item, ignoring the
+        # ``values``/``major`` siblings — so the whole item can be passed straight in.
+        data_filter = build_data_filter(services, spreadsheet_id, item)
+        entry: dict = {"dataFilter": data_filter, "values": item.get("values", [])}
+        major_option = _resolve_major_option(item.get("major", "rows"))
+        if major_option is not None:
+            entry["majorDimension"] = major_option
+        api_data.append(entry)
+
+    body = {"valueInputOption": value_input_option, "data": api_data}
+    try:
+        resp = (
+            services.sheets.spreadsheets()
+            .values()
+            .batchUpdateByDataFilter(spreadsheetId=spreadsheet_id, body=body)
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+    return _summarize_value_update(spreadsheet_id, resp)
 
 
 def append_rows(
@@ -618,4 +697,53 @@ def clear(
             "validation": validation,
             "notes": notes,
         },
+    }
+
+
+def clear_by_data_filter(
+    services: SheetsServices,
+    spreadsheet_id: str,
+    data_filters: list[dict],
+) -> dict:
+    """Clear cell VALUES from ranges addressed by SYMBOLIC ``DataFilter`` selectors (insert-proof).
+
+    The DataFilter counterpart of :func:`clear`'s values-only path — the write-side symmetry for the
+    metadata-addressed read path. Each selector names a region by a stable handle rather than a
+    literal A1 (which shifts on row/column inserts), then clears via ``values.batchClearByDataFilter``.
+    ``data_filters`` is the SAME public selector list the read path accepts — each item is one of
+    ``{"a1": "Sheet1!A1:B10"}`` | ``{"gridRange": {...}}`` | ``{"developerMetadataLookup": {...}}`` —
+    translated by the SHARED ``dataselector.build_data_filters`` (no duplicated selector logic; the
+    empty-list guard lives there too). Like ``values.batchClear``, this clears VALUES only, leaving
+    formats/validation/notes intact.
+
+    Args:
+        services: The authed handle.
+        spreadsheet_id: Target spreadsheet id.
+        data_filters: Non-empty list of selector dicts (one selector each).
+
+    Returns:
+        ``{"ok": True, "spreadsheetId": ..., "clearedRanges": [...]}`` — the A1 ranges Google
+        reports as cleared.
+    """
+    from .dataselector import build_data_filters
+
+    google_filters = build_data_filters(services, spreadsheet_id, data_filters)
+
+    try:
+        resp = (
+            services.sheets.spreadsheets()
+            .values()
+            .batchClearByDataFilter(
+                spreadsheetId=spreadsheet_id,
+                body={"dataFilters": google_filters},
+            )
+            .execute()
+        )
+    except HttpError as exc:
+        raise classify_google_error(exc, account_email=services.account_email) from exc
+
+    return {
+        "ok": True,
+        "spreadsheetId": spreadsheet_id,
+        "clearedRanges": resp.get("clearedRanges", []),
     }

@@ -52,8 +52,11 @@ EXPECTED = {
     # write_values OVERWRITES the target cells (ISSUES.md #11 / T3.1): the dangerous under-warning
     # was destructiveHint=False; it must warn destructive like clear/find_replace.
     "sheets_write_values": (False, True, "write"),
+    # DataFilter (insert-proof) value write/clear twins (T2.5) — both overwrite/clear cells.
+    "sheets_write_values_by_data_filter": (False, True, "write"),
     "sheets_append_rows": (False, False, "write"),
     "sheets_clear": (False, True, "write"),
+    "sheets_clear_by_data_filter": (False, True, "write"),
     "sheets_format": (False, False, "write"),
     "sheets_set_conditional_format": (False, True, "write"),
     # rule=None clears all validation on the range — a destructive path, like clear's.
@@ -75,7 +78,7 @@ def _tools() -> dict:
 def test_all_tools_register():
     tools = _tools()
     assert set(tools) == set(EXPECTED)
-    assert len(tools) == 22
+    assert len(tools) == 24
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))

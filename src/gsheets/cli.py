@@ -274,8 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_read_values(sub)
     _add_read_conditional_formats(sub)
     _add_write_values(sub)
+    _add_write_values_by_data_filter(sub)
     _add_append_rows(sub)
     _add_clear(sub)
+    _add_clear_by_data_filter(sub)
     _add_format(sub)
     _add_set_conditional_format(sub)
     _add_set_validation(sub)
@@ -355,6 +357,14 @@ def _add_inspect(sub) -> None:
         dest="include_pivot",
         action="store_true",
         help="include pivot-table definitions on anchor cells",
+    )
+    # T2.2: opt-in smart-chip serialization (person/file/place/finance/rating). Off by default →
+    # zero added token/mask cost; a cell gains ``chips`` only when it carries chip runs.
+    p.add_argument(
+        "--chips",
+        dest="chips",
+        action="store_true",
+        help="include serialized smart chips (person/file/place/finance) on cells that have them",
     )
     p.set_defaults(func=_cmd_inspect, needs_services=True)
 
@@ -522,6 +532,42 @@ def _add_clear(sub) -> None:
     p.add_argument("--validation", action="store_true", help="also clear data validation")
     p.add_argument("--notes", action="store_true", help="also clear cell notes")
     p.set_defaults(func=_cmd_clear, needs_services=True)
+
+
+def _add_write_values_by_data_filter(sub) -> None:
+    p = sub.add_parser(
+        "write-values-by-data-filter",
+        help="write/update ranges addressed by symbolic DataFilter selectors (insert-proof)",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument(
+        "--data-json",
+        type=_json_arg,
+        required=True,
+        help="JSON list of write items, each with ONE selector + values, e.g. "
+        '\'[{"developerMetadataLookup":{"metadataKey":"block:totals"},"values":[["x","y"]]}]\' '
+        '(selector: {"a1":...} | {"gridRange":...} | {"developerMetadataLookup":...}; add '
+        '"major":"columns" per item) (or @file.json)',
+    )
+    p.add_argument("--input", choices=_INPUT_CHOICES, default="user_entered")
+    p.set_defaults(func=_cmd_write_values_by_data_filter, needs_services=True)
+
+
+def _add_clear_by_data_filter(sub) -> None:
+    p = sub.add_parser(
+        "clear-by-data-filter",
+        help="clear VALUES from ranges addressed by symbolic DataFilter selectors (insert-proof)",
+    )
+    _spreadsheet_id_arg(p)
+    p.add_argument(
+        "--data-filter-json",
+        type=_json_arg,
+        required=True,
+        help="JSON list of selectors whose VALUES to clear, e.g. "
+        '\'[{"a1":"Sheet1!A1:B10"},{"developerMetadataLookup":{"metadataKey":"block:totals"}}]\' '
+        "(or @file.json). Clears values only; formats/validation/notes are left intact.",
+    )
+    p.set_defaults(func=_cmd_clear_by_data_filter, needs_services=True)
 
 
 def _add_format(sub) -> None:
@@ -881,6 +927,7 @@ def _cmd_inspect(services, args) -> dict:
         include_validation=args.include_validation,
         include_rich_text=args.include_rich_text,
         include_pivot=args.include_pivot,
+        chips=args.chips,
     )
 
 
@@ -958,6 +1005,20 @@ def _cmd_clear(services, args) -> dict:
         formats=args.formats,
         validation=args.validation,
         notes=args.notes,
+    )
+
+
+def _cmd_write_values_by_data_filter(services, args) -> dict:
+    # ``write_values_by_data_filter`` is not re-exported from ``gsheets.core``; reach it via the
+    # submodule (the package binds ``core.values`` when ``core/__init__`` imports from it).
+    return core.values.write_values_by_data_filter(
+        services, args.spreadsheet_id, args.data_json, input=args.input
+    )
+
+
+def _cmd_clear_by_data_filter(services, args) -> dict:
+    return core.values.clear_by_data_filter(
+        services, args.spreadsheet_id, args.data_filter_json
     )
 
 

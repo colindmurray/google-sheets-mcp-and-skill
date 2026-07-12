@@ -28,10 +28,24 @@ Range handling mirrors the condformat boundary: :func:`serialize_table` resolves
 from __future__ import annotations
 
 from .addressing import a1_to_gridrange, gridrange_to_a1
+from .colors import color_style_to_hex, hex_to_color_style
 from .errors import SheetsError
 from .fieldsmask import build_fields_mask
 from .rules import rule_to_validation, validation_to_rule
 from .service import SheetsServices
+
+#: ``Table.rowsProperties`` table-native band/header/footer colors, as
+#: ``(google *ColorStyle field, terse round-trip key)`` pairs. Each Google field carries a
+#: ``ColorStyle`` (verified against the v4 discovery ``TableRowsProperties`` schema). The read
+#: serializer flattens each to a hex / ``theme:`` string under the terse key; the write builder
+#: accepts the terse key (hex / ``theme:``) and emits the Google ``*ColorStyle`` field. Keeping
+#: read output and write input keyed identically makes ``rowsProperties`` round-trippable.
+_ROWS_COLOR_FIELDS: tuple[tuple[str, str], ...] = (
+    ("headerColorStyle", "header"),
+    ("firstBandColorStyle", "firstBand"),
+    ("secondBandColorStyle", "secondBand"),
+    ("footerColorStyle", "footer"),
+)
 
 #: ``Table.columnProperties[].columnType`` write-enum — the real v4 discovery values for
 #: ``TableColumnProperties.columnType`` (minus ``COLUMN_TYPE_UNSPECIFIED``, which is the
@@ -92,12 +106,16 @@ def serialize_table(
           "columns": [ { "name": "Region", "type": "TEXT" },
                        { "name": "Status", "type": "DROPDOWN",
                          "validation": "ONE_OF_LIST(Open,Closed)" } ],
+          "rowsProperties": { "header": "#FFCDD2", "secondBand": "theme:ACCENT2" },
           "line": 'table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)' }
 
     A column's ``dataValidationRule`` (present on ``DROPDOWN`` columns) is rendered to the SAME
     ``ValidationRule`` one-liner ``inspect`` surfaces, by reusing ``rules.validation_to_rule``.
     Unset keys are omitted (token efficiency); per-column ``validation`` is attached only when
     present. The ``Table.range`` ``GridRange`` is resolved to a sheet-qualified A1 string.
+    ``Table.rowsProperties`` (header/band/footer colors) is flattened to terse
+    ``{header, firstBand, secondBand, footer}`` hex / ``theme:`` values (present colors only) and
+    attached only when the table carries at least one — a colorless table omits the key entirely.
 
     Args:
         table: A Google ``Table`` dict (``tableId`` / ``name`` / ``range`` /
@@ -135,8 +153,36 @@ def serialize_table(
         columns.append(_serialize_column(col))
     out["columns"] = columns
 
-    out["line"] = _serialize_table_line(name, a1_range, columns)
+    rows_props = _serialize_rows_properties(table.get("rowsProperties"))
+    if rows_props:
+        out["rowsProperties"] = rows_props
+
+    out["line"] = _serialize_table_line(name, a1_range, columns, rows_props)
     return out
+
+
+def _serialize_rows_properties(rows_props: object) -> dict | None:
+    """Flatten a Google ``Table.rowsProperties`` to terse ``{header, firstBand, ...}`` hex/theme.
+
+    Each present ``*ColorStyle`` (``headerColorStyle`` / ``firstBandColorStyle`` /
+    ``secondBandColorStyle`` / ``footerColorStyle``) is flattened via
+    ``colors.color_style_to_hex`` (uppercase ``#RRGGBB`` or ``theme:NAME``) under its terse key.
+    Absent colors are omitted (token efficiency). A malformed ``*ColorStyle`` is skipped rather
+    than raising, so a partially formed table never breaks an otherwise-valid read (mirrors the
+    forgiving DROPDOWN validation handling). Returns ``None`` when nothing is present, so
+    ``serialize_table`` omits the ``rowsProperties`` key entirely for a colorless table.
+    """
+    if not isinstance(rows_props, dict):
+        return None
+    out: dict = {}
+    for gfield, key in _ROWS_COLOR_FIELDS:
+        color_style = rows_props.get(gfield)
+        if isinstance(color_style, dict):
+            try:
+                out[key] = color_style_to_hex(color_style)
+            except ValueError:
+                continue
+    return out or None
 
 
 def _serialize_column(col: dict) -> dict:
@@ -204,19 +250,28 @@ def _scalar_to_str(value: object) -> str:
 
 
 def _serialize_table_line(
-    name: str | None, a1_range: str | None, columns: list[dict]
+    name: str | None,
+    a1_range: str | None,
+    columns: list[dict],
+    rows_props: dict | None = None,
 ) -> str:
     """Build the terse condformat-style line for a table.
 
     Form: ``table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)``.
     A DROPDOWN (or otherwise validated) column appends its validation values as
-    ``Name:TYPE(v1,v2)``; other columns are ``Name:TYPE``.
+    ``Name:TYPE(v1,v2)``; other columns are ``Name:TYPE``. When the table carries
+    ``rowsProperties`` (header/band/footer colors), a ``rows: header=#RRGGBB, ...`` segment is
+    appended — present colors only — so a colorless table's line is byte-for-byte unchanged.
     """
     name_part = f'"{name}"' if name is not None else '""'
     range_part = f"[{a1_range}]" if a1_range is not None else "[]"
     col_parts = [_column_line_token(c) for c in columns]
     cols_part = ", ".join(col_parts)
-    return f"table {name_part} {range_part} cols: {cols_part}"
+    line = f"table {name_part} {range_part} cols: {cols_part}"
+    if rows_props:
+        rows_part = ", ".join(f"{key}={rows_props[key]}" for _, key in _ROWS_COLOR_FIELDS if key in rows_props)
+        line = f"{line} rows: {rows_part}"
+    return line
 
 
 def _column_line_token(col: dict) -> str:
@@ -261,11 +316,15 @@ def build_add_table_request(
 ) -> dict:
     """Build an ``addTable`` ``batchUpdate`` request (DESIGN §X.3 add_table).
 
-    ``params`` is ``{"name": str, "columns": [{"name", "type", "validation"?}, …]}`` over the
-    A1 ``range``. A ``DROPDOWN`` column REQUIRES a ``ONE_OF_LIST`` ``validation`` (the structured
-    ``ValidationRule`` shape, e.g. ``{"type": "ONE_OF_LIST", "values": ["Open", "Closed"]}``),
-    which is converted to a Google ``dataValidationRule`` via ``rules.rule_to_validation``. The
-    caller (``structure.add_table``) captures the new ``tableId`` from the reply.
+    ``params`` is
+    ``{"name": str, "columns": [{"name", "type", "validation"?}, …], "rowsProperties"?}`` over
+    the A1 ``range``. A ``DROPDOWN`` column REQUIRES a ``ONE_OF_LIST`` ``validation`` (the
+    structured ``ValidationRule`` shape, e.g. ``{"type": "ONE_OF_LIST", "values": ["Open",
+    "Closed"]}``), which is converted to a Google ``dataValidationRule`` via
+    ``rules.rule_to_validation``. Optional ``rowsProperties`` is
+    ``{"header"?, "firstBand"?, "secondBand"?, "footer"?}`` of hex / ``theme:`` colors, converted
+    to the Google ``*ColorStyle`` fields. The caller (``structure.add_table``) captures the new
+    ``tableId`` from the reply.
 
     Args:
         services: The authed handle (resolves the A1 ``range`` -> ``GridRange``).
@@ -287,6 +346,10 @@ def build_add_table_request(
     if column_props is not None:
         table["columnProperties"] = column_props
 
+    rows_props = _build_rows_properties(params.get("rowsProperties"))
+    if rows_props:
+        table["rowsProperties"] = rows_props
+
     return {"addTable": {"table": table}}
 
 
@@ -297,11 +360,13 @@ def build_update_table_request(
 ) -> dict:
     """Build an ``updateTable`` ``batchUpdate`` request with an AUTO fields mask (DESIGN §X.3).
 
-    ``params`` is ``{"tableId": str, "name"?, "columns"?, "range"?}``. Only the supplied fields
-    are masked (via :func:`gsheets.core.fieldsmask.build_fields_mask`) so unspecified table
-    properties are never wiped. ``columnProperties`` is an atomic leaf for masking (Google
-    treats the column-properties array as one field). An empty payload (``tableId`` only)
-    raises ``empty_payload`` — refuse a no-op.
+    ``params`` is ``{"tableId": str, "name"?, "columns"?, "range"?, "rowsProperties"?}``. Only
+    the supplied fields are masked (via :func:`gsheets.core.fieldsmask.build_fields_mask`) so
+    unspecified table properties are never wiped. ``columnProperties`` is an atomic leaf for
+    masking (Google treats the column-properties array as one field); ``rowsProperties`` is NOT
+    atomic — only the specific ``*ColorStyle`` colors supplied are masked (so unspecified band
+    colors survive). An empty payload (``tableId`` only) raises ``empty_payload`` — refuse a
+    no-op.
 
     Args:
         services: The authed handle (resolves ``range`` -> ``GridRange`` when present).
@@ -341,6 +406,16 @@ def build_update_table_request(
         table["columnProperties"] = column_props or []
         masked["columnProperties"] = table["columnProperties"]
 
+    if params.get("rowsProperties") is not None:
+        rows_props = _build_rows_properties(params["rowsProperties"]) or {}
+        table["rowsProperties"] = rows_props
+        # ``rowsProperties`` is NOT atomic — its children are ``*ColorStyle`` leaves. Feeding the
+        # Google-shaped dict to build_fields_mask yields ``rowsProperties.headerColorStyle`` (one
+        # color) or ``rowsProperties(headerColorStyle,footerColorStyle)`` (several), so only the
+        # colors actually supplied are masked and the rest are never wiped. An empty dict
+        # (``rowsProperties: {}``) contributes no token — a no-op that neither sets nor clears.
+        masked["rowsProperties"] = rows_props
+
     fields = build_fields_mask(masked)  # raises empty_payload when nothing to change
     return {"updateTable": {"table": table, "fields": fields}}
 
@@ -362,6 +437,40 @@ def build_delete_table_request(params: dict) -> dict:
             "missing_param", "delete_table requires params={'tableId': <str>}"
         )
     return {"deleteTable": {"tableId": table_id}}
+
+
+# --- rows-property construction (write side) -----------------------------------------
+
+
+def _build_rows_properties(rows_props: object) -> dict | None:
+    """Build a Google ``Table.rowsProperties`` from terse ``{header, firstBand, ...}`` colors.
+
+    Each supplied terse key (``header`` / ``firstBand`` / ``secondBand`` / ``footer``) carries a
+    hex (``#RRGGBB``) or ``theme:NAME`` string, converted to the matching Google ``*ColorStyle``
+    via ``colors.hex_to_color_style`` (writes always use ``ColorStyle``, never the deprecated
+    flat ``Color``). Returns ``None`` when ``rows_props`` is ``None`` (caller omits the field);
+    an empty / colorless mapping yields ``{}`` (the caller decides whether to attach it).
+
+    Unknown keys are ignored (only the four recognised band/header/footer colors are honored).
+    A bad color value raises ``SheetsError('bad_table', …)`` naming the offending key.
+    """
+    if rows_props is None:
+        return None
+    if not isinstance(rows_props, dict):
+        raise SheetsError(
+            "bad_table",
+            f"rowsProperties must be a dict, got {type(rows_props).__name__}",
+        )
+    out: dict = {}
+    for gfield, key in _ROWS_COLOR_FIELDS:
+        value = rows_props.get(key)
+        if value is None:
+            continue
+        try:
+            out[gfield] = hex_to_color_style(value)
+        except ValueError as exc:
+            raise SheetsError("bad_table", f"rowsProperties.{key}: {exc}") from exc
+    return out
 
 
 # --- column-property construction (write side) ---------------------------------------

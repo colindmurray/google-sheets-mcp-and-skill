@@ -72,17 +72,17 @@ The spreadsheet id is the **first** positional arg of every Sheets subcommand ex
 (whose ids live inside `--requests-json`). Use `<YOUR_SPREADSHEET_ID>` in anything you write down —
 the real id (the token between `/d/` and `/edit` in the URL) comes from the user or the environment.
 
-## The 22 commands at a glance
+## The 24 commands at a glance
 
-`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 22 as tools
+`auth` is CLI-only (no MCP equivalent). The MCP server registers the same 24 as tools
 (`sheets_overview`, `sheets_inspect`, …).
 
 Understand (read-only):
 
 | Command | Purpose |
 |---|---|
-| `overview <ID>` | Cheap orientation: tabs, sizes, frozen panes, CF/protected counts, named ranges. No grid data. Start here. |
-| `inspect <ID> <RANGE>` | Rich per-cell read: values + formulas + both formats + merges + validation. `--compact` collapses repeats into rectangular runs. `--rich-text`/`--pivot` opt in. |
+| `overview <ID>` | Cheap orientation: tabs, sizes, frozen panes, CF/protected counts, named ranges, and the workbook `theme` map (`{NAME: hex}`) + `themeFontFamily` — the resolver for `theme:NAME` colors. No grid data. Start here. |
+| `inspect <ID> <RANGE>` | Rich per-cell read: values + formulas + both formats + merges + validation. `--compact` collapses repeats into rectangular runs. `--rich-text`/`--pivot`/`--chips` (smart chips: person/file/place/finance) opt in. |
 | `describe <ID> [RANGE...]` | Structured shape/profile read — orient on what's *in* a sheet without pulling every cell. Optional ranges or `--data-filter-json`; `--max-cells N` aborts oversize reads up front. |
 | `formula-patterns <ID> <RANGE...>` | Group a range's formulas into reusable patterns (one entry per distinct relative formula). Column-major; `--no-sample` skips the formatted-sample pass. Ranges required. |
 | `read-values <ID> [RANGE...]` | Values with `--render {plain,unformatted,formula,all}` (`all` = formula + computed side by side). `--major {rows,columns}` picks the major dimension; `--data-filter-json` reads by selector instead of A1; `--diff-only` (with `--render all`) nulls computed cells equal to their value; `--max-cells N` aborts oversize reads. |
@@ -95,16 +95,18 @@ Change (writes):
 | Command | Purpose |
 |---|---|
 | `write-values <ID> ...` | Write/update one or more ranges (`USER_ENTERED` by default). |
+| `write-values-by-data-filter <ID> --data-json ...` | Insert-proof write twin: address each write by a `DataFilter` selector (A1 / gridRange / `developerMetadataLookup`) instead of a literal A1, via `batchUpdateByDataFilter`. |
 | `append-rows <ID> <RANGE> ...` | Append after a table's last row (`INSERT_ROWS`, never overwrites). |
 | `clear <ID> <RANGE...>` | Clear values (and optionally `--formats`/`--validation`/`--notes`). |
+| `clear-by-data-filter <ID> --data-filter-json ...` | Insert-proof clear twin: clear VALUES from ranges addressed by `DataFilter` selectors, via `batchClearByDataFilter`. |
 | `format <ID> <RANGE> ...` | Background, font, number/date pattern, align, wrap, borders, note — one atomic write, auto field-mask. |
 | `set-conditional-format <ID> --action ...` | Add/update/delete a boolean or gradient rule by positional `index`. |
-| `set-validation <ID> <RANGE> ...` | Set or clear data validation (dropdowns, number ranges, custom formulas). |
+| `set-validation <ID> <RANGE> ...` | Set or clear data validation (dropdowns, number ranges, custom formulas); the rule's optional `inputMessage` help/error tooltip round-trips from `inspect`. |
 | `structure <ID> --action ...` | Merges, named/protected ranges, frozen panes, tab color, groups, native tables, banding, filters, **slicers** — read or modify. |
 | `manage-sheets <ID> --action ...` | Add/delete/duplicate/rename/reorder tabs. |
 | `metadata <ID> --action ...` | Developer metadata (durable anchors). |
 | `data-ops <ID> --action ...` | Bulk data verbs: find/replace, dedupe, trim, sort, text-to-columns, fill, copy/cut-paste. |
-| `dimensions <ID> --action ...` | Row/column ops + sizing toolkit: insert/delete/move/append; `auto_resize` (auto-fit) vs `set_props {pixelSize}` (fixed/forced); `set_props {runs:[…]}` bulk-set many row+col sizes; hide/unhide; `read` hidden rows/cols (`{sizes:true}` adds `rowHeights`/`colWidths`). |
+| `dimensions <ID> --action ...` | Row/column ops + sizing toolkit: insert/delete/move/append; `auto_resize` (auto-fit) vs `set_props {pixelSize}` (fixed/forced); `set_props {runs:[…]}` bulk-set many row+col sizes; hide/unhide; `read` hidden rows/cols — user-hidden AND `filteredRows`/`filteredCols` (active-filter, read-only) — (`{sizes:true}` adds `rowHeights`/`colWidths`). |
 | `comments <ID> --action ...` | Drive threaded comments, full CRUD: read/create/reply/resolve/delete. |
 | `charts <ID> --action ...` | Embedded charts (`read` = metadata only). |
 
@@ -204,6 +206,17 @@ gsheets describe <YOUR_SPREADSHEET_ID> --data-filter-json @filters.json
 
 A developer-metadata selector is the durable way to read a block that rows/cols may shift around —
 pair it with the `metadata` command's anchors. An invalid selector raises `bad_data_filters`.
+
+**The write side is symmetric.** `write-values-by-data-filter --data-json '[...]'` and
+`clear-by-data-filter --data-filter-json '[...]'` take the SAME selectors, so a block tagged once
+with a metadata key can be written or cleared long after inserts shift its A1:
+
+```sh
+gsheets write-values-by-data-filter <YOUR_SPREADSHEET_ID> --data-json \
+  '[{"developerMetadataLookup":{"metadataKey":"block:totals"},"values":[["Q1",1200]]}]'
+gsheets clear-by-data-filter <YOUR_SPREADSHEET_ID> --data-filter-json \
+  '[{"developerMetadataLookup":{"metadataKey":"block:totals"}}]'   # values only
+```
 
 **Pick the major dimension** — `read-values --major {rows,columns}` (default `rows`) transposes how
 the grid is laid out in the result; the chosen mode echoes back under the `major` key. (In the MCP

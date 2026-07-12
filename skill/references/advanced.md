@@ -81,6 +81,31 @@ The anchor cell gains a `pivot` object (read-only; present only on the anchor):
   (default `HORIZONTAL`).
 - Pivot **write** is not a typed command — it stays in the `batch` escape hatch (read-only here).
 
+### `inspect --chips` — smart chips (person / file / place / finance)
+
+A smart chip (a `@person`, a linked Drive file, a place, a finance ticker) reads back as **plain
+text** everywhere else — the only structured signal is the cell's `chipRuns`. `--chips` (MCP
+`chips=true`) recovers it, attaching a `chips` list **only** to the cells that carry chip runs:
+
+```sh
+gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:A20' --chips
+```
+
+```jsonc
+{ "a1": "A2",
+  "value": "Jane Doe",
+  "chips": [ { "start": 0, "kind": "person", "email": "jane@example.com", "displayFormat": "DEFAULT" } ] }
+{ "a1": "A3",
+  "chips": [ { "start": 0, "kind": "file", "uri": "https://docs.google.com/…", "mimeType": "application/vnd.google-apps.document" } ] }
+```
+
+- `start` is the 0-based char offset of the chip in the cell text; `kind` is a hint
+  (`person`/`file`/`place`/`finance`/`rating`/`richlink`/`unknown`). Person chips carry `email`
+  (+ optional `displayFormat`); rich-link chips carry the authoritative `uri` (+ output-only
+  `mimeType`) — a mis-hinted `kind` never loses information because uri/mimeType always ride along.
+- Off by default (zero added mask cost). Chip **write** is not a typed command — it stays in the
+  `batch` escape hatch (read-only here).
+
 ## Operations
 
 All of the structural-object CRUD below runs through `structure --action <ACTION> --params-json
@@ -111,8 +136,14 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action add_table --range 'Sheet1!A1:F5
   before the API call.
 - **Required:** a `DROPDOWN` column must carry a `ONE_OF_LIST` `validation` (the same structured
   `ValidationRule` shape `set-validation` uses) — omitting it raises `bad_table`.
-- `update_table` takes `{"tableId","name"?,"columns"?,"range"?}` (auto field-mask; `tableId`-only
-  raises `empty_payload`). `delete_table` takes `{"tableId"}` and is **destructive**.
+- **Table colors** (`rowsProperties`): pass an optional `"rowsProperties":{"header"?,"firstBand"?,
+  "secondBand"?,"footer"?}` of hex / `theme:NAME` colors to set the table's header/band/footer
+  fills. `structure --action read` reads them back under each `tables[].rowsProperties` in the same
+  terse shape (present only when the table sets a color) — a full round-trip.
+- `update_table` takes `{"tableId","name"?,"columns"?,"range"?,"rowsProperties"?}` (auto field-mask;
+  `rowsProperties` is NOT atomic — only the band colors you supply are masked, so unspecified ones
+  survive; `tableId`-only raises `empty_payload`). `delete_table` takes `{"tableId"}` and is
+  **destructive**.
 
 ```sh
 gsheets structure <YOUR_SPREADSHEET_ID> --action update_table \
