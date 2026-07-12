@@ -412,16 +412,24 @@ columns. A `DROPDOWN` column's data-validation rule renders with the **same**
 table "Sales" [Sheet1!A1:F500] cols: Region:TEXT, Status:DROPDOWN(Open,Closed)
 ```
 
-A column's flattened `type` key (Google's API field is `columnType`) is one of `TEXT | DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATETIME |
-DROPDOWN | CHECKBOX | SMART_CHIP | RATING`. Tables are full-CRUD via the `structure`
-actions `add_table` / `update_table` / `delete_table`.
+A column's flattened `type` key (Google's API field is `columnType`) is one of the live
+`ColumnType` discovery enum: `DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATE_TIME | TEXT |
+BOOLEAN | DROPDOWN | FILES_CHIP | PEOPLE_CHIP | FINANCE_CHIP | PLACE_CHIP | RATINGS_CHIP`. On
+write, legacy spellings map to their real target as aliases (`DATETIME`→`DATE_TIME`,
+`CHECKBOX`→`BOOLEAN`, `RATING`→`RATINGS_CHIP`) so older callers keep working; `SMART_CHIP` is
+rejected (it has no single target — choose the specific `*_CHIP`), and any other value raises
+`bad_table` before the API call. Tables are full-CRUD via the `structure` actions `add_table` /
+`update_table` / `delete_table`.
 
 ### Filter views and basic filter (`filters`)
 
 A sheet's `basicFilter` (at most one) and its `filterViews` (an array) flatten to a sort
 list plus a per-column criterion list. The column is rendered as a **letter** (`B`),
-`hidden` normalizes `hiddenValues` / `visibleValues`, and a criterion's condition reuses
-the **same** condition serializer as the condformat grammar.
+`hidden` carries the criterion's `hiddenValues` (Google's `FilterCriteria` has only
+`hiddenValues` + `condition` — there is no `visibleValues`; the write side rejects a `visible`
+key), and a criterion's condition reuses the **same** condition serializer as the condformat
+grammar. A filter/slicer `condition` type must be filter-legal (`ONE_OF_LIST` / `ONE_OF_RANGE`
+are data-validation-only and rejected pre-flight).
 
 ```jsonc
 // basicFilter (one per sheet, or null)

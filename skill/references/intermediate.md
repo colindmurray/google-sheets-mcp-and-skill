@@ -292,7 +292,11 @@ gsheets set-validation <YOUR_SPREADSHEET_ID> 'Sheet1!C2:C100'
 | Checkbox | `{"type":"BOOLEAN"}` |
 | Number range | `{"type":"NUMBER_BETWEEN","values":[0,100]}` |
 | Custom formula | `{"type":"CUSTOM_FORMULA","values":["=ISNUMBER(A1)"]}` |
-| Non-blank / blank | `{"type":"NOT_BLANK"}` / `{"type":"BLANK"}` |
+
+> `BLANK` / `NOT_BLANK` are **not** valid data-validation condition types — Google's `ConditionType`
+> documents them as conditional-formatting / filter surfaces only, and core now rejects them here
+> pre-flight with `bad_condition`. Use them in `set-conditional-format` or a filter/slicer criterion
+> instead. To require a value, use `CUSTOM_FORMULA` (e.g. `=LEN(A1)>0`).
 
 `strict`/`showDropdown` may also ride inside `--rule-json` (`"strict"`/`"showDropdown"`); the CLI
 flags (`--no-strict`/`--no-dropdown`) win on conflict. Verify with `inspect` and confirm

@@ -173,8 +173,12 @@ def test_serialize_slicer_criterion_reuses_condition_serializer():
     assert out["line"].endswith("-> NUMBER_GREATER(0)")
 
 
-def test_serialize_slicer_criterion_hidden_and_visible_values():
-    """hiddenValues / visibleValues normalize to terse ``hide``/``show`` facets joined by '; '."""
+def test_serialize_slicer_criterion_hidden_values():
+    """hiddenValues render to a terse ``hide`` facet.
+
+    ``visibleValues`` is not a real ``FilterCriteria`` field (audit #4): Google never returns it,
+    and even a stray one is ignored on read (no ``show`` facet emitted).
+    """
     services = _service_with_sheet_index()
     slicer = {
         "slicerId": 5,
@@ -186,7 +190,8 @@ def test_serialize_slicer_criterion_hidden_and_visible_values():
         },
     }
     out = serialize_slicer(slicer, services, SPREADSHEET_ID)
-    assert out["criteria"] == "hide Closed,Void; show Open"
+    assert out["criteria"] == "hide Closed,Void"
+    assert "show" not in out["criteria"]
 
 
 def test_serialize_slicer_criterion_condition_and_hidden_combine():
@@ -389,8 +394,9 @@ def test_build_add_slicer_request_golden():
 
     The two A1 references resolve through the REAL addressing layer (driven by the two-sheet
     index): ``Data!A1:F500`` -> the data GridRange; the single-cell anchor ``Dash!I1`` -> a
-    GridCoordinate on the OTHER tab. The ``ONE_OF_LIST(West,East)`` criterion condition is built
-    by the SHARED condformat condition builder.
+    GridCoordinate on the OTHER tab. The ``NUMBER_BETWEEN(0,100)`` criterion condition (a valid
+    regular-filter type, since slicers share the filter surface) is built by the SHARED condformat
+    condition builder.
     """
     golden = load_golden("slicer_addslicer_request")
     services = _service_with_sheet_index(sheets_index=golden["sheets_index"])
@@ -509,20 +515,22 @@ def test_build_add_slicer_request_unbounded_anchor_rejected():
     assert "bounded A1 cell" in exc.value.message
 
 
-def test_build_add_slicer_request_visible_values_criteria():
-    """A ``criteria`` with visible values builds ``FilterCriteria.visibleValues`` (the show facet)."""
+def test_build_add_slicer_request_visible_values_rejected():
+    """A ``criteria`` with a ``visible`` key is rejected: ``visibleValues`` is not a real
+    ``FilterCriteria`` field (audit #4), so honoring it would silently drop the filter."""
     services = _service_with_sheet_index()
-    request = build_add_slicer_request(
-        services,
-        SPREADSHEET_ID,
-        {
-            "dataRange": "Data!A1:C10",
-            "anchor": "Dash!A1",
-            "criteria": {"visible": ["Open", "Pending"]},
-        },
-    )
-    fc = request["addSlicer"]["slicer"]["spec"]["filterCriteria"]
-    assert fc == {"visibleValues": ["Open", "Pending"]}
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {
+                "dataRange": "Data!A1:C10",
+                "anchor": "Dash!A1",
+                "criteria": {"visible": ["Open", "Pending"]},
+            },
+        )
+    assert exc.value.code == "bad_slicer"
+    assert "visible" in exc.value.message.lower()
 
 
 def test_build_add_slicer_request_non_dict_criteria_rejected():
@@ -535,11 +543,11 @@ def test_build_add_slicer_request_non_dict_criteria_rejected():
             {"dataRange": "Data!A1:C10", "anchor": "Dash!A1", "criteria": ["Open"]},
         )
     assert exc.value.code == "bad_slicer"
-    assert "hidden?, visible?, condition?" in exc.value.message
+    assert "hidden?, condition?" in exc.value.message
 
 
 def test_build_add_slicer_request_empty_criteria_rejected():
-    """A ``criteria`` dict with no hidden/visible/condition facet raises ``bad_slicer``.
+    """A ``criteria`` dict with no hidden/condition facet raises ``bad_slicer``.
 
     A slicer must never be given an empty criterion — an all-keys-absent (or all-empty) criteria
     object yields nothing to filter and is refused.
@@ -552,7 +560,7 @@ def test_build_add_slicer_request_empty_criteria_rejected():
             {"dataRange": "Data!A1:C10", "anchor": "Dash!A1", "criteria": {"hidden": []}},
         )
     assert exc.value.code == "bad_slicer"
-    assert "no hidden/visible/condition" in exc.value.message
+    assert "no hidden/condition" in exc.value.message
 
 
 def test_build_add_slicer_request_bad_condition_type_rejected():
@@ -574,6 +582,27 @@ def test_build_add_slicer_request_bad_condition_type_rejected():
         )
     assert exc.value.code == "bad_slicer"
     assert "terse string" in exc.value.message
+
+
+def test_build_add_slicer_request_data_validation_only_condition_rejected():
+    """A slicer condition that is data-validation-only (e.g. ``ONE_OF_LIST``) is rejected pre-flight.
+
+    Slicers share the regular-filter surface, so a ``ONE_OF_LIST`` condition (data-validation-only,
+    unsupported by filters) surfaces a clear ``bad_condition`` here rather than a Google 400.
+    """
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_slicer_request(
+            services,
+            SPREADSHEET_ID,
+            {
+                "dataRange": "Data!A1:C10",
+                "anchor": "Dash!A1",
+                "criteria": {"condition": {"type": "ONE_OF_LIST", "values": ["West", "East"]}},
+            },
+        )
+    assert exc.value.code == "bad_condition"
+    assert "filter" in exc.value.message
 
 
 def test_build_add_slicer_request_structured_condition_dict_passed_through():

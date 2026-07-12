@@ -424,7 +424,6 @@ def _data_sort_range(services, spreadsheet_id, params) -> dict:
             "'ASCENDING'|'DESCENDING'}, ...]}",
         )
     grid_range = _grid(services, spreadsheet_id, range_a1)
-    start_col = grid_range.get("startColumnIndex", 0) or 0
 
     sort_specs: list[dict] = []
     for spec in specs:
@@ -439,13 +438,10 @@ def _data_sort_range(services, spreadsheet_id, params) -> dict:
                 "bad_param",
                 f"sort order must be one of {sorted(_SORT_ORDERS)}, got {order!r}",
             )
-        # ``dimensionIndex`` is RELATIVE to the sorted range's first column.
-        dimension_index = _column_to_index(col) - start_col
-        if dimension_index < 0:
-            raise SheetsError(
-                "bad_param",
-                f"sort column {col!r} falls outside the sorted range {range_a1!r}",
-            )
+        # ``SortSpec.dimensionIndex`` is an ABSOLUTE 0-based sheet-column index
+        # (matches ``filters.py`` and gspread), NOT relative to the sorted range.
+        # A letter resolves to its sheet column; an int is already a 0-based index.
+        dimension_index = _column_to_index(col)
         sort_specs.append(
             {"dimensionIndex": dimension_index, "sortOrder": order}
         )

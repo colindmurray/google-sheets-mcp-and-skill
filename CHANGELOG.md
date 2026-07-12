@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Tier 1 audit correctness sweep (audit #1–#8).** A batch of shared-core request-builder fixes
+  from the codebase audit (see `AUDIT_REPORT.md` / `AUDIT_TASKS.md`). All fixes live in `core/**`
+  and are identical from the MCP server and the CLI; adapter docstrings, CLI help, the bundled
+  skill, and `docs/ARCHITECTURE.md` were reconciled to match.
+  - **#1 Wrong-tab resolution.** A bare sheet title such as `Sheet2`/`Q1`/`A1` was routed through
+    A1 parsing, which read it as a cell-like reference and could yield the FIRST sheet's `sheetId`
+    (or a wildly out-of-range column). Explicit sheet-name parameters now resolve directly against
+    sheet properties, so every mutation that turns a name into a `sheetId` targets the real tab.
+  - **#2 Absolute sort index.** `SortSpec.dimensionIndex` is a sheet-absolute 0-based column, not
+    an offset into the sort range. Sorting column E of `Data!D2:F20` now emits `4`, not `1`.
+  - **#3 Table column-type enums.** `add_table`/`update_table` now accept the live `ColumnType`
+    discovery enum (`DATE_TIME`, `BOOLEAN`, and the specific `*_CHIP` types) instead of the stale
+    `DATETIME`/`CHECKBOX`/`SMART_CHIP`/`RATING`. Legacy `DATETIME`→`DATE_TIME`,
+    `CHECKBOX`→`BOOLEAN`, `RATING`→`RATINGS_CHIP` still work as aliases; `SMART_CHIP` is rejected
+    (no single target — pick a `*_CHIP`); anything else raises `bad_table` BEFORE the API call.
+  - **#4 `visibleValues` removal.** Filter and slicer criteria no longer emit the unsupported
+    `visibleValues` field (Google's `FilterCriteria` carries only `hiddenValues` + `condition`).
+    A `visible` key on a criterion is now rejected with a clear message rather than silently
+    dropping a filter. (Pivot `PivotFilterCriteria.visibleValues`, a genuine API field, is
+    unaffected.)
+  - **#5 Condition-context validation.** The shared `ConditionType` enum is validated per surface
+    before dispatch: `BLANK`/`NOT_BLANK` are conditional-format / filter only and are now rejected
+    in data validation (Google 400s them); `ONE_OF_LIST`/`ONE_OF_RANGE` are validation-only and
+    rejected on filters/slicers; each type's argument count is checked too — misuse surfaces as a
+    clear `bad_condition` instead of an opaque 400.
+  - **#6 Exhaustive metadata read.** The default developer-metadata read no longer pins
+    `locationType: SPREADSHEET` + `visibility: DOCUMENT`, which excluded row/column/sheet-scoped
+    and `PROJECT`-visible metadata. It now returns everything by default; filters are opt-in.
+  - **#7 Atomic clear.** Clearing values together with formats / validation / notes is now a single
+    `UpdateCells` batch so a mid-operation failure can't leave values erased with formatting intact.
+  - **#8 CF multi-add order.** Conditional-format additions are applied in ascending index order
+    (deletions stay descending) so adds destined for indexes 0 and 1 land adjacently instead of
+    leaving an existing rule wedged between them.
+
 ### Added
 - Nothing yet.
 

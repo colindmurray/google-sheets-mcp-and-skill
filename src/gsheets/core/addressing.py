@@ -189,6 +189,66 @@ def a1_to_gridrange(services: SheetsServices, spreadsheet_id: str, a1: str) -> d
     return gr
 
 
+def resolve_sheet_id_by_name(
+    services: SheetsServices, spreadsheet_id: str, name: str
+) -> int:
+    """Resolve a bare sheet TITLE to its ``sheetId`` — title-first, never the wrong tab.
+
+    This is the single authoritative sheet-name resolver for mutating callers
+    (``structure``/``dimensions``/``rules``). It must be used instead of routing a bare title
+    through :func:`a1_to_gridrange`, because :func:`parse_a1` reads a digit-suffixed title such as
+    ``"Sheet2"`` as the *cell* ``Sheet2`` (column ``Sheet``, row ``2``) and so falls back to the
+    FIRST sheet — silently mis-targeting (and, for a delete, destroying) the wrong tab whenever the
+    intended tab is not first (ISSUES.md #1).
+
+    Resolution order:
+
+    1. **Exact title match** against the cached sheet index. This is correct even for a tab literally
+       named ``"A1"`` or ``"2024"``, which A1 parsing would otherwise treat as a cell/row.
+    2. **Fallback**: the QUOTED name via :func:`a1_to_gridrange` (``'My Sheet'`` semantics), covering
+       any title-normalisation the addressing layer performs.
+    3. Otherwise raise ``sheet_not_found`` with the available-sheet list.
+
+    Args:
+        services: The authed handle.
+        spreadsheet_id: Target spreadsheet id.
+        name: A bare sheet title (NOT an A1 range).
+
+    Returns:
+        The tab's integer ``sheetId``.
+
+    Raises:
+        SheetsError: ``sheet_not_found`` if no tab has that title.
+    """
+    sheets = _sheet_index(services, spreadsheet_id)
+
+    # (a) Title-first exact match — stricter than quoting alone and correct for titles that
+    # look like A1 tokens ("A1", "Q1", "2024").
+    for s in sheets:
+        if s.get("title") == name:
+            sid = s.get("sheetId")
+            if sid is None:
+                raise SheetsError("sheet_not_found", f"sheet {name!r} has no sheetId")
+            return sid
+
+    # (b) Fallback: resolve the QUOTED name as a bare-sheet A1 reference so any title
+    # normalisation the addressing layer applies still succeeds. a1_to_gridrange raises
+    # ``sheet_not_found`` itself when the title is absent, so (c) is a belt-and-braces guard.
+    quoted = "'" + name.replace("'", "''") + "'"
+    grid = a1_to_gridrange(services, spreadsheet_id, quoted)
+    sid = grid.get("sheetId")
+    if sid is not None:
+        return sid
+
+    # (c) Neither path resolved.
+    available = ", ".join(repr(s.get("title")) for s in sheets) or "(none)"
+    raise SheetsError(
+        "sheet_not_found",
+        f"sheet {name!r} not found in spreadsheet",
+        hint=f"available sheets: {available}",
+    )
+
+
 def gridrange_to_a1(services: SheetsServices, spreadsheet_id: str, gr: dict) -> str:
     """Convert a Google ``GridRange`` back to a sheet-qualified A1 string.
 

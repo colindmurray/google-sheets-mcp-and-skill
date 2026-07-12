@@ -190,11 +190,11 @@ def _serialize_criteria(filter_criteria: object) -> str | None:
     """Render a slicer's ``filterCriteria`` (a ``FilterCriteria``) to a terse one-liner.
 
     A slicer filters one column via a ``FilterCriteria`` (the SAME shape filter views use):
-    ``hiddenValues`` / ``visibleValues`` and/or a ``BooleanCondition``. The condition is rendered
-    via the SHARED condformat condition serializer so it reads exactly like a CF / filter
-    condition (``NUMBER_GREATER(0)``). Hidden/visible value lists render as
-    ``hide v1,v2`` / ``show v1,v2``. Multiple facets join with ``"; "``. Returns ``None`` when no
-    criterion is set (no facet emitted).
+    ``hiddenValues`` and/or a ``BooleanCondition``. The condition is rendered via the SHARED
+    condformat condition serializer so it reads exactly like a CF / filter condition
+    (``NUMBER_GREATER(0)``). Hidden value lists render as ``hide v1,v2``. Multiple facets join
+    with ``"; "``. (``visibleValues`` is not a real ``FilterCriteria`` field — audit #4 — so it is
+    neither read nor emitted.) Returns ``None`` when no criterion is set (no facet emitted).
     """
     if not isinstance(filter_criteria, dict):
         return None
@@ -210,10 +210,6 @@ def _serialize_criteria(filter_criteria: object) -> str | None:
     hidden = filter_criteria.get("hiddenValues")
     if hidden:
         facets.append("hide " + ",".join(str(v) for v in hidden))
-
-    visible = filter_criteria.get("visibleValues")
-    if visible:
-        facets.append("show " + ",".join(str(v) for v in visible))
 
     if not facets:
         return None
@@ -305,15 +301,15 @@ def build_add_slicer_request(
     ``spec`` is the FLAT public slicer shape::
 
         { "title"?: str, "dataRange": <A1>, "columnIndex"?: int,
-          "anchor": <A1 single cell>, "criteria"?: {"hidden"?, "visible"?, "condition"?} }
+          "anchor": <A1 single cell>, "criteria"?: {"hidden"?, "condition"?} }
 
     ``dataRange`` (REQUIRED) is an A1 range resolved to a Google ``GridRange`` via
     ``addressing.a1_to_gridrange`` (the SAME fn tables/filters use). ``anchor`` (REQUIRED) is a
     single A1 cell resolved to a ``GridCoordinate`` ``{sheetId,rowIndex,columnIndex}`` — the
     slicer is positioned via ``position.overlayPosition.anchorCell`` (its anchor tab is usually a
     different sheet from the data tab). ``criteria`` builds a Google ``FilterCriteria``
-    (``hiddenValues``/``visibleValues`` and/or a ``BooleanCondition``) reusing the SAME condformat
-    condition builder when a ``condition`` is given — mirroring ``filters._build_filter_specs``.
+    (``hiddenValues`` and/or a ``BooleanCondition``) reusing the SAME condformat condition builder
+    when a ``condition`` is given — mirroring ``filters._build_filter_specs``.
     The caller (``structure.add_slicer``) captures the new ``slicerId`` from the reply.
 
     Args:
@@ -521,25 +517,31 @@ def _build_filter_criteria(criteria: object) -> dict:
     """Build a Google ``FilterCriteria`` from the flat ``criteria`` dict.
 
     Mirrors ``filters._build_filter_specs`` (one column's ``filterCriteria``):
-    ``{"hidden"?, "visible"?, "condition"?}`` -> ``hiddenValues`` / ``visibleValues`` /
-    ``condition`` (a ``BooleanCondition``). ``condition`` may be a terse string
-    (``"NUMBER_GREATER(0)"``) — parsed by the SAME condformat condition parser — or an
-    already-structured ``{type, values}`` dict. At least one facet is required so a slicer is
-    never given an empty criterion.
+    ``{"hidden"?, "condition"?}`` -> ``hiddenValues`` / ``condition`` (a ``BooleanCondition``).
+    ``condition`` may be a terse string (``"NUMBER_GREATER(0)"``) — parsed by the SAME condformat
+    condition parser — or an already-structured ``{type, values}`` dict. A ``visible`` key is
+    REJECTED: ``visibleValues`` is not a real ``FilterCriteria`` field (audit #4), so honoring it
+    would silently drop the filter. At least one facet is required so a slicer is never given an
+    empty criterion.
     """
     if not isinstance(criteria, dict):
         raise SheetsError(
             "bad_slicer",
-            "slicer 'criteria' must be a {hidden?, visible?, condition?} dict",
+            "slicer 'criteria' must be a {hidden?, condition?} dict",
+        )
+
+    if criteria.get("visible"):
+        raise SheetsError(
+            "bad_slicer",
+            "slicer 'criteria': 'visible'/visibleValues is not a supported FilterCriteria "
+            "field (Google's FilterCriteria has only hiddenValues + condition); express the "
+            "inverse with 'hidden' (hiddenValues) or a 'condition'",
         )
 
     filter_criteria: dict = {}
     hidden = criteria.get("hidden")
     if hidden:
         filter_criteria["hiddenValues"] = list(hidden)
-    visible = criteria.get("visible")
-    if visible:
-        filter_criteria["visibleValues"] = list(visible)
     condition = criteria.get("condition")
     if condition is not None:
         filter_criteria["condition"] = _build_condition(condition)
@@ -547,7 +549,7 @@ def _build_filter_criteria(criteria: object) -> dict:
     if not filter_criteria:
         raise SheetsError(
             "bad_slicer",
-            "slicer 'criteria' has no hidden/visible/condition to apply",
+            "slicer 'criteria' has no hidden/condition to apply",
         )
     return filter_criteria
 
@@ -569,4 +571,4 @@ def _build_condition(condition: object) -> dict:
             "condition must be a terse string (e.g. 'NUMBER_GREATER(0)') or a "
             "{type, values} dict",
         )
-    return condformat._build_condition(structured)
+    return condformat._build_condition(structured, context="filter")

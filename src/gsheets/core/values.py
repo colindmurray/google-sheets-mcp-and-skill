@@ -1,8 +1,10 @@
 """Value reads/writes and the jagged-array helper (DESIGN §3.3, §5.5).
 
 Houses ``read_values`` / ``write_values`` / ``append_rows`` / ``clear`` plus :func:`pad_jagged`.
-Writes default to ``USER_ENTERED`` (formulas work). ``clear`` routes any
-formats/validation/notes clearing through ``build_fields_mask``.
+Writes default to ``USER_ENTERED`` (formulas work). ``clear`` hand-builds its
+``updateCells`` fields mask directly from the requested clear flags (values/formats/
+validation/notes) — it deliberately does NOT route through ``build_fields_mask``, which
+would discard the empty-dict structural sentinels and silently clear nothing.
 
 PURE core module: imports only stdlib + sibling core modules. It must NEVER import
 ``fastmcp``, ``mcp``, ``argparse``, ``pydantic``, or ``gsheets.models`` (DESIGN §1 boundary).
@@ -14,7 +16,6 @@ from googleapiclient.errors import HttpError
 
 from .addressing import a1_to_gridrange
 from .errors import SheetsError, classify_google_error
-from .fieldsmask import build_fields_mask
 from .service import SheetsServices
 
 # render mode -> Google ``valueRenderOption``.
@@ -502,13 +503,17 @@ def append_rows(
     }
 
 
-# Mapping from a clear flag to the ``Cell``/``CellData`` payload subfields its
-# ``updateCells`` request must touch. ``formats`` clears the whole format; ``validation``
-# clears the per-cell data validation; ``notes`` clears the cell note.
-_CLEAR_FIELDS: dict[str, dict] = {
-    "formats": {"userEnteredFormat": {}},
-    "validation": {"dataValidation": {}},
-    "notes": {"note": ""},
+# Mapping from a clear flag to the top-level ``CellData`` field-mask token its ``updateCells``
+# request must name. Masking a field with NO ``rows`` in the request clears it: ``userEnteredValue``
+# erases the value, ``userEnteredFormat`` the whole format, ``dataValidation`` the per-cell rule,
+# ``note`` the cell note. The mask is hand-built by joining exactly the requested tokens — it is
+# deliberately NOT routed through ``build_fields_mask``, whose no-op guard discards the empty-dict
+# structural sentinels (``{"userEnteredFormat": {}}`` etc.) and would silently clear nothing.
+_CLEAR_FIELD_TOKENS: dict[str, str] = {
+    "values": "userEnteredValue",
+    "formats": "userEnteredFormat",
+    "validation": "dataValidation",
+    "notes": "note",
 }
 
 
@@ -525,10 +530,12 @@ def clear(
     """Clear values (and optionally formats/validation/notes) from ranges (DESIGN §3.3).
 
     ``values``-only -> ``values.batchClear``. Any of formats/validation/notes ->
-    ``batchUpdate`` with ``updateCells`` + an auto fields mask (via ``build_fields_mask``)
-    covering only the requested subfields over the ``GridRange``. When ``values`` is also
-    requested alongside structural clears, BOTH a ``batchClear`` (values) and a ``batchUpdate``
-    (structural) are issued.
+    ``batchUpdate`` with ``updateCells`` + a fields mask (hand-built by joining the requested
+    ``CellData`` field tokens) covering only the requested subfields over the ``GridRange``.
+    When ``values`` is also requested alongside structural clears, a SINGLE atomic
+    ``updateCells`` ``batchUpdate`` is issued whose fields mask additionally includes
+    ``userEnteredValue`` — so the value clear and the structural clear either both apply or
+    neither does (no two-call window that could erase values and then fail to clear the rest).
 
     Args:
         services: The authed handle.
@@ -550,27 +557,35 @@ def clear(
             "clear must clear at least one of values/formats/validation/notes",
         )
 
-    # Assemble the structural-clear payload (formats/validation/notes) once; the same
-    # subfield set applies to every range. ``build_fields_mask`` turns it into the mask.
-    structural_payload: dict = {}
+    # Hand-build the ``updateCells`` fields mask once (the same token set applies to every
+    # range): join exactly the requested ``CellData`` field tokens, values first so a mixed
+    # clear folds ``userEnteredValue`` into the SAME atomic request. NOT routed through
+    # ``build_fields_mask`` — its no-op guard would drop the empty structural sentinels.
+    structural = formats or validation or notes
+    field_tokens: list[str] = []
+    if values:
+        field_tokens.append(_CLEAR_FIELD_TOKENS["values"])
     if formats:
-        structural_payload.update(_CLEAR_FIELDS["formats"])
+        field_tokens.append(_CLEAR_FIELD_TOKENS["formats"])
     if validation:
-        structural_payload.update(_CLEAR_FIELDS["validation"])
+        field_tokens.append(_CLEAR_FIELD_TOKENS["validation"])
     if notes:
-        structural_payload.update(_CLEAR_FIELDS["notes"])
+        field_tokens.append(_CLEAR_FIELD_TOKENS["notes"])
+    fields = ",".join(field_tokens)
 
     try:
-        if values:
+        if values and not structural:
+            # Values-only: the cheap, targeted values API clears trailing region correctly.
             (
                 services.sheets.spreadsheets()
                 .values()
                 .batchClear(spreadsheetId=spreadsheet_id, body={"ranges": ranges})
                 .execute()
             )
-
-        if structural_payload:
-            fields = build_fields_mask(structural_payload)
+        elif structural:
+            # Structural-only OR mixed (values + structural). One ``updateCells`` batchUpdate.
+            # For the mixed case the value clear rides in the SAME request (atomic) because
+            # ``userEnteredValue`` is already folded into ``fields`` above.
             requests = []
             for a1 in ranges:
                 grid_range = a1_to_gridrange(services, spreadsheet_id, a1)

@@ -736,12 +736,154 @@ def _effective_condition_type(cond_type: str, values: list) -> str:
     return text_type
 
 
-def _build_condition(condition: dict) -> dict:
-    """Build a Google ``BooleanCondition`` from ``{type, values}``."""
+# ---------------------------------------------------------------------------
+# Context-aware ConditionType validation (T1.5 / audit #5b).
+#
+# Google's ``ConditionType`` enum is shared across three surfaces — data validation,
+# conditional formatting, and filters (basic filter / filter view / slicer) — but EACH surface
+# accepts only a SUBSET, and Google 400s a type used on the wrong surface (e.g. ``BLANK`` /
+# ``NOT_BLANK`` are CF/filter-only, illegal in data validation; ``ONE_OF_RANGE`` / ``BOOLEAN`` /
+# email/URL/date-validity checks are data-validation-only). Each type also has a required
+# ``ConditionValue`` arg count (``NUMBER_BETWEEN`` needs 2, ``ONE_OF_RANGE`` 1, ``BLANK`` 0, …).
+# We validate BEFORE the API call so a misuse surfaces as a clear ``bad_condition`` instead of an
+# opaque server 400. Pure data + a pure validator — usable by the CF, filter/slicer, AND
+# data-validation (``rules.py``) build paths.
+#
+# Arg counts are ``(min, max)``; ``max`` of ``None`` means unbounded (``ONE_OF_LIST``).
+# ---------------------------------------------------------------------------
+
+_CONDITION_ARITY: dict[str, tuple[int, int | None]] = {
+    "NUMBER_GREATER": (1, 1),
+    "NUMBER_GREATER_THAN_EQ": (1, 1),
+    "NUMBER_LESS": (1, 1),
+    "NUMBER_LESS_THAN_EQ": (1, 1),
+    "NUMBER_EQ": (1, 1),
+    "NUMBER_NOT_EQ": (1, 1),
+    "NUMBER_BETWEEN": (2, 2),
+    "NUMBER_NOT_BETWEEN": (2, 2),
+    "TEXT_CONTAINS": (1, 1),
+    "TEXT_NOT_CONTAINS": (1, 1),
+    "TEXT_STARTS_WITH": (1, 1),
+    "TEXT_ENDS_WITH": (1, 1),
+    "TEXT_EQ": (1, 1),
+    "TEXT_NOT_EQ": (1, 1),
+    "TEXT_IS_EMAIL": (0, 0),
+    "TEXT_IS_URL": (0, 0),
+    "DATE_EQ": (1, 1),
+    "DATE_NOT_EQ": (1, 1),
+    "DATE_BEFORE": (1, 1),
+    "DATE_AFTER": (1, 1),
+    "DATE_ON_OR_BEFORE": (1, 1),
+    "DATE_ON_OR_AFTER": (1, 1),
+    "DATE_BETWEEN": (2, 2),
+    "DATE_NOT_BETWEEN": (2, 2),
+    "DATE_IS_VALID": (0, 0),
+    "ONE_OF_RANGE": (1, 1),
+    "ONE_OF_LIST": (1, None),
+    "BLANK": (0, 0),
+    "NOT_BLANK": (0, 0),
+    "CUSTOM_FORMULA": (1, 1),
+    "BOOLEAN": (0, 2),
+}
+
+# Legal ConditionType sets per surface, from Google's ConditionType discovery annotations
+# ("Supported by data validation / conditional formatting / filters").
+_DATA_VALIDATION_CONDITIONS: frozenset[str] = frozenset(
+    {
+        "NUMBER_GREATER", "NUMBER_GREATER_THAN_EQ", "NUMBER_LESS", "NUMBER_LESS_THAN_EQ",
+        "NUMBER_EQ", "NUMBER_NOT_EQ", "NUMBER_BETWEEN", "NUMBER_NOT_BETWEEN",
+        "TEXT_CONTAINS", "TEXT_NOT_CONTAINS", "TEXT_EQ", "TEXT_IS_EMAIL", "TEXT_IS_URL",
+        "DATE_EQ", "DATE_BEFORE", "DATE_AFTER", "DATE_ON_OR_BEFORE", "DATE_ON_OR_AFTER",
+        "DATE_BETWEEN", "DATE_NOT_BETWEEN", "DATE_IS_VALID",
+        "ONE_OF_RANGE", "ONE_OF_LIST", "CUSTOM_FORMULA", "BOOLEAN",
+    }
+)
+_CONDITIONAL_FORMAT_CONDITIONS: frozenset[str] = frozenset(
+    {
+        "NUMBER_GREATER", "NUMBER_GREATER_THAN_EQ", "NUMBER_LESS", "NUMBER_LESS_THAN_EQ",
+        "NUMBER_EQ", "NUMBER_NOT_EQ", "NUMBER_BETWEEN", "NUMBER_NOT_BETWEEN",
+        "TEXT_CONTAINS", "TEXT_NOT_CONTAINS", "TEXT_STARTS_WITH", "TEXT_ENDS_WITH", "TEXT_EQ",
+        "DATE_EQ", "DATE_BEFORE", "DATE_AFTER",
+        "BLANK", "NOT_BLANK", "CUSTOM_FORMULA",
+    }
+)
+# Regular filters (basic filter, filter views, slicers) support a strict subset: exactly the
+# types whose ConditionType annotation reads "Supported by ... filters", EXCLUDING the ones marked
+# only for filters on data-source objects. That authoritative regular-filter set is these 19. In
+# particular TEXT_NOT_EQ/DATE_NOT_EQ are data-source-filter-only, and DATE_ON_OR_BEFORE/AFTER,
+# DATE_BETWEEN/NOT_BETWEEN and ONE_OF_LIST are data-validation-only — none are valid on a regular
+# filter, so they are deliberately absent here (a wrong-surface use is caught pre-flight).
+_FILTER_CONDITIONS: frozenset[str] = frozenset(
+    {
+        "NUMBER_GREATER", "NUMBER_GREATER_THAN_EQ", "NUMBER_LESS", "NUMBER_LESS_THAN_EQ",
+        "NUMBER_EQ", "NUMBER_NOT_EQ", "NUMBER_BETWEEN", "NUMBER_NOT_BETWEEN",
+        "TEXT_CONTAINS", "TEXT_NOT_CONTAINS", "TEXT_STARTS_WITH", "TEXT_ENDS_WITH", "TEXT_EQ",
+        "DATE_EQ", "DATE_BEFORE", "DATE_AFTER",
+        "BLANK", "NOT_BLANK", "CUSTOM_FORMULA",
+    }
+)
+
+_CONTEXT_CONDITIONS: dict[str, frozenset[str]] = {
+    "data_validation": _DATA_VALIDATION_CONDITIONS,
+    "conditional_format": _CONDITIONAL_FORMAT_CONDITIONS,
+    "filter": _FILTER_CONDITIONS,
+}
+
+
+def validate_condition(cond_type: object, values: object, context: str) -> None:
+    """Validate a ``BooleanCondition`` type + arg count for a given surface (context).
+
+    ``context`` is one of ``"data_validation"``, ``"conditional_format"``, ``"filter"`` (slicers
+    share the ``"filter"`` surface). Raises :class:`SheetsError` ``bad_condition`` when the type
+    is illegal for that surface (naming the context + the allowed types) or when the number of
+    ``values`` violates the type's required arg count. Pure: no services, no I/O; returns ``None``
+    on success. Shared by the CF, filter/slicer, and data-validation build paths so a wrong-surface
+    condition is caught pre-flight rather than as an opaque Google 400.
+    """
+    legal = _CONTEXT_CONDITIONS.get(context)
+    if legal is None:
+        raise SheetsError(
+            "bad_condition",
+            f"unknown condition context {context!r}; expected one of "
+            f"{', '.join(sorted(_CONTEXT_CONDITIONS))}",
+        )
+    if not isinstance(cond_type, str) or not cond_type:
+        raise SheetsError("bad_condition", "condition requires a non-empty type")
+    if cond_type not in legal:
+        raise SheetsError(
+            "bad_condition",
+            f"condition type {cond_type!r} is not valid for {context}; "
+            f"allowed types: {', '.join(sorted(legal))}",
+        )
+    lo, hi = _CONDITION_ARITY[cond_type]
+    n = len(values) if isinstance(values, (list, tuple)) else 0
+    if n < lo or (hi is not None and n > hi):
+        if lo == hi:
+            want = f"exactly {lo}"
+        elif hi is None:
+            want = f"at least {lo}"
+        else:
+            want = f"between {lo} and {hi}"
+        raise SheetsError(
+            "bad_condition",
+            f"condition type {cond_type} for {context} requires {want} "
+            f"value(s), got {n}",
+        )
+
+
+def _build_condition(condition: dict, context: str = "conditional_format") -> dict:
+    """Build a Google ``BooleanCondition`` from ``{type, values}``.
+
+    ``context`` selects the legal-type/arg-count table (:func:`validate_condition`);
+    defaults to ``"conditional_format"`` (the CF write path). Filter/slicer callers pass
+    ``context="filter"``. Validation runs on the caller's type BEFORE the
+    ``NUMBER_EQ`` -> ``TEXT_EQ`` coercion (both are legal on every surface that permits either).
+    """
     cond_type = condition.get("type")
     if not isinstance(cond_type, str) or not cond_type:
         raise SheetsError("bad_rule", "condition requires a type")
     values = condition.get("values") or []
+    validate_condition(cond_type, values, context)
     out: dict[str, object] = {"type": _effective_condition_type(cond_type, values)}
     if values:
         out["values"] = [{"userEnteredValue": str(v)} for v in values]

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from googleapiclient.errors import HttpError
 
-from .addressing import a1_to_gridrange
+from .addressing import resolve_sheet_id_by_name
 from .errors import SheetsError, classify_google_error
 from .fieldsmask import build_fields_mask
 from .service import SheetsServices
@@ -184,8 +184,13 @@ def _require_sheet(action: str, sheet: str | None) -> str:
 
 
 def _sheet_id_for(services: SheetsServices, spreadsheet_id: str, sheet: str) -> int:
-    """Resolve a sheet NAME to its ``sheetId`` (reusing the addressing layer's cache)."""
-    return a1_to_gridrange(services, spreadsheet_id, sheet)["sheetId"]
+    """Resolve a sheet NAME to its ``sheetId`` via the authoritative title-first resolver.
+
+    Delegates to :func:`resolve_sheet_id_by_name` so a digit-suffixed non-first tab (``"Sheet2"``)
+    is never mis-resolved to the first sheet (ISSUES.md #1) — critical for destructive row/column
+    delete and resize actions.
+    """
+    return resolve_sheet_id_by_name(services, spreadsheet_id, sheet)
 
 
 def _require_dimension(action: str, params: dict) -> str:

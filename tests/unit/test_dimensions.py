@@ -366,6 +366,42 @@ class TestDelete:
             "end": 4,
         }
 
+    def test_delete_digit_suffixed_non_first_tab_targets_correct_sheet(self):
+        # Regression (ISSUES.md #1): deleting rows on "Sheet2" (a digit-suffixed non-first tab)
+        # must target sheetId 222, not fall through to the first tab (111).
+        services, _, batch_rec = _make_service(
+            sheets_index=[
+                {"properties": {"sheetId": 111, "title": "Sheet1", "index": 0}},
+                {"properties": {"sheetId": 222, "title": "Sheet2", "index": 1}},
+            ]
+        )
+        dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="delete",
+            sheet="Sheet2",
+            params={"dimension": "ROWS", "start": 0, "end": 3},
+        )
+        assert _only_request(batch_rec)["deleteDimension"]["range"]["sheetId"] == 222
+
+    def test_resize_digit_suffixed_non_first_tab_targets_correct_sheet(self):
+        # Same guard for a resize (set_props) write on a digit-suffixed non-first tab.
+        services, _, batch_rec = _make_service(
+            sheets_index=[
+                {"properties": {"sheetId": 111, "title": "Sheet1", "index": 0}},
+                {"properties": {"sheetId": 222, "title": "Sheet2", "index": 1}},
+            ]
+        )
+        dimensions(
+            services,
+            SPREADSHEET_ID,
+            action="set_props",
+            sheet="Sheet2",
+            params={"dimension": "COLUMNS", "start": 0, "end": 2, "pixelSize": 80},
+        )
+        req = _only_request(batch_rec)
+        assert req["updateDimensionProperties"]["range"]["sheetId"] == 222
+
 
 # =========================================================================== move
 

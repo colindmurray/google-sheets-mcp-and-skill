@@ -103,8 +103,12 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action add_table --range 'Sheet1!A1:F5
 #   -> { "ok": true, "action": "add_table", "tableId": "<new id>" }
 ```
 
-- Column `type` ∈ `TEXT` / `DOUBLE` / `CURRENCY` / `PERCENT` / `DATE` / `TIME` / `DATETIME` /
-  `DROPDOWN` / `CHECKBOX` / `SMART_CHIP` / `RATING`.
+- Column `type` ∈ `TEXT` / `DOUBLE` / `CURRENCY` / `PERCENT` / `DATE` / `TIME` / `DATE_TIME` /
+  `BOOLEAN` / `DROPDOWN` / `FILES_CHIP` / `PEOPLE_CHIP` / `FINANCE_CHIP` / `PLACE_CHIP` /
+  `RATINGS_CHIP` (the live `ColumnType` discovery enum). Legacy spellings still work as aliases —
+  `DATETIME`→`DATE_TIME`, `CHECKBOX`→`BOOLEAN`, `RATING`→`RATINGS_CHIP` — but `SMART_CHIP` is
+  rejected (no single target): pick the specific `*_CHIP` type. Anything else raises `bad_table`
+  before the API call.
 - **Required:** a `DROPDOWN` column must carry a `ONE_OF_LIST` `validation` (the same structured
   `ValidationRule` shape `set-validation` uses) — omitting it raises `bad_table`.
 - `update_table` takes `{"tableId","name"?,"columns"?,"range"?}` (auto field-mask; `tableId`-only
@@ -153,7 +157,9 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action add_filter_view --range 'Sheet1
 ```
 
 - A per-column `criteria` entry is `{"col": "<letter>", "hidden"?: [...], "condition"?: "NUMBER_GREATER(0)"}`
-  — the `condition` reuses the same terse grammar as conditional formats.
+  — the `condition` reuses the same terse grammar as conditional formats. There is no
+  `visible`/`visibleValues` (Google's `FilterCriteria` has only `hiddenValues` + `condition`), and
+  the `condition` type must be filter-legal (`ONE_OF_LIST`/`ONE_OF_RANGE` are validation-only).
 - `clear_basic_filter` (`--sheet`, no params) is **destructive**. `update_filter_view` takes
   `{"filterViewId","title"?,"range"?,"sorted"?,"criteria"?}`; `delete_filter_view` takes
   `{"filterViewId"}` and is **destructive**.
@@ -176,7 +182,10 @@ gsheets structure <YOUR_SPREADSHEET_ID> --action add_slicer --sheet Dash --range
   given); one of them is **required** (→ `bad_range`). **`anchor`** (a single A1 cell) is
   **required** in params (a multi-cell range is rejected).
 - `columnIndex` is the 0-based offset (into the data range) of the filtered column. `criteria` is
-  `{"hidden"?, "visible"?, "condition"?}` (`condition` reuses the CF/filter condition grammar).
+  `{"hidden"?, "condition"?}` (`condition` reuses the CF/filter condition grammar). There is no
+  `visible`/`visibleValues` — Google's `FilterCriteria` carries only `hiddenValues` + `condition`,
+  so a `visible` key is rejected; express the inverse with `hidden`. The `condition` type must be
+  filter-legal (`ONE_OF_LIST`/`ONE_OF_RANGE` are data-validation-only and rejected pre-flight).
 - `update_slicer` takes `{"slicerId","title"?,"dataRange"?,"columnIndex"?,"criteria"?}` (auto
   field-mask; the **anchor is immutable**). `delete_slicer` takes `{"slicerId"}` and is
   **destructive** (it maps to `deleteEmbeddedObject` — slicers share the embedded-object id space

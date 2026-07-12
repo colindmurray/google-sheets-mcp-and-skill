@@ -490,10 +490,11 @@ class Pivot(_Sub):
 class TableColumn(_Sub):
     """One native-table column (DESIGN §X.0c ``columns`` entry).
 
-    Mirrors ``core.tables.serialize_table``'s per-column dict: ``name``, ``type`` (the
-    ``columnType`` enum TEXT|DOUBLE|CURRENCY|PERCENT|DATE|TIME|DATETIME|DROPDOWN|CHECKBOX|
-    SMART_CHIP|RATING), and ``validation`` (a DROPDOWN column's ``ValidationRule`` one-liner,
-    present only when set).
+    Mirrors ``core.tables.serialize_table``'s per-column dict: ``name``, ``type`` (the live
+    ``columnType`` enum DOUBLE|CURRENCY|PERCENT|DATE|TIME|DATE_TIME|TEXT|BOOLEAN|DROPDOWN|
+    FILES_CHIP|PEOPLE_CHIP|FINANCE_CHIP|PLACE_CHIP|RATINGS_CHIP; on write, legacy
+    DATETIME/CHECKBOX/RATING are accepted as aliases and SMART_CHIP is rejected), and
+    ``validation`` (a DROPDOWN column's ``ValidationRule`` one-liner, present only when set).
     """
 
     name: Optional[str] = None

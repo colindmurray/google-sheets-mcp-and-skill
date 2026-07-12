@@ -20,6 +20,7 @@ from . import tables as _tables
 from .addressing import (
     a1_to_gridrange,
     gridrange_to_a1,
+    resolve_sheet_id_by_name,
     sheet_index_cache,
     sheet_titles,
 )
@@ -146,9 +147,13 @@ def _require_range(action: str, range: str | None) -> str:
 
 
 def _sheet_id_for(services: SheetsServices, spreadsheet_id: str, sheet: str) -> int:
-    """Resolve a sheet NAME to its ``sheetId`` (reusing the addressing layer's cache)."""
-    gr = a1_to_gridrange(services, spreadsheet_id, sheet)
-    return gr["sheetId"]
+    """Resolve a sheet NAME to its ``sheetId`` via the authoritative title-first resolver.
+
+    Delegates to :func:`resolve_sheet_id_by_name` so a digit-suffixed non-first tab (``"Sheet2"``)
+    is never mis-resolved to the first sheet (ISSUES.md #1) — critical for destructive actions
+    such as ``manage_sheets delete``.
+    """
+    return resolve_sheet_id_by_name(services, spreadsheet_id, sheet)
 
 
 def _batch_update(services: SheetsServices, spreadsheet_id: str, requests: list[dict]) -> dict:
@@ -1607,13 +1612,13 @@ def _metadata_read(
             if key is not None:
                 data_filter = {"developerMetadataLookup": {"metadataKey": key}}
             else:
-                # Match all metadata in the document.
-                data_filter = {
-                    "developerMetadataLookup": {
-                        "locationType": "SPREADSHEET",
-                        "visibility": "DOCUMENT",
-                    }
-                }
+                # Match ALL metadata: an unspecified field in a lookup means every
+                # value is considered (#6). Pinning locationType=SPREADSHEET would
+                # exclude the ROW/COLUMN/SHEET anchors this tool itself creates (and
+                # is illegal with INTERSECTING matching); pinning visibility=DOCUMENT
+                # would exclude PROJECT metadata. Omit both for a genuinely
+                # exhaustive read.
+                data_filter = {"developerMetadataLookup": {}}
             search_resp = (
                 services.sheets.spreadsheets()
                 .developerMetadata()

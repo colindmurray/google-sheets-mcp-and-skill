@@ -383,6 +383,136 @@ def test_build_add_table_request_rejects_unknown_column_type():
     assert exc.value.code == "bad_table"
 
 
+@pytest.mark.parametrize(
+    "col_type",
+    [
+        "DOUBLE",
+        "CURRENCY",
+        "PERCENT",
+        "DATE",
+        "TIME",
+        "DATE_TIME",
+        "TEXT",
+        "BOOLEAN",
+        "FILES_CHIP",
+        "PEOPLE_CHIP",
+        "FINANCE_CHIP",
+        "PLACE_CHIP",
+        "RATINGS_CHIP",
+    ],
+)
+def test_build_add_table_request_accepts_each_valid_column_type(col_type):
+    """Every real discovery-enum column type (DROPDOWN aside) round-trips into the request."""
+    services = _service_with_sheet_index()
+    req = build_add_table_request(
+        services,
+        SPREADSHEET_ID,
+        "Sheet1!A1:A10",
+        {"name": "T", "columns": [{"name": "C", "type": col_type}]},
+    )
+    assert req["addTable"]["table"]["columnProperties"][0]["columnType"] == col_type
+
+
+@pytest.mark.parametrize(
+    ("legacy", "resolved"),
+    [
+        ("DATETIME", "DATE_TIME"),
+        ("CHECKBOX", "BOOLEAN"),
+        ("RATING", "RATINGS_CHIP"),
+    ],
+)
+def test_build_add_table_request_maps_legacy_type_aliases(legacy, resolved):
+    """Legacy spellings map to their real discovery enum BEFORE the API call (old callers work)."""
+    services = _service_with_sheet_index()
+    req = build_add_table_request(
+        services,
+        SPREADSHEET_ID,
+        "Sheet1!A1:A10",
+        {"name": "T", "columns": [{"name": "C", "type": legacy}]},
+    )
+    assert req["addTable"]["table"]["columnProperties"][0]["columnType"] == resolved
+
+
+def test_build_add_table_request_rejects_smart_chip_naming_chip_types():
+    """SMART_CHIP has no single target -> rejected pre-flight, naming the specific *_CHIP types."""
+    services = _service_with_sheet_index()
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:A10",
+            {"name": "T", "columns": [{"name": "X", "type": "SMART_CHIP"}]},
+        )
+    assert exc.value.code == "bad_table"
+    # The message points the caller at the concrete chip types.
+    for chip in ("FILES_CHIP", "PEOPLE_CHIP", "FINANCE_CHIP", "PLACE_CHIP", "RATINGS_CHIP"):
+        assert chip in exc.value.message
+
+
+def test_build_add_table_request_rejects_dropped_invalid_types():
+    """Types this module once wrongly accepted (raw DATETIME alias aside) are no longer valid.
+
+    ``DATETIME``/``CHECKBOX``/``RATING`` now alias to real types; the enum itself must NOT carry
+    the invalid spellings, so a raw ``DATETIME`` in the *enum* is gone (only the alias survives).
+    """
+    services = _service_with_sheet_index()
+    # A genuinely unknown value still raises pre-flight.
+    with pytest.raises(SheetsError) as exc:
+        build_add_table_request(
+            services,
+            SPREADSHEET_ID,
+            "Sheet1!A1:A10",
+            {"name": "T", "columns": [{"name": "X", "type": "NOT_A_TYPE"}]},
+        )
+    assert exc.value.code == "bad_table"
+
+
+def test_column_types_enum_is_the_real_discovery_set():
+    """The write-enum is exactly the real discovery values (minus UNSPECIFIED); no legacy junk."""
+    assert tables.COLUMN_TYPES == frozenset(
+        {
+            "DOUBLE",
+            "CURRENCY",
+            "PERCENT",
+            "DATE",
+            "TIME",
+            "DATE_TIME",
+            "TEXT",
+            "BOOLEAN",
+            "DROPDOWN",
+            "FILES_CHIP",
+            "PEOPLE_CHIP",
+            "FINANCE_CHIP",
+            "PLACE_CHIP",
+            "RATINGS_CHIP",
+        }
+    )
+    # The old invalid spellings are gone from the enum itself.
+    for bad in ("DATETIME", "CHECKBOX", "SMART_CHIP", "RATING"):
+        assert bad not in tables.COLUMN_TYPES
+
+
+def test_serialize_table_passes_through_genuine_chip_and_boolean_types():
+    """Read serializer passes columnType through unchanged for BOOLEAN/DATE_TIME/chip tables."""
+    services = _service_with_sheet_index()
+    table = {
+        "name": "T",
+        "columnProperties": [
+            {"columnName": "Flag", "columnType": "BOOLEAN"},
+            {"columnName": "When", "columnType": "DATE_TIME"},
+            {"columnName": "Owner", "columnType": "PEOPLE_CHIP"},
+            {"columnName": "Score", "columnType": "RATINGS_CHIP"},
+        ],
+    }
+    out = serialize_table(table, services, SPREADSHEET_ID)
+    assert [c["type"] for c in out["columns"]] == [
+        "BOOLEAN",
+        "DATE_TIME",
+        "PEOPLE_CHIP",
+        "RATINGS_CHIP",
+    ]
+
+
 def test_build_add_table_request_without_columns_omits_column_properties():
     services = _service_with_sheet_index()
     req = build_add_table_request(

@@ -1493,6 +1493,12 @@ def sheets_set_validation(
     ``validationRule`` (full round-trip). Omitting ``rule`` CLEARS validation on the range —
     that removal is the destructive path. Idempotent.
 
+    Data-validation condition types are a SUBSET of the shared ``ConditionType`` enum: ``BLANK`` /
+    ``NOT_BLANK`` are conditional-format / filter surfaces only and are rejected here pre-flight
+    with ``bad_condition`` (Google 400s them in validation) — to require a value use
+    ``CUSTOM_FORMULA`` (e.g. ``=LEN(A1)>0``). Each type's argument count is also checked before
+    dispatch (``NUMBER_BETWEEN`` needs 2, ``ONE_OF_RANGE`` 1, ``BOOLEAN`` 0, …).
+
     Returns:
         ``{ok, spreadsheetId, range, validation, validationRule}``.
     """
@@ -1592,20 +1598,29 @@ def sheets_structure(
         merge {"mergeType": "MERGE_ALL"}; add_named {"name": "x"};
         protect {"description", "editors", "warningOnly"}; freeze {"rows": 1, "cols": 2};
         tab_color {"color": "#4285F4"}; group/ungroup {"dimension": "ROWS", "start", "end"};
-        add_table {"name": "Sales", "columns": [{"name", "type", "validation"?}, ...]} — a
-        DROPDOWN column REQUIRES "validation": {"type": "ONE_OF_LIST", "values": [...]} (the
-        same structured shape ``sheets_set_validation`` takes; the terse one-liner string the
-        read side emits is NOT accepted on write); update_table {"tableId", "name"?, "columns"?,
+        add_table {"name": "Sales", "columns": [{"name", "type", "validation"?}, ...]} — column
+        "type" is a live ColumnType: DOUBLE | CURRENCY | PERCENT | DATE | TIME | DATE_TIME | TEXT |
+        BOOLEAN | DROPDOWN | FILES_CHIP | PEOPLE_CHIP | FINANCE_CHIP | PLACE_CHIP | RATINGS_CHIP
+        (legacy DATETIME/CHECKBOX/RATING still accepted as aliases → DATE_TIME/BOOLEAN/RATINGS_CHIP;
+        SMART_CHIP is rejected — pick the specific *_CHIP type). A DROPDOWN column REQUIRES
+        "validation": {"type": "ONE_OF_LIST", "values": [...]} (the same structured shape
+        ``sheets_set_validation`` takes; the terse one-liner string the read side emits is NOT
+        accepted on write); update_table {"tableId", "name"?, "columns"?,
         "range"?}; delete_table {"tableId"};
         add_banding {"rowBanding"?: {"header", "first", "second", "footer"}, "columnBanding"?}
         (hex colors); update_banding {"bandedRangeId", "rowBanding"?, "columnBanding"?,
         "range"?}; delete_banding {"bandedRangeId"};
         set_basic_filter {"sorted"?: [{"col": "C", "order": "ASCENDING"}], "criteria"?:
-        [{"col": "B", "hidden"?, "visible"?, "condition"?}]}; clear_basic_filter {};
+        [{"col": "B", "hidden"?, "condition"?}]} (Google's FilterCriteria has only hiddenValues +
+        condition — there is no "visible"/visibleValues; express the inverse with "hidden" or a
+        "condition"); a filter/slicer "condition" type must be filter-legal (BLANK/NOT_BLANK/
+        CUSTOM_FORMULA/NUMBER_*/TEXT_*/DATE_EQ|BEFORE|AFTER — NOT ONE_OF_LIST/ONE_OF_RANGE, which are
+        data-validation-only); clear_basic_filter {};
         add_filter_view {"title", "sorted"?, "criteria"?}; update_filter_view {"filterViewId",
         "title"?, "range"?, "sorted"?, "criteria"?}; delete_filter_view {"filterViewId"};
         add_slicer {"anchor": "Sheet1!H2" (REQUIRED single cell), "dataRange"? (or top-level
-        range), "title"?, "columnIndex"?, "criteria"?: {"hidden"?, "visible"?, "condition"?}};
+        range), "title"?, "columnIndex"?, "criteria"?: {"hidden"?, "condition"?}} (same
+        FilterCriteria surface — no "visible"; filter-legal condition types only);
         update_slicer {"slicerId" (REQUIRED), "title"?, "dataRange"?, "columnIndex"?,
         "criteria"?}; delete_slicer {"slicerId" (REQUIRED)};
         spreadsheet_props {"title"?, "locale"?, "timeZone"?}.

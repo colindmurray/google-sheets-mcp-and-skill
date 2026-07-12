@@ -95,8 +95,14 @@ def _patch_addressing(monkeypatch, *, sheet_id: int = 0, title: str = "Cliff") -
             return title
         return f"{title}!GR"
 
+    def fake_resolve_sheet_id_by_name(services, spreadsheet_id, name):
+        return sheet_id
+
     monkeypatch.setattr(structure_mod, "a1_to_gridrange", fake_a1_to_gridrange)
     monkeypatch.setattr(structure_mod, "gridrange_to_a1", fake_gridrange_to_a1)
+    monkeypatch.setattr(
+        structure_mod, "resolve_sheet_id_by_name", fake_resolve_sheet_id_by_name
+    )
 
 
 def _make_http_error(status: int = 403):
@@ -866,6 +872,28 @@ class TestManageSheets:
             manage_sheets(services, SHEET_ID, action="delete")
         assert exc.value.code == "missing_sheet"
 
+    def test_delete_digit_suffixed_non_first_tab_targets_correct_sheet(self):
+        # Regression (ISSUES.md #1): deleting "Sheet2" (a digit-suffixed tab that is NOT first)
+        # must delete sheetId 222, never fall through to the first tab (111). Uses the REAL
+        # addressing resolver (no _patch_addressing) driven by a wired multi-tab index.
+        services = _make_service()
+        _wire_spreadsheets_method(
+            services,
+            "get",
+            [
+                {
+                    "sheets": [
+                        {"properties": {"title": "Sheet1", "sheetId": 111, "index": 0}},
+                        {"properties": {"title": "Sheet2", "sheetId": 222, "index": 1}},
+                    ]
+                }
+            ],
+        )
+        rec = _wire_spreadsheets_method(services, "batchUpdate", [{}])
+        out = manage_sheets(services, SHEET_ID, action="delete", sheet="Sheet2")
+        assert rec.calls[0]["body"]["requests"][0] == {"deleteSheet": {"sheetId": 222}}
+        assert out["sheet"] == {"sheetId": 222, "title": "Sheet2"}
+
     def test_duplicate_captures_new_id(self, monkeypatch):
         services = _make_service()
         _patch_addressing(monkeypatch, sheet_id=2)
@@ -1144,15 +1172,84 @@ class TestMetadata:
             }
         ]
 
-    def test_read_all_uses_document_filter(self, monkeypatch):
+    def test_read_all_lookup_is_exhaustive(self, monkeypatch):
+        # #6/T1.6: pinning locationType/visibility excludes ROW/COLUMN/SHEET anchors
+        # (and PROJECT visibility). The all-branch must omit both so it matches everything.
         services = _make_service()
         rec = _wire_developer_metadata_method(
             services, "search", [{"matchedDeveloperMetadata": []}]
         )
         out = metadata(services, SHEET_ID, action="read")
         body = rec.calls[0]["body"]
-        assert body["dataFilters"][0]["developerMetadataLookup"]["locationType"] == "SPREADSHEET"
+        lookup = body["dataFilters"][0]["developerMetadataLookup"]
+        assert "locationType" not in lookup
+        assert "visibility" not in lookup
+        assert lookup == {}
         assert out["metadata"] == []
+
+    def test_read_all_returns_every_anchor_type(self, monkeypatch):
+        # Round-trip: a book carrying ROW/COLUMN/SHEET/SPREADSHEET anchors must all
+        # come back from an exhaustive read-all.
+        _patch_addressing(monkeypatch)
+        services = _make_service()
+        matched = [
+            {
+                "developerMetadata": {
+                    "metadataId": 1,
+                    "metadataKey": "row-anchor",
+                    "metadataValue": "r",
+                    "visibility": "DOCUMENT",
+                    "location": {
+                        "dimensionRange": {
+                            "sheetId": 0,
+                            "dimension": "ROWS",
+                            "startIndex": 0,
+                            "endIndex": 1,
+                        }
+                    },
+                }
+            },
+            {
+                "developerMetadata": {
+                    "metadataId": 2,
+                    "metadataKey": "col-anchor",
+                    "metadataValue": "c",
+                    "visibility": "PROJECT",
+                    "location": {
+                        "dimensionRange": {
+                            "sheetId": 0,
+                            "dimension": "COLUMNS",
+                            "startIndex": 2,
+                            "endIndex": 3,
+                        }
+                    },
+                }
+            },
+            {
+                "developerMetadata": {
+                    "metadataId": 3,
+                    "metadataKey": "sheet-anchor",
+                    "metadataValue": "s",
+                    "visibility": "DOCUMENT",
+                    "location": {"sheetId": 0},
+                }
+            },
+            {
+                "developerMetadata": {
+                    "metadataId": 4,
+                    "metadataKey": "book-anchor",
+                    "metadataValue": "b",
+                    "visibility": "DOCUMENT",
+                    "location": {"spreadsheet": True},
+                }
+            },
+        ]
+        _wire_developer_metadata_method(
+            services, "search", [{"matchedDeveloperMetadata": matched}]
+        )
+        out = metadata(services, SHEET_ID, action="read")
+        ids = [m["metadataId"] for m in out["metadata"]]
+        assert ids == [1, 2, 3, 4]
 
     def test_read_by_id_uses_get(self, monkeypatch):
         services = _make_service()

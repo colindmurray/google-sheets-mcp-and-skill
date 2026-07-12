@@ -33,22 +33,46 @@ from .fieldsmask import build_fields_mask
 from .rules import rule_to_validation, validation_to_rule
 from .service import SheetsServices
 
-#: ``Table.columnProperties[].columnType`` enum (DESIGN §X.0c). A ``DROPDOWN``
-#: column REQUIRES a ``dataValidationRule`` with a ``ONE_OF_LIST`` condition.
+#: ``Table.columnProperties[].columnType`` write-enum — the real v4 discovery values for
+#: ``TableColumnProperties.columnType`` (minus ``COLUMN_TYPE_UNSPECIFIED``, which is the
+#: server default, not a caller-selectable write target). A ``DROPDOWN`` column REQUIRES a
+#: ``dataValidationRule`` with a ``ONE_OF_LIST`` condition.
 COLUMN_TYPES: frozenset[str] = frozenset(
     {
-        "TEXT",
         "DOUBLE",
         "CURRENCY",
         "PERCENT",
         "DATE",
         "TIME",
-        "DATETIME",
+        "DATE_TIME",
+        "TEXT",
+        "BOOLEAN",
         "DROPDOWN",
-        "CHECKBOX",
-        "SMART_CHIP",
-        "RATING",
+        "FILES_CHIP",
+        "PEOPLE_CHIP",
+        "FINANCE_CHIP",
+        "PLACE_CHIP",
+        "RATINGS_CHIP",
     }
+)
+
+#: Legacy/deprecated column-type spellings this module once accepted, mapped to their real
+#: discovery-enum target. Applied in :func:`_build_column_properties` BEFORE validation so old
+#: callers keep working. ``SMART_CHIP`` is deliberately absent — it has no single target and is
+#: rejected with a message naming the specific ``*_CHIP`` types.
+COLUMN_TYPE_ALIASES: dict[str, str] = {
+    "DATETIME": "DATE_TIME",
+    "CHECKBOX": "BOOLEAN",
+    "RATING": "RATINGS_CHIP",
+}
+
+#: The concrete ``*_CHIP`` column types, named in the ``SMART_CHIP`` rejection message.
+_CHIP_TYPES: tuple[str, ...] = (
+    "FILES_CHIP",
+    "PEOPLE_CHIP",
+    "FINANCE_CHIP",
+    "PLACE_CHIP",
+    "RATINGS_CHIP",
 )
 
 
@@ -372,6 +396,15 @@ def _build_column_properties(columns: object) -> list[dict] | None:
         col_type = col.get("type")
         if not col_type:
             raise SheetsError("bad_table", f"columns[{i}] requires a 'type'")
+        # Map legacy spellings (DATETIME/CHECKBOX/RATING) to the real discovery enum BEFORE
+        # validation so old callers keep working.
+        col_type = COLUMN_TYPE_ALIASES.get(col_type, col_type)
+        if col_type == "SMART_CHIP":
+            raise SheetsError(
+                "bad_table",
+                f"columns[{i}] type 'SMART_CHIP' is not a column type — choose the specific "
+                f"chip type: {', '.join(_CHIP_TYPES)}",
+            )
         if col_type not in COLUMN_TYPES:
             raise SheetsError(
                 "bad_table",
