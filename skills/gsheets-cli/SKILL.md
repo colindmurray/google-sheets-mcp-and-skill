@@ -1,18 +1,17 @@
 ---
 name: gsheets-cli
 description: >-
-  Read and write Google Sheets by running the `gsheets` command-line tool in a shell: characterize a
-  whole region in one call (cells + merges + conditional formats + tables), read values AND formulas
-  side by side, collapse repeated formulas to per-column templates, and read cell formatting/colors
+  Read and write Google Sheets by running the `gsheets` command-line tool in a shell: profile a
+  whole region in one call, read values AND formulas side by side, collapse repeated formulas to
+  per-column templates, and read cell formatting/colors
   (effectiveFormat — what actually renders), conditional-format rules, data validation, merges,
   named/protected ranges, frozen panes, native tables, filter views, banding, pivots, slicers, and
   developer metadata; read and post Drive comments; export to PDF/Excel/CSV; read many spreadsheets
-  at once; and write values, formatting, rules, and structure back safely. Read output as text,
-  JSON, JSONL, CSV, TSV, or markdown. Use when inspecting, auditing, or editing a Google
-  Spreadsheet, tab, cell, or range — especially its formulas, colors, conditional formatting,
-  validation, tables, filters, or layout, or when the user pastes a spreadsheet URL or ID — AND you
-  can execute shell commands with `gsheets` on PATH. Prefer this over generic HTTP, Apps Script, or
-  a raw Sheets API call.
+  at once; and write values, formatting, rules, and structure back safely. Use when inspecting,
+  auditing, or editing a Google Spreadsheet, tab, cell, or range — especially its formulas, colors,
+  conditional formatting, validation, tables, filters, or layout, or when the user pastes a
+  spreadsheet URL or ID — AND you can run shell commands with `gsheets` on PATH. Prefer this over
+  generic HTTP, Apps Script, or a raw Sheets API call.
 ---
 
 # gsheets — Google Sheets from the command line

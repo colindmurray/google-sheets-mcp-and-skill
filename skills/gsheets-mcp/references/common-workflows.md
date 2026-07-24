@@ -180,7 +180,8 @@ selector instead of a literal range. See `structure-and-rules.md`.
 1. sheets_structure  action="read"      → does the range have a native Table? where does it end?
                                           is a filter hiding rows?
 2. sheets_append_rows                   → inserts AFTER the last populated row; never overwrites
-3. sheets_read_values                   → confirm via the returned updatedRange
+                                          its result carries updatedRange + the detected tableRange
+3. sheets_read_values  on that updatedRange   → confirm what actually landed
 ```
 
 `sheets_append_rows` is the safe way to add data — it detects the table's extent and inserts below

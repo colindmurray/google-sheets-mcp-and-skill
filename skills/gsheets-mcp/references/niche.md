@@ -56,20 +56,18 @@ description. What follows is what the description cannot tell you.
 A native Table gives a range a name, a typed column schema, and a known end — which is what lets
 `sheets_append_rows` find the bottom reliably.
 
-- **A `DROPDOWN` column requires a `ONE_OF_LIST` validation** in its definition. Omitting it fails
-  pre-flight. The shape is the same structured rule `sheets_set_validation` takes — the terse
-  one-liner the read side emits is *not* accepted on write.
-- **`SMART_CHIP` is rejected** as a column type because it has no single target — pick the specific
-  chip type (`PEOPLE_CHIP`, `FILES_CHIP`, `FINANCE_CHIP`, `PLACE_CHIP`, `RATINGS_CHIP`). Legacy
-  spellings `DATETIME`, `CHECKBOX`, and `RATING` still work as aliases.
+The tool description covers the column types and the required-validation rule. What it cannot tell
+you:
+
 - **Column types are author-declared and never validated against contents.** A column can report
   `DOUBLE` while holding text, carry no type at all, or be named `Column 23`. The read is faithful
-  to what the author declared — so do not auto-generate a schema from it and trust it. Verify
-  against actual cell values.
-- Table dropdowns are invisible to `sheets_inspect` (they are a table property, not cell
-  validation). Audit them here.
-- On update, band colors are **not** atomic — only the ones you supply are masked, so unspecified
-  band colors survive.
+  to what the author declared — so do not auto-generate a schema from `tables[].columns[].type` and
+  trust it downstream. Verify against actual cell values first.
+- **Table dropdowns are invisible to `sheets_inspect`** — they are a table property, not cell
+  validation, so a validation audit that only reads cells will report none. This is the audit path.
+- **The read side and the write side speak different dialects for validation.** A table's read
+  emits a terse one-liner; the write wants the same structured rule `sheets_set_validation` takes.
+  Do not feed the read's string back in.
 
 ### Banding
 
@@ -83,11 +81,11 @@ single band you changed.
 A sheet has **one** basic filter (sort plus per-column hidden values) and any number of named,
 non-destructive **filter views**.
 
-- A per-column criterion has **only** `hidden` values and/or a `condition` — Google's
-  `FilterCriteria` has no `visible`/`visibleValues`, and passing one is rejected. Express the
-  inverse as `hidden`.
-- The `condition` reuses the conditional-format grammar, but the type must be **filter-legal**:
-  `ONE_OF_LIST` / `ONE_OF_RANGE` are data-validation-only and rejected here.
+- **There is no way to say "show only these".** Google's `FilterCriteria` carries hidden values and
+  a condition, never a visible list — so every "keep only X" intent has to be inverted into "hide
+  everything else" before you can express it. This is the most common modelling mistake here.
+- The `condition` reuses the conditional-format grammar and the same 19-type allowlist (see
+  `structure-and-rules.md`); the data-validation-only types are rejected.
 - **A filter hides rows.** Before writing anything row-addressed, confirm what is concealed — see
   `structure-and-rules.md`.
 
