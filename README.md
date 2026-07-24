@@ -209,7 +209,14 @@ exported csv -> ./budget.csv (2113 bytes)
 
 A fuller CLI walkthrough is in [docs/usage.md](docs/usage.md), and [examples/](examples/) holds runnable recipe scripts.
 
-**Installing the skill.** A bundled `SKILL.md` lives at [`skill/SKILL.md`](skill/SKILL.md), with deeper references under [`skill/references/`](skill/references/). It wraps the `gsheets` CLI for agents that support the skill format — drop the `skill/` directory into your agent's skills location (for Claude Code, copy it to `~/.claude/skills/gsheets/`) and put `gsheets` on `PATH`. The skill teaches the understand → change → escape-hatch workflow and the safe-write defaults; the CLI is the deterministic helper underneath.
+**Installing a skill.** Two bundled skills live under [`skills/`](skills/), one per transport — install the one matching how your agent reaches this project:
+
+| Skill | For an agent that | Requires |
+|---|---|---|
+| [`skills/gsheets-cli/`](skills/gsheets-cli/) | runs shell commands | `gsheets` on `PATH` |
+| [`skills/gsheets-mcp/`](skills/gsheets-mcp/) | calls MCP tools | the `google-sheets-mcp` server connected |
+
+Each is a self-contained `SKILL.md` plus tiered `references/` (~80% / ~15% / ~5% of tasks), so the agent loads only the depth a task needs. Drop the chosen directory into your agent's skills location — for Claude Code, copy it to `~/.claude/skills/<name>/`. Both teach the same understand → change → escape-hatch workflow and safe-write defaults over the same core; they differ only in how they call it. The MCP skill deliberately does **not** restate the tool descriptions the server already ships — it covers tool selection, call sequencing, and the cross-tool traps. Installing both is fine: each opens with a transport check that hands off to the other.
 
 ## Authentication
 

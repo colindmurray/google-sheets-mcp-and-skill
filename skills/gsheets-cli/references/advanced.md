@@ -84,8 +84,8 @@ The anchor cell gains a `pivot` object (read-only; present only on the anchor):
 ### `inspect --chips` — smart chips (person / file / place / finance)
 
 A smart chip (a `@person`, a linked Drive file, a place, a finance ticker) reads back as **plain
-text** everywhere else — the only structured signal is the cell's `chipRuns`. `--chips` (MCP
-`chips=true`) recovers it, attaching a `chips` list **only** to the cells that carry chip runs:
+text** everywhere else — the only structured signal is the cell's `chipRuns`. `--chips` recovers
+it, attaching a `chips` list **only** to the cells that carry chip runs:
 
 ```sh
 gsheets --json inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:A20' --chips

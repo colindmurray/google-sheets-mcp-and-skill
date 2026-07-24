@@ -231,13 +231,18 @@ def test_src_gsheets_package_exists_on_disk() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Bundled skill ships in the wheel (#32 / T4.3) — the distribution is literally
-# named "…-and-skill", so an installed wheel MUST carry SKILL.md + references/.
+# Bundled skills ship in the wheel (#32 / T4.3) — the distribution is literally
+# named "…-and-skill", so an installed wheel MUST carry each skill's SKILL.md +
+# references/. Two skills ship: gsheets-cli (drives the CLI) and gsheets-mcp
+# (drives the MCP tools).
 # --------------------------------------------------------------------------- #
 
+#: Every bundled skill directory under the repo-root ``skills/`` tree.
+BUNDLED_SKILLS = ("gsheets-cli", "gsheets-mcp")
 
-def test_wheel_force_includes_skill_tree(pyproject: dict) -> None:
-    """Config-level guard: the wheel target force-includes skill/ -> gsheets/skill.
+
+def test_wheel_force_includes_skills_tree(pyproject: dict) -> None:
+    """Config-level guard: the wheel target force-includes skills/ -> gsheets/skills.
 
     Fast, no build. Asserts the intent is declared so a config regression is
     caught even if the (slower) build-and-inspect test is skipped.
@@ -247,14 +252,24 @@ def test_wheel_force_includes_skill_tree(pyproject: dict) -> None:
         pytest.skip("skill force-include contract is hatchling-specific")
     wheel = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
     force_include = wheel.get("force-include", {})
-    assert force_include.get("skill") == "gsheets/skill", (
-        "wheel must force-include the skill/ tree as gsheets/skill so the bundled "
-        "skill installs with the package"
+    assert force_include.get("skills") == "gsheets/skills", (
+        "wheel must force-include the skills/ tree as gsheets/skills so the bundled "
+        "skills install with the package"
     )
 
 
-def test_built_wheel_contains_skill(tmp_path: Path) -> None:
-    """Build the real wheel and assert it carries the skill as package data.
+def test_bundled_skills_exist_on_disk() -> None:
+    """Both skills exist with a SKILL.md and at least one reference doc."""
+    root = PYPROJECT_PATH.parent / "skills"
+    for name in BUNDLED_SKILLS:
+        skill_md = root / name / "SKILL.md"
+        assert skill_md.is_file(), f"missing skills/{name}/SKILL.md"
+        refs = sorted((root / name / "references").glob("*.md"))
+        assert refs, f"missing skills/{name}/references/*.md"
+
+
+def test_built_wheel_contains_skills(tmp_path: Path) -> None:
+    """Build the real wheel and assert it carries both skills as package data.
 
     Guarded to run once (module-scoped build via a marker file would over-engineer
     this); a single wheel build is fast enough for CI. Skips gracefully if no
@@ -289,12 +304,14 @@ def test_built_wheel_contains_skill(tmp_path: Path) -> None:
     with zipfile.ZipFile(wheel_path) as zf:
         names = zf.namelist()
 
-    # SKILL.md ships under the package as gsheets/skill/SKILL.md.
-    assert "gsheets/skill/SKILL.md" in names, (
-        f"wheel is missing gsheets/skill/SKILL.md; contents:\n" + "\n".join(names)
-    )
-    # At least one reference doc ships too.
-    refs = [n for n in names if n.startswith("gsheets/skill/references/") and n.endswith(".md")]
-    assert refs, (
-        "wheel is missing gsheets/skill/references/*.md; contents:\n" + "\n".join(names)
-    )
+    # Each skill ships under the package as gsheets/skills/<name>/SKILL.md.
+    for skill in BUNDLED_SKILLS:
+        assert f"gsheets/skills/{skill}/SKILL.md" in names, (
+            f"wheel is missing gsheets/skills/{skill}/SKILL.md; contents:\n" + "\n".join(names)
+        )
+        # At least one reference doc ships with it too.
+        prefix = f"gsheets/skills/{skill}/references/"
+        refs = [n for n in names if n.startswith(prefix) and n.endswith(".md")]
+        assert refs, (
+            f"wheel is missing {prefix}*.md; contents:\n" + "\n".join(names)
+        )
