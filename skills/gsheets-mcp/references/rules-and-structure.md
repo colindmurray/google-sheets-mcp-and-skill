@@ -1,7 +1,10 @@
-# gsheets (MCP) — structure & rules
+# gsheets (MCP) — rules & structure
 
-The ~15% tier: tasks that go past reading and writing cell values. Read `common-workflows.md` first
-— this assumes the read ladder, the read → write → verify rhythm, and the auto field-mask.
+> **Reference 2 of 3.** **Read `reading-and-writing.md` first** — this assumes the read ladder, the
+> read → write → verify rhythm, and the auto field-mask. `advanced-objects.md` (~5%) is the tier above.
+
+Operating on the sheet **around** the cells (~15% of tasks): everything that goes past reading and
+writing cell values.
 
 Each tool's own description documents its actions and `params` shapes. What follows is the grammar
 you need to *author* a rule, the ordering hazards, and the choices between overlapping actions.
@@ -110,7 +113,7 @@ copied from a working CF rule into a validation is a common and confusing failur
 
 **The table blind spot.** A dropdown enforced by a *native Table column type* is a table property,
 not cell validation — `sheets_inspect` reports no validation on those cells at all. Audit those via
-`sheets_structure`; see `niche.md`.
+`sheets_structure`; see `advanced-objects.md`.
 
 ---
 
@@ -124,7 +127,7 @@ terse and flattened — never grid data.
 Read it before any structural edit, and read it again to verify. The base mutating actions —
 `merge`, `unmerge`, `add_named`, `delete_named`, `protect`, `unprotect`, `freeze`, `tab_color`,
 `group`, `ungroup` — cover the everyday cases; the object CRUD for tables, banding, filter views and
-slicers is in `niche.md`.
+slicers is in `advanced-objects.md`.
 
 Two things this read exists to prevent:
 
@@ -242,6 +245,6 @@ The tool's description covers its two backends and their scope requirements. Thr
 
 ## See also
 
-- `common-workflows.md` (~80%) — the everyday journeys these operations plug into.
-- `niche.md` (~5%) — rich-text/pivot/chip reads, native Tables, banding, filter views, slicers,
+- `reading-and-writing.md` (~80%) — the everyday journeys these operations plug into.
+- `advanced-objects.md` (~5%) — rich-text/pivot/chip reads, native Tables, banding, filter views, slicers,
   charts, and the raw batch escape hatch.

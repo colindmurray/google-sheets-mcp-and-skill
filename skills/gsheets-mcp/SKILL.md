@@ -245,17 +245,21 @@ These are the failures that come from how tools relate, so no single tool descri
 ## Detailed references — read on demand
 
 Each tool's own description is the authority on its arguments and return shape. These references
-carry the sequences and grammar that live *between* tools, split by how often a task needs them.
-Read only the tier the task calls for.
+carry the sequences and grammar that live *between* tools, split by **what you are operating on** —
+which also tracks how often a task needs them. Read them in order and stop at the one that answers
+your task; each assumes the ones before it.
 
-- **`references/common-workflows.md`** — ~80% of tasks. Complete tool sequences for the everyday
-  journeys: understanding an unfamiliar workbook, explaining what a region computes, tracing why a
-  cell is coloured, extracting a dataset for analysis, editing values safely, growing a table,
-  restyling a region, and surveying several spreadsheets at once.
-- **`references/structure-and-rules.md`** — ~15%. The conditional-format line grammar in full (you
-  need it to author a `rule`), index-safe rule editing, validation round-trips, the structural read
-  envelope and base mutations, row/column sizing and hidden-vs-filtered, the data-operation verbs,
-  insert-proof addressing end to end, comments, and export.
-- **`references/niche.md`** — ~5%. Rich-text/pivot/smart-chip reads, native Tables, banding, filter
-  views and slicers, developer metadata, the charts read-back gap, the `sheets_batch` escape hatch,
-  and what has no typed tool at all.
+- **`references/reading-and-writing.md`** — **start here.** Operating on cells; ~80% of tasks.
+  Complete tool sequences for the everyday journeys: understanding an unfamiliar workbook,
+  explaining what a region computes, tracing why a cell is coloured, extracting a dataset for
+  analysis, editing values safely, growing a table, restyling a region, and surveying several
+  spreadsheets at once.
+- **`references/rules-and-structure.md`** — operating on the sheet *around* the cells; ~15%. The
+  conditional-format line grammar in full (you need it to author a `rule`), index-safe rule editing,
+  validation round-trips, the structural read envelope and base mutations, row/column sizing and
+  hidden-vs-filtered, the data-operation verbs, insert-proof addressing end to end, comments, and
+  export.
+- **`references/advanced-objects.md`** — specialised objects and the escape hatch; ~5%.
+  Rich-text/pivot/smart-chip reads, native Tables, banding, filter views and slicers, developer
+  metadata, the charts read-back gap, the `sheets_batch` escape hatch, and what has no typed tool
+  at all.

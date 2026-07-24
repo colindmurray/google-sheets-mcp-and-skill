@@ -1,12 +1,14 @@
-# gsheets — intermediate tier
+# gsheets — rules & structure
 
-The intermediate tier (~15% of tasks): operations that enter a workflow only for a specific need —
-the structural read, cross-file fan-out, conditional-format and validation writes, comment threads,
-the base structural mutations (merge/protect/freeze/group/tab color/named ranges), range data verbs
-(find/replace, sort, dedupe, …), row/column dimension ops, and local export. **Read `basic.md`
-first** — this assumes you already know the read → write → verify loop, A1 addressing, the global
-`--json`/`--scopes`/retry flags (before the subcommand; see "Retry & backoff" below), USER_ENTERED
-defaults, and the auto field-mask.
+> **Reference 2 of 3.** **Read `reading-and-writing.md` first** — it carries A1 addressing, the
+> global `--json`/`--scopes`/retry flag placement, USER_ENTERED defaults, and the auto field-mask,
+> all of which this tier assumes. `advanced-objects.md` (~5%) is the tier above.
+
+Operating on the sheet **around** the cells (~15% of tasks): operations that enter a workflow only
+for a specific need — the structural read, cross-file fan-out, conditional-format and validation
+writes, comment threads, the base structural mutations (merge/protect/freeze/group/tab color/named
+ranges), range data verbs (find/replace, sort, dedupe, …), row/column dimension ops, and local
+export.
 `gsheets <cmd> --help` is the authoritative flag source. Examples use `<YOUR_SPREADSHEET_ID>`.
 
 ## Reading
@@ -45,7 +47,7 @@ viewer actually has hidden.
 
 ### `read-values` — major dimension & non-A1 addressing
 
-The everyday `read-values` (range list, `--render`) is in `basic.md`. Two intermediate-tier knobs:
+The everyday `read-values` (range list, `--render`) is in `reading-and-writing.md`. Two intermediate-tier knobs:
 
 **Transpose the grid (`--major`).** Read column-major instead of the default row-major — handy when a
 column *is* the record and you want each column as one inner array.
@@ -97,7 +99,7 @@ payload, instead of letting an oversized read fail only at the token cap.
 
 ### `read-conditional-formats --range` — scope CF reads to a rectangle
 
-`read-conditional-formats` (CF rules with their priority index; in `basic.md`) defaults to every
+`read-conditional-formats` (CF rules with their priority index; in `reading-and-writing.md`) defaults to every
 sheet, or `--sheet NAME` for one tab. `--range` narrows further: only rules **whose range overlaps**
 the given A1 rectangle, with their original sheet-level indices preserved (so an index you read here
 still addresses the right rule in `set-conditional-format`).
@@ -252,7 +254,7 @@ gsheets set-conditional-format <YOUR_SPREADSHEET_ID> --action delete --index 5
 | `--action {add,update,delete}` | Single-form action. Omit with `--rules-json`. |
 | `--sheet NAME` | Target tab. |
 | `--index N` | Positional index. **Required** for `update`/`delete`; insert position for `add`. |
-| `--rule 'LINE'` | A **body** line (carries no index — addressing is `--index` alone). See the CF line grammar in `basic.md`. |
+| `--rule 'LINE'` | A **body** line (carries no index — addressing is `--index` alone). See the CF line grammar in `reading-and-writing.md`. |
 | `--rule-json '{ranges,kind,condition,format}'` | Structured form instead of a line. |
 | `--rules-json '[{"action","index","rule"}]'` | **Batch** form. `rule` omitted for delete. |
 
@@ -511,7 +513,7 @@ by the returned `path`/`bytes`, not by re-reading the sheet.
 ---
 
 For the everyday read → write → verify loop (overview, inspect, read-values, write-values,
-append-rows, clear, format, manage-sheets) see `basic.md`. For the fringe ~5% — table/banding/
-filter-view/slicer object CRUD, developer `metadata`, `charts`, the raw `batch` escape hatch, and the
-`--rich-text` / `--pivot` reads — see `advanced.md`. `gsheets <cmd> --help` is the authoritative
-flag source for any command.
+append-rows, clear, format, manage-sheets) see `reading-and-writing.md`. For the specialised objects
+(~5%) — table/banding/filter-view/slicer CRUD, developer `metadata`, `charts`, the raw `batch`
+escape hatch, and the `--rich-text` / `--pivot` reads — see `advanced-objects.md`.
+`gsheets <cmd> --help` is the authoritative flag source for any command.

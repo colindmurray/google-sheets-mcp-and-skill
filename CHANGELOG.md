@@ -13,18 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller) and gains a sibling `skills/gsheets-mcp/`. An agent should install the one matching how it
   reaches this project; each opens with a transport check that hands off to the other, so installing
   both is safe.
+  - **Both skills use the same three reference files**, named for **what you operate on** rather
+    than for a difficulty tier: `references/reading-and-writing.md` (cells — the everyday loop,
+    ~80% of tasks), `references/rules-and-structure.md` (the sheet around the cells — conditional
+    formats, validation, structure, dimensions, data ops, comments, export; ~15%), and
+    `references/advanced-objects.md` (specialised objects and the raw escape hatch; ~5%). The
+    reading order the old `basic`/`intermediate`/`advanced` names implied is now stated explicitly
+    in each `SKILL.md` and in a banner at the top of each reference.
   - **`skills/gsheets-cli/`** — assumes the `gsheets` binary on `PATH`; every example is a shell
-    command. Keeps the existing `references/{basic,intermediate,advanced}.md` tiering (~80/15/5% of
-    tasks). Removed the `out_path`, `major_dimension`, `diff_only`, `max_cells`, `data_filters`,
+    command. Removed the `out_path`, `major_dimension`, `diff_only`, `max_cells`, `data_filters`,
     `chips`, and per-call `retry` asides, which described the MCP adapter and were unreachable from
     a shell; file output is now documented as the stdout redirect it actually is.
   - **`skills/gsheets-mcp/`** — assumes the MCP server is connected and the CLI is not. Deliberately
-    does **not** restate what each tool's own description already carries (arguments, return shape).
-    Covers the layer above: a routing table from intent to tool across all 24 `sheets_*` tools, the
-    read ladder, the write-then-verify pairing per tool, the four mechanisms for keeping results out
-    of context, the shared read-RPM quota, and the cross-tool invariants no single tool description
-    can state. References tier the same way: `common-workflows.md` (~80%), `structure-and-rules.md`
-    (~15%, including the conditional-format line grammar needed to author a rule), `niche.md` (~5%).
+    does **not** restate what each tool's own description or the server's `instructions` block
+    already carries. Covers the layer above: a routing table from intent to tool across all 24
+    `sheets_*` tools, the read ladder, the write-then-verify pairing per tool, the four mechanisms
+    for keeping results out of context, the shared read-RPM quota, the conditional-format line
+    grammar needed to author a rule, and the cross-tool invariants no single tool description can
+    state.
 - **Packaging.** The wheel now force-includes `skills/` as `gsheets/skills/` (was `skill/` →
   `gsheets/skill/`); both skills ship as package data. `tests/unit/test_pyproject.py` asserts each
   skill's `SKILL.md` and `references/*.md` are present on disk and in the built wheel.

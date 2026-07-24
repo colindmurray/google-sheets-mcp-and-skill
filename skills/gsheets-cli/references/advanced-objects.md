@@ -1,12 +1,15 @@
-# gsheets — advanced tier (~5%)
+# gsheets — advanced objects
 
-The fringe. This tier covers the per-cell deep reads (`inspect --rich-text`, `inspect --pivot`) and
-the advanced structural object CRUD (native Tables, banding, basic filter / filter views, slicers,
-spreadsheet props), plus developer metadata, charts, and the raw `batch` escape hatch. **Almost no
-task needs this** — most stop at `basic.md` (read → write → verify) or `intermediate.md` (CF, data
-validation, structure base actions, data-ops, dimensions, export). Reach here only when a specific
-sheet uses one of these niche objects. **Read `basic.md` and `intermediate.md` first** — this tier
-assumes their commands, the `--json`-before-subcommand rule, the auto field-mask, A1 addressing, and
+> **Reference 3 of 3 — the fringe (~5%).** **Read `reading-and-writing.md` and
+> `rules-and-structure.md` first**; this tier assumes both. Almost no task gets here.
+
+Specialised **objects**, plus the escape hatch: the per-cell deep reads (`inspect --rich-text`,
+`inspect --pivot`), the structural object CRUD (native Tables, banding, basic filter / filter views,
+slicers, spreadsheet props), developer metadata, charts, and the raw `batch` escape hatch. **Almost
+no task needs this** — most stop at `reading-and-writing.md` (read → write → verify) or
+`rules-and-structure.md` (CF, data validation, structure base actions, data-ops, dimensions,
+export). Reach here only when a specific sheet actually uses one of these objects. This tier
+assumes the earlier two's commands, the `--json`-before-subcommand rule, the auto field-mask, A1 addressing, and
 the read-it-back loop. Examples use `<YOUR_SPREADSHEET_ID>`.
 
 ## Reading
@@ -49,7 +52,7 @@ A cell with `textFormatRuns` gains a `runs` array; a cell with a single whole-ce
   `bold`/`italic`/`underline`/`strike`), with `link <uri>` last. In the CLI's human output the
   `runs A2: ` prefix is dropped (the cell line already leads with the address).
 - `hyperlink` is a **read-only** Google field. You set an in-cell link by writing a `=HYPERLINK(...)`
-  formula via `write-values` (see `basic.md`), never by writing `hyperlink` back.
+  formula via `write-values` (see `reading-and-writing.md`), never by writing `hyperlink` back.
 
 In `--compact` mode, two cells differing in `runs`/`hyperlink` never merge into one run, and a run
 carries `runs`/`hyperlink` when present.
@@ -112,7 +115,7 @@ All of the structural-object CRUD below runs through `structure --action <ACTION
 '{...}'`. `--action` is **required**; sheet-scoped mutating actions need `--sheet` (→ `missing_sheet`
 otherwise); `spreadsheet_props` is spreadsheet-scoped and needs no `--sheet`. Each action consumes
 only its listed `params` keys — an unknown key raises `unknown_param`. Read everything back with
-`structure --action read` (see `intermediate.md` for that envelope's `tables`/`basicFilter`/
+`structure --action read` (see `rules-and-structure.md` for that envelope's `tables`/`basicFilter`/
 `filterViews`/`bandedRanges`/`slicers` shapes). `--params-json` accepts `@file.json`.
 
 ### Native Tables
@@ -275,7 +278,7 @@ gsheets --json read-values <YOUR_SPREADSHEET_ID> \
   --data-filter-json '[{"developerMetadataLookup":{"metadataKey":"section"}}]'
 ```
 
-  See `intermediate.md`'s read-path data-filter grammar for the full selector forms (`a1` /
+  See `rules-and-structure.md`'s read-path data-filter grammar for the full selector forms (`a1` /
   `gridRange` / `developerMetadataLookup`).
 
 ### Charts
@@ -320,10 +323,10 @@ gsheets batch <YOUR_SPREADSHEET_ID> --requests-json @requests.json
 
 ## Pointers
 
-- Stop one tier down for anything routine: `basic.md` (read → write → verify) and `intermediate.md`
+- Step back a file for anything routine: `reading-and-writing.md` (read → write → verify) and `rules-and-structure.md`
   (conditional formatting, data validation, base `structure` actions, `data-ops`, `dimensions`,
   `comments`, `read-many`, `export`).
-- For the structural-read envelope these objects round-trip through, see `intermediate.md`'s
+- For the structural-read envelope these objects round-trip through, see `rules-and-structure.md`'s
   `structure --action read` section.
 - `gsheets <cmd> --help` is the authoritative, always-current source for the exact flags of any
   command.
