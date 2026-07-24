@@ -54,8 +54,8 @@ column *is* the record and you want each column as one inner array.
 gsheets read-values <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D100' --major columns
 ```
 
-`--major {rows,columns}` (default `rows`). MCP names the same knob `major_dimension` (Google's own
-`majorDimension` spelling). The result echoes the chosen mode back under `"major"`.
+`--major {rows,columns}` (default `rows`) is Google's own `majorDimension`. The result echoes the
+chosen mode back under `"major"`.
 
 **Address by data filter (`--data-filter-json`).** Instead of A1 `ranges`, select cells by **grid
 range** or **developer metadata** — read a named block without knowing its current A1 (rows shift,
@@ -70,7 +70,7 @@ gsheets --json read-values <YOUR_SPREADSHEET_ID> --data-filter-json '[
 ```
 
 `ranges` and `--data-filter-json` are the **two mutually exclusive addressing paths** — pass exactly
-one (CLI accepts `@file.json`; MCP arg is `data_filters`). An invalid selector → `bad_data_filters`.
+one (`@file.json` is accepted for the JSON payload). An invalid selector → `bad_data_filters`.
 `read-many` accepts per-request `data_filters` in values mode. Pair developer-metadata addressing
 with `metadata` (advanced) to set the keys you look up here.
 
@@ -108,8 +108,9 @@ gsheets --json read-conditional-formats <YOUR_SPREADSHEET_ID> --range 'Sheet1!A1
 
 `--range` carries its own sheet, so it is **mutually exclusive with `--sheet`** (both → `conflicting_args`).
 
-A read-heavy tab whose serialized rules would blow the MCP token cap: pass `out_path` (MCP only) to
-spill them to a local file and get back a small handle (the CLI just redirects stdout).
+A read-heavy tab whose serialized rules would swamp your context: redirect them to a file
+(`gsheets --json read-conditional-formats <ID> --sheet Sheet1 > rules.json`) and grep/jq what you
+need out of it.
 
 **Round-trip note (text-valued equality rules):** a UI-created "text is exactly X" rule reads back as
 `NUMBER_EQ(X)`, which Google rejects on write — so `set-conditional-format` transparently coerces a
@@ -209,11 +210,11 @@ gsheets comments <YOUR_SPREADSHEET_ID> --include-deleted   # also include delete
 
 ### Retry & backoff (opt-in; OFF by default)
 
-Since v0.4.0 a 429/5xx **fails fast** unless you opt in. Three mutually-exclusive styles, on either
-adapter; batching (wide multi-range reads, `read-many`, `export`) remains the real quota fix — retry
+Since v0.4.0 a 429/5xx **fails fast** unless you opt in. Two mutually-exclusive styles (flags or
+env); batching (wide multi-range reads, `read-many`, `export`) remains the real quota fix — retry
 only smooths transient bursts.
 
-- **CLI (global flags, before the subcommand).** `--default-backoff-strategy` is the one-shot
+- **Global flags, before the subcommand.** `--default-backoff-strategy` is the one-shot
   catch-all preset (full-jitter exponential, 4 retries, 60s overall deadline). For granular control:
   `--retries N`, `--backoff {none,fixed,exponential,exponential-jitter}`, `--retry-base-delay S`,
   `--retry-max-delay S`, `--retry-deadline S` (`<= 0` ⇒ no overall cap), `--retry-after-cap S`,
@@ -226,10 +227,6 @@ only smooths transient bursts.
     read-many --requests-json @batch.json
   ```
 
-- **MCP.** Every tool takes an optional per-call `retry` object: omit it for no retry, `{"preset":
-  "default"}` for the sensible preset, `{"preset":"off"}` to force disable, or granular fields
-  (`strategy`, `max_retries`, `base_delay`, `max_delay`, `deadline`, `honor_retry_after`,
-  `retry_after_cap`). `preset` and granular fields are mutually exclusive.
 - **Env.** `GSHEETS_BACKOFF_STRATEGY` (any non-`none` value enables retry) plus the `GSHEETS_BACKOFF_*`
   knobs; legacy `GSHEETS_MAX_RETRIES > 0` still enables it. When a call still fails after exhausting
   retry, the structured error carries `retries` and `waitedMs`.

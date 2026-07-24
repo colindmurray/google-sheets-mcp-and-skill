@@ -35,7 +35,7 @@ Confirm the 1:1 mapping is complete across all entrypoints:
 - [ ] Pydantic mirror model in `models.py` (same field names as the core dict)
 - [ ] MCP tool registered with correct `ToolAnnotations` + an example-rich docstring
 - [ ] CLI subcommand added (flags map 1:1 to core kwargs; supports `--json`)
-- [ ] Docs updated (`SKILL.md` command map, `skill/references/*`, `docs/ARCHITECTURE.md`)
+- [ ] Docs updated (`skills/gsheets-cli/**` AND `skills/gsheets-mcp/**`, `docs/ARCHITECTURE.md`)
 - [ ] CRUD symmetry preserved where applicable (writable ⇒ readable back)
 
 ## Security & privacy (this repo is public)

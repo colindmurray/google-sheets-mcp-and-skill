@@ -199,9 +199,14 @@ the two entrypoints stay in lockstep.
    are global — resolved once in `main()` and active for every subcommand — so a new
    subcommand inherits them for free; nothing to add per-command.)
 
-7. **Document it** in `skill/SKILL.md`'s command map and the relevant
-   `skill/references/*.md`, and add it to `docs/ARCHITECTURE.md`'s function table if it
-   is a new capability.
+7. **Document it in BOTH skills** — `skills/gsheets-cli/` (command map + the relevant
+   `references/*.md`, in CLI terms) and `skills/gsheets-mcp/` (routing table + the
+   relevant `references/*.md`, in `sheets_*` tool terms) — and add it to
+   `docs/ARCHITECTURE.md`'s function table if it is a new capability. Keep the two in
+   lockstep the same way the two adapters are. Note the division of labour: the MCP
+   tool's own docstring carries its arguments and return shape, so the MCP skill adds
+   only what spans tools (selection, sequencing, cross-tool traps) — do not duplicate
+   the docstring there.
 
 8. **Run `uv run pytest`** — including the boundary-guard test — and make sure the new
    model/tool/subcommand all reference the same field names.
@@ -354,9 +359,9 @@ Guidelines:
   practical).
 - Make sure `uv run pytest` is green (including the boundary-guard test) before opening
   the PR.
-- Update docs in the same PR as the code: `SKILL.md` / `skill/references/*` for
-  user-facing behavior, `docs/ARCHITECTURE.md` for design changes, and `CHANGELOG.md`
-  under the `Unreleased` section.
+- Update docs in the same PR as the code: `skills/gsheets-cli/**` and
+  `skills/gsheets-mcp/**` for user-facing behavior, `docs/ARCHITECTURE.md` for design
+  changes, and `CHANGELOG.md` under the `Unreleased` section.
 - Use the PR template; explain *what* changed and *why*, and confirm no real
   IDs/credentials/personal info were added.
 - If you must change a public core signature that other modules depend on, change it

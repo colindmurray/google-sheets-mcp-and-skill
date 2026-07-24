@@ -2,9 +2,9 @@
 
 `gsheets` is the CLI front-end of this project; the MCP server `google-sheets-mcp` exposes the same
 core as tools. Both are thin adapters over one pure Sheets core, so behavior is identical from
-either entrypoint. This guide is a quick orientation; the bundled skill carries the same material
-for AI tools (`skill/SKILL.md` + `skill/references/`), and `gsheets <cmd> --help` is the
-always-current source of truth for exact flags.
+either entrypoint. This guide is a quick orientation; the bundled skills carry the same material for
+AI tools — one per transport, `skills/gsheets-cli/` and `skills/gsheets-mcp/` — and
+`gsheets <cmd> --help` is the always-current source of truth for exact flags.
 
 ## What it reads that generic tooling doesn't
 

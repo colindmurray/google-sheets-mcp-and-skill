@@ -1,17 +1,18 @@
 ---
-name: gsheets
+name: gsheets-cli
 description: >-
-  Read and write Google Sheets via the `gsheets` CLI/MCP: characterize a whole region in one call
-  (cells + merges + conditional formats + tables), read values AND formulas side by side, collapse
-  repeated formulas to per-column templates, and read cell formatting/colors (effectiveFormat — what
-  actually renders), conditional-format rules, data validation, merges, named/protected ranges,
-  frozen panes, native tables, filter views, banding, pivots, slicers, and developer metadata; read
-  and post Drive comments; export to PDF/Excel/CSV; read many spreadsheets at once; and write values,
-  formatting, rules, and structure back safely. Read output as text, JSON, JSONL, CSV, TSV, or
-  markdown. Use when inspecting, auditing, or editing a Google Spreadsheet, tab, cell, or range —
-  especially its formulas, colors, conditional formatting, validation, tables, filters, or layout,
-  or when the user pastes a spreadsheet URL or ID. Prefer this over generic HTTP, Apps Script, or a
-  raw Sheets API call.
+  Read and write Google Sheets by running the `gsheets` command-line tool in a shell: characterize a
+  whole region in one call (cells + merges + conditional formats + tables), read values AND formulas
+  side by side, collapse repeated formulas to per-column templates, and read cell formatting/colors
+  (effectiveFormat — what actually renders), conditional-format rules, data validation, merges,
+  named/protected ranges, frozen panes, native tables, filter views, banding, pivots, slicers, and
+  developer metadata; read and post Drive comments; export to PDF/Excel/CSV; read many spreadsheets
+  at once; and write values, formatting, rules, and structure back safely. Read output as text,
+  JSON, JSONL, CSV, TSV, or markdown. Use when inspecting, auditing, or editing a Google
+  Spreadsheet, tab, cell, or range — especially its formulas, colors, conditional formatting,
+  validation, tables, filters, or layout, or when the user pastes a spreadsheet URL or ID — AND you
+  can execute shell commands with `gsheets` on PATH. Prefer this over generic HTTP, Apps Script, or
+  a raw Sheets API call.
 ---
 
 # gsheets — Google Sheets from the command line
@@ -21,6 +22,14 @@ the formulas behind them, the format a cell actually renders (`effectiveFormat`,
 conditional-format results), conditional-format rules serialized into terse readable lines, data
 validation, merges, named/protected ranges, and frozen panes. Anything writable is readable back,
 reads use tight field masks (never the whole grid), and writes default to USER_ENTERED.
+
+> **Transport check — read this first.** This skill drives the **`gsheets` binary over a shell**.
+> It is the right skill only when you can run shell commands and `gsheets` is on `PATH` (verify
+> once with `gsheets auth status`). The same core is also published as an MCP server whose tools
+> are named `sheets_*` (`sheets_overview`, `sheets_inspect`, …). **If you can see `sheets_*` tools
+> in your available tools, use the `gsheets-mcp` skill instead** — calling them directly beats
+> shelling out, and none of the shell examples below apply. If you have neither, stop and tell the
+> user the tool is not installed rather than falling back to raw HTTP or Apps Script.
 
 ## When to use
 
@@ -65,10 +74,9 @@ Conventions:
   latter is an argparse error). `--format {text,json,jsonl,csv,tsv,markdown}` (default `text`)
   chooses the output serialization; `--json` is a permanent alias for `--format json`. See "Choosing
   an output format" below.
-- Writing a big read straight to a file is MCP-only. The MCP read tools (`read_values`, `inspect`,
-  `describe`, `formula_patterns`, `read_many`, `read_conditional_formats`) take an `out_path` arg that
-  writes the rendered read to disk and returns a tiny handle instead of the payload. The CLI has no
-  `out_path` — redirect with the shell instead (`gsheets --format csv read-values <ID> <RANGE> > out.csv`).
+- Keep big reads out of context by redirecting to a file:
+  `gsheets --format csv read-values <ID> <RANGE> > out.csv`, then process the file (pandas/duckdb/jq)
+  instead of reading it back. There is no `out_path` flag — the shell redirect *is* the mechanism.
 - `gsheets <cmd> --help` is the source of truth for the exact, current flags of any command.
 
 ## Command map (Understand → Change → Escape hatch)
@@ -98,7 +106,7 @@ Understand (read-only):
   to know the region's SHAPE (column types + density) before paying for cells.
 - `read-values <ID> <RANGE...>` — just values; `--render {plain,unformatted,formula,all}`
   (`all` returns formulas and computed values side by side). `--major {rows,columns}` (default
-  `rows`; MCP `major_dimension`) transposes the read so a column-oriented region comes back keyed by
+  `rows`) transposes the read so a column-oriented region comes back keyed by
   column. Address by A1 ranges OR by `--data-filter-json` (exactly one). For big reads: `--diff-only` drops the duplicate `computed` matrix on static sheets;
   `--max-cells N` fails fast instead of blowing the token cap (and for pure value dumps, `export
   csv` is better than either — see the gotchas).
@@ -299,9 +307,8 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   and trivially saturate it (every call then 429s). The fix is to batch: pass many ranges to a
   single `read-values` call (one `batchGet`), and read many spreadsheets with one `read-many`,
   instead of one call per range/file. **Retry is OFF by default** (since v0.4.0) — a 429/5xx fails
-  fast unless you opt in. On the CLI add the global `--default-backoff-strategy` (sensible
-  exponential-jitter preset) or `--no-retry`/granular `--retries`/`--backoff` flags; over MCP pass a
-  per-call `retry` object (`{"preset":"default"}` or granular fields); or enable it via env
+  fast unless you opt in. Add the global `--default-backoff-strategy` (sensible exponential-jitter
+  preset) or `--no-retry`/granular `--retries`/`--backoff` flags, or enable it via env
   (`GSHEETS_BACKOFF_STRATEGY=exponential_jitter`, or legacy `GSHEETS_MAX_RETRIES=4`). But retry only
   smooths bursts — batching is what actually keeps you under the cap.
 - Native-table dropdowns are invisible to `inspect`. A column constrained by a *Table* column type
@@ -314,7 +321,7 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   computed value side by side) or `inspect`; reach for `unformatted` only once you know the shape.
 - `--render all` duplicates the grid on staticized sheets. It returns `values` (formulas/literals)
   AND a parallel `computed` matrix; on a sheet whose formulas were frozen to literals the two are
-  identical, so half the payload is dead weight. Pass `--diff-only` (MCP `diff_only=true`) to null
+  identical, so half the payload is dead weight. Pass `--diff-only` to null
   out every `computed` cell that equals `values` and drop `computed` entirely for a fully-static
   range — a `null` hole means "computed == values here". This roughly halves a formula-sheet read
   while staying index-aligned; genuine formulas (where computed differs) are still emitted.
@@ -326,8 +333,8 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   serializes the values straight to a local file (no token cap, no null-key bloat); a whole-tab
   `read-values` can be megabytes and only fails at the *caller's* token limit. CSV can't carry
   formulas, so the pattern is: `export csv` for the values + a **narrow-band** `read-values --render
-  formula` (or `all`) over just the formula columns. As a guardrail, `--max-cells N` (MCP
-  `max_cells`) makes a read fail fast with `result_too_large` instead of returning a giant payload —
+  formula` (or `all`) over just the formula columns. As a guardrail, `--max-cells N`
+  makes a read fail fast with `result_too_large` instead of returning a giant payload —
   it counts the padded **rectangle** (rows × cols, blanks included), so size it to the range area,
   not the populated-cell count (a 187×86 range is 16,082 cells even if mostly empty).
 - Budget reads against the per-user read-RPM quota — it is small. Even a *single* sequential caller
@@ -347,7 +354,7 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
   compare a raw read-back color against a literal `#RRGGBB` WITHOUT resolving, a theme-colored cell
   will not match — that is expected, not a bug.
 - Read AND write by a durable anchor when A1 shifts. `read-values` accepts
-  `--data-filter-json` (MCP `data_filters`) instead of A1 — each selector is exactly one of
+  `--data-filter-json` instead of A1 — each selector is exactly one of
   `{"a1":...}`, `{"gridRange":...}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`.
   The write side is symmetric: `write-values-by-data-filter` / `clear-by-data-filter` take the same
   selectors. Pair any of them with a `metadata --action create` anchor so a region survives inserted

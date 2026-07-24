@@ -35,16 +35,10 @@ is the authoritative, always-current flag source for any single command.
   `|`/newlines escaped so a cell never corrupts the table) and `field: value` key/value lines for a
   structured read — it never errors on a structured shape, but it is verbose, so for bulk values
   prefer csv to a file: `gsheets --format csv read-values <ID> <RANGE> > out.csv`.
-- **MCP file-output (`out_path`).** The CLI pipes (`> out.csv`); the MCP tool's output goes into the
-  agent's context, so for a big read pass `out_path` to one of the six `output_format` read tools —
-  `sheets_read_values` / `sheets_inspect` / `sheets_describe` / `sheets_formula_patterns` /
-  `sheets_read_many` / `sheets_read_conditional_formats`. The tool writes `render(result, output_format)` to that local file (utf-8;
-  `text` is not a file format, so it resolves to `json`) and returns a small handle instead of the
-  payload: `{ok, path, format, rows, cols, bytes, preview}` where `format` is one of
-  `csv|tsv|jsonl|json`, `rows`/`cols` describe the value grid (jsonl/json set `rows` = record count,
-  `cols` = 0), and `preview` is the first ~5 rows/records. The parent directory must already exist
-  (it is never created), and credential/config paths are refused (`bad_out_path`). These tools modify
-  no spreadsheet, so they stay read-only. `out_path` is MCP-only — the CLI pipes stdout instead.
+- **Big reads go to a file, not into context.** Redirect stdout and then process the file with
+  pandas/duckdb/jq: `gsheets --format csv read-values <ID> <RANGE> > out.csv`. The shell redirect is
+  the whole mechanism — there is no file-output flag. Reason about a *summary* of a large read
+  (`describe`, `formula-patterns`, `read-many --mode summary`), never the raw dump.
 - **The positional `spreadsheet_id` is always the first argument** of every Sheets subcommand.
 - **`USER_ENTERED` is the write default.** Input is parsed like a user typing: `=SUM(B:B)` becomes
   a live formula, `5`/`$10`/`50%`/`2026-06-09` coerce to typed values. `--input raw` stores the
@@ -205,9 +199,9 @@ For a **pure value dump**, prefer `export --format csv` (writes a local file, no
 wide `read-values`; CSV can't carry formulas, so pair it with a narrow-band `--render formula` read
 over just the formula columns. Reads draw on a small per-user read-RPM quota shared by all callers —
 favor a few wide multi-range reads and `export` over many small calls. **Retry is OFF by default**
-(v0.4.0): a 429/5xx fails fast unless you opt in (CLI `--default-backoff-strategy`; MCP `retry`
-object; or `GSHEETS_BACKOFF_*` env) — see `intermediate.md` for the retry-config details. Batching
-is still the real fix; backoff only smooths bursts.
+(v0.4.0): a 429/5xx fails fast unless you opt in (`--default-backoff-strategy`, the granular
+`--retries`/`--backoff` flags, or `GSHEETS_BACKOFF_*` env) — see `intermediate.md` for the
+retry-config details. Batching is still the real fix; backoff only smooths bursts.
 
 ### read-conditional-formats
 
