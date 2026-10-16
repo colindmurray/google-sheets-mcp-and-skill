@@ -154,7 +154,7 @@ Change (writes):
   one interface for merges, named/protected ranges, frozen panes, tab color, row/col groups, plus
   native tables, banding, basic filter / filter views, slicers, and spreadsheet props
   (`title`/`locale`/`timeZone`). `--action read` also surfaces
-  `tables`/`basicFilter`/`filterViews`/`bandedRanges`/`slicers` per sheet (see `intermediate.md`).
+  `tables`/`basicFilter`/`filterViews`/`bandedRanges`/`slicers` per sheet (see `rules-and-structure.md`).
 - `data-ops <ID> --action {find_replace,delete_duplicates,trim_whitespace,sort_range,text_to_columns,auto_fill,copy_paste,cut_paste}` —
   range-level data operations in one batch request each (find/replace, dedupe, trim, sort,
   split-to-columns, autofill, copy/cut-paste). Mirrors `structure`'s `--params-json` shape.
@@ -368,24 +368,24 @@ gsheets read-conditional-formats <YOUR_SPREADSHEET_ID> --sheet Sheet1
 
 ## Detailed references — read on demand
 
-The command map above summarizes the whole surface. Full per-command details live in three tiers,
-split by how often a task needs them and each organized Reading / Writing / Operations. Read only
-the tier the task calls for (pull in a lower tier first if you haven't):
+The command map above summarizes the whole surface. Full per-command details live in three files,
+split by **what you are operating on** — which also tracks how often a task needs them. Read them in
+order and stop at the one that answers your task; each assumes the ones before it.
 
-- **`references/basic.md`** — ~80% of tasks, the everyday loop. `overview`, `describe` (the
+- **`references/reading-and-writing.md`** — **start here.** Operating on cells; ~80% of tasks, the everyday loop. `overview`, `describe` (the
   compact region profiler), `inspect` (core flags), `read-values`, `read-conditional-formats`;
   `write-values`, `append-rows`, `clear`, `format`; `manage-sheets`. Also the core concepts: A1
   addressing, the global `--json`/`--scopes` placement, `USER_ENTERED`, effective-vs-userEntered
   format, and the conditional-format line grammar. Start here for any ordinary read or edit.
-- **`references/intermediate.md`** — ~15%, when the task needs more than the basics: collapsing a
-  wide grid's repeated formulas with `formula-patterns`; writing conditional-format rules
-  (`set-conditional-format`) or data validation (`set-validation`); reading or posting Drive
+- **`references/rules-and-structure.md`** — operating on the sheet *around* the cells; ~15%:
+  collapsing a wide grid's repeated formulas with `formula-patterns`; writing conditional-format
+  rules (`set-conditional-format`) or data validation (`set-validation`); reading or posting Drive
   `comments`; `export` to a file; `read-many` across spreadsheets; bulk `data-ops` (find/replace,
   dedupe, sort, split, …); row/column `dimensions`; and the common `structure` edits (merges,
   named/protected ranges, freeze, groups) plus `structure --action read`.
-- **`references/advanced.md`** — ~5%, the niche surface you rarely need: `inspect --rich-text` /
-  `--pivot`; `structure`'s native Tables, banding, filter views, and slicer CRUD plus
-  `spreadsheet_props`; developer `metadata`; `charts`; and the raw `batch` escape hatch.
+- **`references/advanced-objects.md`** — specialised objects and the escape hatch; ~5%, rarely
+  needed: `inspect --rich-text` / `--pivot`; `structure`'s native Tables, banding, filter views, and
+  slicer CRUD plus `spreadsheet_props`; developer `metadata`; `charts`; and the raw `batch`.
 
 `gsheets <cmd> --help` is the authoritative, always-current flag reference for any single command.
 

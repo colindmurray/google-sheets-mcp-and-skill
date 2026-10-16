@@ -1,8 +1,11 @@
-# gsheets (MCP) — common workflows
+# gsheets (MCP) — reading & writing cells
 
-The ~80% tier: complete tool sequences for the journeys that come up constantly. Each tool's own
-description remains the authority on its arguments and return shape — what follows is the **order**,
-the **decision points**, and the **stopping conditions**.
+> **Reference 1 of 3 — start here.** `reading-and-writing.md` (~80% of tasks) →
+> `rules-and-structure.md` (~15%) → `advanced-objects.md` (~5%). The later two assume this one.
+
+Operating on **cells**: complete tool sequences for the journeys that come up constantly. Each
+tool's own description remains the authority on its arguments and return shape — what follows is the
+**order**, the **decision points**, and the **stopping conditions**.
 
 A note that applies to every journey below: stop as soon as you can answer the question. The most
 common waste is climbing the whole read ladder when `sheets_overview` plus one `sheets_describe`
@@ -110,7 +113,7 @@ its own sheet.
 [Sheet1!A2:A100] if CUSTOM_FORMULA(=$B2>10) -> bg #FFCDD2 bold
 ```
 
-The full grammar — and how to author one — is in `structure-and-rules.md`.
+The full grammar — and how to author one — is in `rules-and-structure.md`.
 
 ---
 
@@ -170,7 +173,7 @@ almost always right.
 
 **When A1 may have moved.** If rows could have been inserted since you last looked — or if this is a
 block you will come back to — use `sheets_write_values_by_data_filter` with a developer-metadata
-selector instead of a literal range. See `structure-and-rules.md`.
+selector instead of a literal range. See `rules-and-structure.md`.
 
 ---
 
@@ -211,7 +214,7 @@ read first.
 is all-or-nothing.
 
 **Static vs conditional.** `sheets_format` sets a colour that is always there. If the colour should
-depend on the data, that is `sheets_set_conditional_format` instead (see `structure-and-rules.md`) —
+depend on the data, that is `sheets_set_conditional_format` instead (see `rules-and-structure.md`) —
 and note the two are visible separately in a later read as `userEnteredFormat` vs `effectiveFormat`.
 
 **Laying a sheet out from scratch** also means column widths and row heights: `sheets_dimensions`
@@ -241,8 +244,8 @@ your context.
 
 ## See also
 
-- `structure-and-rules.md` (~15%) — the conditional-format grammar, index-safe rule edits,
+- `rules-and-structure.md` (~15%) — the conditional-format grammar, index-safe rule edits,
   validation, structural reads and mutations, dimensions, data operations, insert-proof addressing,
   comments, export.
-- `niche.md` (~5%) — rich-text/pivot/chip reads, tables, banding, filter views, slicers, metadata,
+- `advanced-objects.md` (~5%) — rich-text/pivot/chip reads, tables, banding, filter views, slicers, metadata,
   charts, and the `sheets_batch` escape hatch.

@@ -1,12 +1,15 @@
-# gsheets — basic tier
+# gsheets — reading & writing cells
 
-The everyday read → write → verify loop, covering roughly 80% of what you do with a sheet:
-orient, read cells (values + formulas + formatting), read conditional-format rules, write values,
-append rows, clear, format a range, and manage tabs. Reach here first for any ordinary task; drop
-to `intermediate.md` only for the less-common operations (validation, data-ops, dimensions,
-structure, comments, export) and `advanced.md` for fringe features (rich-text/pivot reads, charts,
-the raw `batch`). `gsheets <cmd> --help`
-is the authoritative, always-current flag source for any single command.
+> **Reference 1 of 3 — start here.** `reading-and-writing.md` (~80% of tasks) →
+> `rules-and-structure.md` (~15%) → `advanced-objects.md` (~5%). The later two assume this one.
+
+Operating on **cells**: the everyday read → write → verify loop, covering roughly 80% of what you do
+with a sheet. Orient, read cells (values + formulas + formatting), read conditional-format rules,
+write values, append rows, clear, format a range, and manage tabs. Reach here first for any ordinary
+task; go to `rules-and-structure.md` for the operations that shape the sheet *around* the cells
+(validation, data-ops, dimensions, structure, comments, export) and `advanced-objects.md` for the
+specialised objects (rich-text/pivot reads, tables, slicers, charts, the raw `batch`).
+`gsheets <cmd> --help` is the authoritative, always-current flag source for any single command.
 
 ## Core concepts
 
@@ -162,7 +165,7 @@ gsheets inspect <YOUR_SPREADSHEET_ID> 'Sheet1!A1:D20' --no-effective --no-user-e
 ```
 
 (`--compact` collapses both horizontal and vertical runs of identical cells; `--rich-text`,
-`--pivot`, and `--chips` exist but are advanced — see `advanced.md`.)
+`--pivot`, and `--chips` exist but are advanced — see `advanced-objects.md`.)
 
 ### read-values
 
@@ -184,14 +187,14 @@ A `values` entry that does **not** start with `=` is a **literal**, not a formul
 passes literals through). `--render formula` renders **address-keyed** in text (`C5: =SUM(...)`, one
 line per non-empty cell) — the natural shape for sparse formula data. To understand the formula
 *logic* across a wide grid without pulling thousands of near-identical formulas, reach for
-`formula-patterns` (one template per column; see `intermediate.md`).
+`formula-patterns` (one template per column; see `rules-and-structure.md`).
 
 Optional knobs:
 
 | Flag | Effect |
 |---|---|
 | `--major {rows,columns}` | Google `majorDimension`. `rows` (default) emits one inner list per row; `columns` emits one inner list per column — handy for a wide grid of uniform helper columns. The chosen mode rides back on the result as `major`. |
-| `--data-filter-json '[…]'` | Symbolic, **insert-proof** addressing **instead of** the positional ranges. A JSON list of selectors, each one of `{"a1":"Sheet1!A1:B10"}`, `{"gridRange":{…}}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`. Reads via `batchGetByDataFilter`. Mutually exclusive with `ranges` (exactly one). See `advanced.md` → metadata-addressed reads. |
+| `--data-filter-json '[…]'` | Symbolic, **insert-proof** addressing **instead of** the positional ranges. A JSON list of selectors, each one of `{"a1":"Sheet1!A1:B10"}`, `{"gridRange":{…}}`, or `{"developerMetadataLookup":{"metadataKey":"block:totals"}}`. Reads via `batchGetByDataFilter`. Mutually exclusive with `ranges` (exactly one). See `advanced-objects.md` → metadata-addressed reads. |
 | `--diff-only` | `--render all` only: null out each `computed` cell that equals `values`, and drop `computed` entirely for a fully-static range. A `null` hole means "computed == values here"; the matrix stays index-aligned. Roughly halves a staticized formula-sheet read. |
 | `--max-cells N` | Fail with a structured `result_too_large` error if the read spans more than `N` cells, instead of returning a payload that only fails at the caller's token cap. Counts the padded **rectangle** (rows × cols, blanks included), so size it to the range area. Default: unlimited. |
 
@@ -200,7 +203,7 @@ wide `read-values`; CSV can't carry formulas, so pair it with a narrow-band `--r
 over just the formula columns. Reads draw on a small per-user read-RPM quota shared by all callers —
 favor a few wide multi-range reads and `export` over many small calls. **Retry is OFF by default**
 (v0.4.0): a 429/5xx fails fast unless you opt in (`--default-backoff-strategy`, the granular
-`--retries`/`--backoff` flags, or `GSHEETS_BACKOFF_*` env) — see `intermediate.md` for the
+`--retries`/`--backoff` flags, or `GSHEETS_BACKOFF_*` env) — see `rules-and-structure.md` for the
 retry-config details. Batching is still the real fix; backoff only smooths bursts.
 
 ### read-conditional-formats
@@ -253,7 +256,7 @@ fmt_token     := "bg " hex | "fg " hex | "bold" | "italic" | "underline" | "stri
   ```
 
 The `index` is the only write-addressing source of truth — there is no `priority` field; array
-order *is* priority. (Writing/editing these rules is `set-conditional-format`, in `intermediate.md`.)
+order *is* priority. (Writing/editing these rules is `set-conditional-format`, in `rules-and-structure.md`.)
 
 ## Writing
 
@@ -285,7 +288,7 @@ gsheets write-values <YOUR_SPREADSHEET_ID> \
 Pass **either** `RANGE` + `--values-json` **or** `--data-json`, never both (→ `conflicting_args`);
 the single-range form needs both halves (→ `missing_args`). `write-values` *overwrites* the target
 — read the range first if it may hold data. To write by a durable, insert-proof anchor instead of a
-literal A1, use `write-values-by-data-filter` (see `intermediate.md` → address by data filter).
+literal A1, use `write-values-by-data-filter` (see `rules-and-structure.md` → address by data filter).
 
 ### append-rows
 
@@ -326,7 +329,7 @@ gsheets clear <YOUR_SPREADSHEET_ID> 'Sheet1!A2:D100' --no-values --validation # 
 Values-only is a fast `values.batchClear`; adding any of formats/validation/notes routes through a
 `batchUpdate` whose fields mask covers exactly the requested subfields. **Destructive** — confirm
 and read the range first. To clear values by a durable, insert-proof anchor instead of a literal A1,
-use `clear-by-data-filter` (see `intermediate.md` → address by data filter).
+use `clear-by-data-filter` (see `rules-and-structure.md` → address by data filter).
 
 ### format
 
@@ -389,13 +392,13 @@ unknown `params` key raises `unknown_param`.
 
 Returns `{"action", "sheet": {"sheetId", "title", "index"}}` — `add`/`duplicate` give you the new
 `sheetId` immediately for a create-then-populate flow. (Row/column operations are a different
-command, `dimensions`, in `intermediate.md`.)
+command, `dimensions`, in `rules-and-structure.md`.)
 
 ## See also
 
-- `intermediate.md` (~15%) — `set-validation`, `set-conditional-format` (writing CF rules),
+- `rules-and-structure.md` (~15%) — `set-validation`, `set-conditional-format` (writing CF rules),
   `data-ops`, `dimensions`, `structure` base edits + `--action read`, `comments`, `export`,
   `read-many`.
-- `advanced.md` (~5%) — `inspect --rich-text` / `--pivot`, structure's tables/banding/filter-views/
+- `advanced-objects.md` (~5%) — `inspect --rich-text` / `--pivot`, structure's tables/banding/filter-views/
   slicers CRUD, `metadata`, `charts`, the `batch` escape hatch.
 - `gsheets <cmd> --help` — the authoritative, always-current flag source for any single command.

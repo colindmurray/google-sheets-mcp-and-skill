@@ -1,8 +1,10 @@
-# gsheets (MCP) — niche surface
+# gsheets (MCP) — advanced objects
 
-The ~5% tier. Almost no task needs this. Reach here only when a specific sheet actually uses one of
-these objects, or when a typed tool has told you it cannot do what you need. Read
-`common-workflows.md` and `structure-and-rules.md` first.
+> **Reference 3 of 3 — the fringe (~5%).** **Read `reading-and-writing.md` and
+> `rules-and-structure.md` first**; this tier assumes both. Almost no task gets here.
+
+Specialised **objects**, plus the escape hatch. Reach here only when a specific sheet actually uses
+one of these objects, or when a typed tool has told you it cannot do what you need.
 
 ---
 
@@ -85,9 +87,9 @@ non-destructive **filter views**.
   a condition, never a visible list — so every "keep only X" intent has to be inverted into "hide
   everything else" before you can express it. This is the most common modelling mistake here.
 - The `condition` reuses the conditional-format grammar and the same 19-type allowlist (see
-  `structure-and-rules.md`); the data-validation-only types are rejected.
+  `rules-and-structure.md`); the data-validation-only types are rejected.
 - **A filter hides rows.** Before writing anything row-addressed, confirm what is concealed — see
-  `structure-and-rules.md`.
+  `rules-and-structure.md`.
 
 ### Slicers
 
@@ -113,7 +115,7 @@ writes. If dates are landing wrong, check them before debugging your values.
 ## Developer metadata
 
 Durable key/value anchors on a row/column span, a whole sheet, or the spreadsheet. They survive row
-and column inserts, which is the entire point — see `structure-and-rules.md` for the addressing
+and column inserts, which is the entire point — see `rules-and-structure.md` for the addressing
 workflow they enable. Anchor forms are all-or-nothing: a dimension anchor needs sheet, dimension,
 start, and end together; a sheet anchor needs just the sheet; a spreadsheet anchor needs nothing.
 
@@ -161,7 +163,7 @@ been added:
 
 ## See also
 
-- `common-workflows.md` (~80%) — the everyday journeys.
-- `structure-and-rules.md` (~15%) — conditional-format grammar and index safety, validation,
+- `reading-and-writing.md` (~80%) — the everyday journeys.
+- `rules-and-structure.md` (~15%) — conditional-format grammar and index safety, validation,
   structural reads and base mutations, dimensions, data operations, insert-proof addressing,
   comments, export.
